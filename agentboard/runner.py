@@ -350,6 +350,7 @@ class Child:
         self.stall = None            # {"kind": "retry"|"idle", "since": epoch, "count": n} as last persisted
         self.stall_error = None      # why the watchdog killed it (becomes the run's error text)
         self.stall_reset_at = None
+        self.probe_cache = {}        # per-run scratch for adapter probes (e.g. the transcript file Claude chose)
 
 
 class Runner:
@@ -903,7 +904,7 @@ class Runner:
         retry_after, idle_after = self.stall_policy(ch)
         t = now()
         view = type("Run", (), {"started": ch.started, "workdir": self.run_workdir(ch), "hermes_home": ch.hermes_home,
-                                "out_path": ch.out_path, "err_path": ch.err_path})
+                                "out_path": ch.out_path, "err_path": ch.err_path, "cache": ch.probe_cache})
         pr = a.probe(view)
         state = None
         if pr and pr.get("retry_count") and pr.get("retry_since"):

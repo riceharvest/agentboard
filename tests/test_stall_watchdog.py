@@ -119,6 +119,17 @@ def test_claude_probe_reads_transcript_api_errors(tmp_path, monkeypatch):
     p = H.probe_claude_transcript(run)
     assert p["retry_count"] == 2 and abs(t0 - p["retry_since"] - 600) < 5 and abs(t0 - p["last_progress_at"] - 800) < 5
     assert H.probe_claude_transcript(type("R", (), {"started": t0 + 100, "workdir": str(work)})) is None  # stale transcript
+    # a worker blocked on a subagent writes under the session dir, not the main file: that is life, not idle
+    os.utime(d / "s.jsonl", (t0 - 900, t0 - 900))
+    assert abs(H.probe_claude_transcript(run)["last_progress_at"] - (t0 - 800)) < 5  # only the old assistant record (tail is an api_error)
+    sub = d / "s" / "subagents"
+    sub.mkdir(parents=True)
+    (sub / "agent-1.jsonl").write_text("{}\n")
+    assert abs(H.probe_claude_transcript(run)["last_progress_at"] - time.time()) < 5
+    cache = {}
+    R2 = type("R", (), {"started": t0 - 1000, "workdir": str(work), "cache": cache})
+    H.probe_claude_transcript(R2)
+    assert cache["claude_path"].endswith("s.jsonl")
     assert H.ADAPTERS["claude"].idle_signal == "probe" and H.ADAPTERS["codex"].idle_signal == "out"
     assert H.ADAPTERS["agy"].idle_signal is None  # prints once at exit: never called idle
 

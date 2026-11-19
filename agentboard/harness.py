@@ -1521,22 +1521,29 @@ def _claude_projects_dir(workdir):
 
 def probe_claude_transcript(run):
     """Claude Code session transcript (~/.claude/projects/<cwd slug>/<session>.jsonl): newest file written since the run
-    started. `system`/`api_error` records with status 429 are the retry streak; any other record is progress."""
+    started. `system`/`api_error` records with status 429 are the retry streak; assistant/user records end it. For the idle
+    verdict last_progress_at also counts the file's mtime and anything written under its session dir (subagent transcripts,
+    tool results), except while the file's tail is an api_error (a retry loop also grows the file)."""
     wd = getattr(run, "workdir", None)
     if not wd:
         return None
-    d = _claude_projects_dir(wd)
-    try:
-        files = [f for f in d.glob("*.jsonl") if f.stat().st_mtime >= run.started - 2]
-    except OSError:
-        return None
-    if not files:
-        return None
-    path = max(files, key=lambda f: f.stat().st_mtime)
+    cache = getattr(run, "cache", None)
+    if cache is None:
+        cache = {}
+    path = cache.get("claude_path")
+    if path is None or not os.path.exists(path) or time.time() - cache.get("claude_at", 0) > 60:
+        try:  # re-pick now and then (a cheap glob of one project dir) so another session's file is not blamed for good
+            files = [f for f in _claude_projects_dir(wd).glob("*.jsonl") if f.stat().st_mtime >= run.started - 2]
+        except OSError:
+            return None
+        if not files:
+            return None
+        path = str(max(files, key=lambda f: f.stat().st_mtime))
+        cache["claude_path"], cache["claude_at"] = path, time.time()
     txt = _read_tail(path, 262144)
     if txt is None:
         return None
-    events = []
+    events, tail_err = [], False
     for line in txt.splitlines():
         if not line.startswith("{"):
             continue
@@ -1546,13 +1553,28 @@ def probe_claude_transcript(run):
         except (ValueError, TypeError):
             continue
         if o.get("type") == "system" and o.get("subtype") == "api_error":
+            tail_err = True
             e = o.get("error") or {}
             blob = f"{e.get('status', '')} {e.get('message', '')} {e.get('formatted', '')}"
             if e.get("status") == 429 or _RL_RE.search(blob):
                 events.append(("rl", ts, blob))
         elif o.get("type") in ("assistant", "user"):
+            tail_err = False
             events.append(("ok", ts, ""))
-    return _streak(events)
+    out = _streak(events)
+    alive = out["last_progress_at"] or 0
+    try:
+        if not tail_err:
+            alive = max(alive, os.stat(path).st_mtime)
+        sdir = Path(path[:-len(".jsonl")])
+        if sdir.is_dir():
+            for f in sdir.rglob("*"):
+                if f.is_file():
+                    alive = max(alive, f.stat().st_mtime)
+    except OSError:
+        pass
+    out["last_progress_at"] = alive or None
+    return out
 
 
 # ---------------------------------------------------------------- tiers and buckets

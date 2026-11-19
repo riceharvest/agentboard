@@ -7,7 +7,10 @@ work, on their own accounts or on your own OpenAI-compatible model server. It ro
 tier**, tracks token usage against your real subscription quotas, and fails over to another harness when one
 hits a limit.
 
-It is one SQLite file and a Python CLI with no dependencies: no server, no account, no UI.
+![ab tui: board lanes, running agents with live output, decisions, usage and ops](tui/docs/ab-tui.gif)
+
+It is one SQLite file and a Python CLI with no dependencies: no server, no account. `ab tui` (above) is an optional
+terminal dashboard to watch and steer it ([more](#terminal-ui-ab-tui)).
 
 Inspired by [Vercel Board](https://vercel.com/blog/introducing-vercel-board), but local and harness-agnostic. It
 also adds the runner, tiers and quota tracking.
@@ -114,7 +117,7 @@ Full agent-facing docs: [`agentboard/GUIDE.md`](agentboard/GUIDE.md), also print
 
 ## Terminal UI (`ab tui`)
 
-![ab tui: board lanes, running agents with live output, decisions, usage and ops](tui/docs/ab-tui.gif)
+![ab tui board view](tui/docs/board.png)
 
 A live dashboard and control panel in one terminal (Rust: [ratatui](https://ratatui.rs) + [tachyonfx](https://github.com/junkdog/tachyonfx)).
 It holds no board logic: it polls `ab snapshot --json` about once a second (events incrementally with `--events-after`) and every

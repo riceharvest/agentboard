@@ -427,7 +427,7 @@ class Runner:
         store.reap(c)
         for ch in list(self.children.values()):
             if ch.task_id in expired_ids:
-                self.kill(ch, "expired")
+                self.kill(ch, "expired", "task lease ran out (lease_until in the past while the run was still alive)")
         self.poll_children()
         for tid, why in wake_parked(c):
             self.log(f"{tid} park woke: {why}")
@@ -436,7 +436,7 @@ class Runner:
             self.reload()
         if stop == "now":
             for ch in list(self.children.values()):
-                self.kill(ch, "stopped")
+                self.kill(ch, "stopped", "runner stop requested (ab runner stop now)")
             deadline = now() + 20
             while self.children and now() < deadline:
                 time.sleep(1)
@@ -743,10 +743,11 @@ class Runner:
         ok, detail = H.interrupt_hermes_session(sid)
         self.log(f"run {ch.run_id} ({ch.task_id}): hermes session {sid} stop: {detail}")
 
-    def kill(self, ch, reason):
+    def kill(self, ch, reason, why=None):
         hermes_home = getattr(ch, "hermes_home", None)
         if ch.kill_reason is None:
             ch.kill_reason, ch.kill_at = reason, now()
+            ch.kill_why = why
             if ch.harness == "hermes" and not hermes_home:
                 # Non-isolated Hermes shares a gateway: the client's own SIGINT interrupt is
                 # best-effort (a detached transport client leaves accepted work running), so the
@@ -782,6 +783,11 @@ class Runner:
                 if ch.harness == "hermes" and hermes_home:
                     H.stop_hermes_gateway(hermes_home, force=True)
 
+    def _kill_requester(self, ch):
+        r = self.conn.execute("SELECT actor, ts FROM events WHERE task_id=? AND kind='kill_requested' ORDER BY id DESC LIMIT 1",
+                              (ch.task_id,)).fetchone()
+        return f"ab kill requested by {r['actor']}" if r else "ab kill requested (requester unknown)"
+
     def take_kill_requests(self):
         """`ab kill RUN` leaves run ids in the `kill_runs` setting; stop those runs and drop the handled ids."""
         ids = cfg(self.conn, "kill_runs") or []
@@ -800,7 +806,7 @@ class Runner:
         for rid in killed:
             ch = self.children[rid]
             self.log(f"run {rid} ({ch.task_id}): kill requested")
-            self.kill(ch, "killed")
+            self.kill(ch, "killed", self._kill_requester(ch))
         for rid, ch in list(self.children.items()):
             if ch.proc is not None:
                 rc = ch.proc.poll()
@@ -820,13 +826,14 @@ class Runner:
             c.execute("UPDATE tasks SET lease_until=? WHERE id=? AND owner=? AND status='claimed'",
                       (now() + RUNNER_LEASE, ch.task_id, ch.owner))
             if ch.kill_reason or (ch.timeout_s and now() - ch.started > ch.timeout_s):
-                self.kill(ch, ch.kill_reason or "timeout")
+                self.kill(ch, ch.kill_reason or "timeout",
+                          f"run exceeded its {int(ch.timeout_s)}s timeout")
             else:
                 t = c.execute("SELECT status, owner FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
                 if t and t["status"] == "cancelled":
-                    self.kill(ch, "cancelled")
+                    self.kill(ch, "cancelled", "task was cancelled (ab cancel)")
                 elif t and t["status"] == "claimed" and t["owner"] != ch.owner:
-                    self.kill(ch, "expired")
+                    self.kill(ch, "expired", f"task owner is now {t['owner']!r}, run was launched as {ch.owner!r} (claim lost or reassigned)")
 
     def finalize(self, ch, rc):
         c = self.conn
@@ -850,7 +857,7 @@ class Runner:
             else:
                 res = a.parse(0 if rc is None else rc, out, err)
             if ch.kill_reason:
-                res.ok, res.error_kind, res.error = False, ch.kill_reason, f"killed by runner: {ch.kill_reason}"
+                res.ok, res.error_kind, res.error = False, ch.kill_reason, f"killed by runner: {ch.kill_reason}" + (f" ({ch.kill_why})" if getattr(ch, "kill_why", None) else "")
             model = res.model or ch.model
             with tx(c):
                 t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()

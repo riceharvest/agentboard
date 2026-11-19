@@ -251,6 +251,12 @@ def test_kill_one_run_with_a_live_runner(abx, tmp_path):
                 break
             time.sleep(0.5)
         assert snap(abx)["runner"]["children"] == []
+        # every kill path leaves a distinct, human-readable cause in runs.detail
+        import sqlite3
+        db = sqlite3.connect(str(next(abx.home.glob("*.db"))))
+        det = dict(db.execute("select outcome, detail from runs where outcome in ('killed','cancelled')").fetchall())
+        assert det["killed"].startswith("killed by runner: killed (ab kill requested by "), det
+        assert det["cancelled"] == "killed by runner: cancelled (task was cancelled (ab cancel))", det
     finally:
         j(abx, "runner", "stop", "--now")
         try:

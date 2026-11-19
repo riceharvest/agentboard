@@ -22,7 +22,7 @@ def main(n=2000):
         for i in range(n):
             deps = random.sample(ids, k=min(len(ids), random.choice([0, 0, 0, 1, 2])))
             tid = store.add_task(c, "gen", f"generated task {i}", body="x" * 300, channel=random.choice(["main", "dev", "www/seo"]),
-                                 labels={"kind": random.choice(["a", "b"]), "owner": "lab"} if i % 3 == 0 else {},
+                                 labels={"kind": random.choice(["a", "b"]), "owner": "someone"} if i % 3 == 0 else {},
                                  priority=random.randint(0, 5), deps=deps, tier=random.choice(["low", "medium", "high", "max"]),
                                  harness="claude" if i % 17 == 0 else None, runnable=(i % 10 != 0),
                                  workdir=f"/tmp/work/{i % 40}", board="web" if i % 5 == 0 else "main", _in_tx=True,
@@ -47,9 +47,10 @@ def main(n=2000):
         c.execute("INSERT INTO control(key,value) VALUES('_plan',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (json.dumps({"ts": time.time() - 40, "data": {"five_hour": 31.0, "seven_day": 62.0, "five_hour_resets": reset5,
                                                                   "seven_day_resets": reset}}),))
-        for i in range(400):  # usage rows
+        buckets = ["claude-sub", "local", "opencode-free", "agy-gemini", "pi-default"]
+        for i in range(12000):  # a busy week of usage rows (a real board has about 10,000 in 7 days)
             c.execute("INSERT OR IGNORE INTO usage(source,key,ts,harness,bucket,model,input,output) VALUES('gen',?,?,?,?,?,100,500)",
-                      (str(i), time.time() - i * 1500, "claude", "claude-sub", "claude-sonnet"))
+                      (str(i), time.time() - i * 50, "claude", buckets[i % 5], "some-model"))
         # one finished run with an out file full of ANSI
         runs = store.HOME / "runs"
         runs.mkdir(parents=True, exist_ok=True)

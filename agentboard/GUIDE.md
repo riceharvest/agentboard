@@ -165,7 +165,7 @@ return `1` when they find problems.
     ab snapshot --schema        # prints the JSON Schema (agentboard/snapshot.schema.json)
     ab tail --run RUN_ID [--bytes N] [--follow 30s]     # a run's output, ANSI stripped (--json: same object as snapshot's "tail")
 
-One read-only SQLite connection, no network, no harness probes; about 2,000 tasks cost tens of milliseconds. It returns
+One read-only SQLite connection, no network, no harness probes; 2,000 tasks cost about 40-60 ms of query and assembly work (end to end roughly 100-190 ms on a busy desktop, mostly interpreter start-up). It returns
 `boards` (counts, caps, paused), `tasks` (every open/claimed task plus the last `--closed` closed ones, with deps, labels,
 tier, pin, priority, `state` ready|waiting|stuck|claimed|done|dead|cancelled, `runnable`, workdir, attempts, not_before,
 `result_head`), `runner` (state, pid, slots, setting, paused, draining, stop flag, heartbeat age, `children` with run id, task,

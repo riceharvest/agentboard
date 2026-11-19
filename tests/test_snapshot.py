@@ -66,15 +66,16 @@ def test_snapshot_content_and_speed(big):
     assert d["limits"][0]["scope"] == "bucket:claude-sub"
     # plan numbers come from the stored reading, the guard from the caps
     assert d["plan"]["claude_plan_pct"]["seven_day"] == 62.0 and 55 < d["plan"]["weekly_pace_pct"] < 70
-    assert d["plan"]["guards"] and d["usage"][0]["bucket"] == "claude-sub" and d["usage"][0]["cap_hit"]
+    assert d["plan"]["guards"] and any(u["bucket"] == "claude-sub" and u["cap_hit"] for u in d["usage"]) and len(d["usage"]) == 5
     assert snap(big, "--closed", "0")["tasks_closed_shown"] == 0
 
 
 def test_snapshot_is_read_only_and_offline(big):
-    db = next(big.home.glob("*.db"))
-    before = db.read_bytes()
+    def content():  # main file + write-ahead log (SQLite may create an empty -wal on open; that is not a write)
+        return {f.name: f.read_bytes() for f in big.home.glob("*.db*") if not f.name.endswith("-shm") and f.stat().st_size}
+    before = content()
     snap(big, "--events-after", "0")
-    assert db.read_bytes() == before, "snapshot must not write to the board"
+    assert content() == before, "snapshot must not write to the board"
 
 
 def test_events_after_returns_only_newer(big):
@@ -210,6 +211,18 @@ def test_kill_one_run_with_a_live_runner(abx, tmp_path):
                 break
             time.sleep(0.5)
         assert d["runner"]["running"] and len(d["runner"]["children"]) == 2, d["runner"]
+        # reload the runner while both runs are live: the new process adopts them (they are no longer its own Popen objects)
+        pid0 = d["runner"]["pid"]
+        assert j(abx, "runner", "reload")["action"] == "reload"
+        for _ in range(80):
+            d = snap(abx, "--events-after", "0", "--events-limit", "1000")
+            kinds = [e["kind"] for e in d["events"]]
+            if "runner_reload" in kinds and kinds.count("runner_start") == 2 and not d["runner"]["stop"]:
+                break
+            time.sleep(0.5)
+        else:
+            pytest.fail(f"runner did not reload: {kinds}")
+        assert d["runner"]["pid"] == pid0 and d["runner"]["running"] and len(d["runner"]["children"]) == 2
         ch = d["runner"]["children"][0]
         assert ch["harness"] == "claude" and ch["pid"] and ch["timeout_s"] and ch["elapsed_s"] >= 0 and ch["bucket"]
         assert sum(b["running"] for b in d["boards"]) == 2
@@ -226,7 +239,7 @@ def test_kill_one_run_with_a_live_runner(abx, tmp_path):
         assert killed["status"] == "open" and killed["attempts"] == 0, killed
         j(abx, "kill", str(ch["run"]), rc=1)  # already ended
         shown = j(abx, "show", ch["task_id"])
-        assert shown["runs"][0]["outcome"] == "killed"
+        assert [r["outcome"] for r in shown["runs"]] == ["killed"] and shown["attempts"] == 0
         tl = snap(abx, "--tail", f"{d['runner']['children'][0]['run']}:100")["tail"]
         assert tl["out"].startswith("started") and tl["running"]
         # cancel kills the other run and cancels its task

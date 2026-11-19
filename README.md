@@ -78,8 +78,8 @@ and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab
 - **Quota:** usage per bucket over 5h, 24h and 7d, plus per task, harness and model. Optional soft caps per
   bucket. Cooldowns are set automatically from real errors.
 - **UI data:** `ab snapshot --json` returns boards, tasks, runner and its running agents, limits, plan percentage, usage,
-  watchers, schedules, tiers, recent events and the tail of a run's output in one read-only call (tens of milliseconds
-  for 2,000 tasks); the shape is the JSON Schema in [`agentboard/snapshot.schema.json`](agentboard/snapshot.schema.json).
+  watchers, schedules, tiers, recent events and the tail of a run's output in one read-only call (about 40-60 ms of query
+  and assembly work for 2,000 tasks, plus interpreter start-up: roughly 100-190 ms end to end on a busy desktop); the shape is the JSON Schema in [`agentboard/snapshot.schema.json`](agentboard/snapshot.schema.json).
   Every control a UI needs is a CLI verb with `--json` output and stable exit codes (see below).
 - **MCP server:** `ab mcp` exposes every command as a tool over stdio.
 

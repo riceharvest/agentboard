@@ -1,6 +1,7 @@
 """The runner: the only thing that starts agents. Plain subprocesses, no admission layer.
 Every setting is read from the board each tick, so agents steer it with `ab runner ...` / `ab config set ...` / `ab sched ...`."""
 import json
+import re
 import os
 import sys
 import time
@@ -474,6 +475,11 @@ class Runner:
                       (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now(), cand.endpoint, cand.provider))
             run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             owner = f"{cand.harness}#{run_id}"
+            # label role=NAME runs the agent as NAME#<run> (so a grant on 'NAME#*' can give it more rights, e.g. an
+            # overseer with admin). Honoured only when the task's creator could grant that itself (admin on main).
+            role = (json.loads(cur["labels"] or "{}") or {}).get("role")
+            if role and re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", role) and store.can(c, cur["created_by"], "admin", store.DEFAULT_BOARD):
+                owner = f"{role}#{run_id}"
             c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
                       (owner, now() + RUNNER_LEASE, run_id, now(), task["id"]))
             event(c, task["id"], "runner", "started", {"run": run_id, "harness": cand.harness, "model": cand.model,

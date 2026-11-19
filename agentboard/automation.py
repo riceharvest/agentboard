@@ -200,7 +200,7 @@ def run_watchers(conn):
                 tid = live["id"]
             else:
                 threads = {(e.get("payload") or {}).get("thread") or e.get("task_id") for e in hits} - {None}
-                labels = {"watcher": w["name"]}
+                labels = {**(action.get("labels") or {}), "watcher": w["name"]}
                 if action.get("reply", True) and len(threads) == 1:
                     labels["reply_to"] = threads.pop()
                 body = (action.get("brief") or "React to these board events.").strip() + "\n\nEVENTS THAT WOKE YOU:\n" + desc

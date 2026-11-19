@@ -918,7 +918,8 @@ def cmd_watch(c, a, out):
             _re.compile(a.text)
         action = {"brief": text_arg(a.brief) if a.brief else "", "tier": a.tier, "harness": a.harness, "model": a.model,
                   "workdir": str(Path(a.workdir).expanduser().resolve()) if a.workdir else None, "channel": a.to_channel,
-                  "cooldown": a.cooldown or "0", "reply": not a.no_reply, "coalesce": not a.no_coalesce, "priority": a.priority or 0}
+                  "cooldown": a.cooldown or "0", "reply": not a.no_reply, "coalesce": not a.no_coalesce, "priority": a.priority or 0,
+                  "labels": dict(kv.split("=", 1) for kv in (a.task_label or []))}
         if a.tier and a.tier not in store.cfg(c, "tiers"):
             raise ValueError(f"unknown tier {a.tier}")
         start = A.max_event_id(c) if not a.from_start else 0
@@ -1442,6 +1443,7 @@ def build_parser():
     s.add_argument("--no-coalesce", action="store_true", help="a new task per wake-up even if one is still open")
     s.add_argument("--from-start", action="store_true", help="also match events from before the watcher existed")
     s.add_argument("--all-boards", action="store_true", help="match events on every board (the woken task is created on this board)")
+    s.add_argument("--task-label", action="append", metavar="K=V", help="label for the woken task, e.g. role=overseer (repeatable)")
 
     s = sub("sync", cmd_sync, "GitHub sync: ls | add NAME --github owner/repo [...] | run [NAME] | rm|enable|disable NAME")
     s.add_argument("action", nargs="?", choices=["ls", "add", "run", "rm", "enable", "disable"])

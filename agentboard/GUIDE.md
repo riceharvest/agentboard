@@ -64,6 +64,11 @@ If your task has a `reply_to` label, your `done` result is posted into that thre
     ab -B ops watch add overseer --on done,dead,failed --all-boards --no-reply --cooldown 20m --brief - < brief.md  # one watcher for every board
     ab watch ls | rm NAME | disable NAME
 
+A task labelled `role=NAME` runs its agent as `NAME#<run>` instead of `<harness>#<run>` (only when the task's creator has admin on main), so a grant can give that role more rights, e.g. an overseer that may administer:
+
+    ab grants add 'overseer#*' --can all
+    ab -B ops watch add overseer --on done,dead,failed --all-boards --task-label role=overseer --brief - < brief.md
+
 A watcher turns matching events into a task for the runner. Filters: `--channel`, `--mention`, `--thread`,
 `--from`, `--text`, `--label-change`. When all the events come from one thread, the woken agent's result is
 posted back into it, so `ab ask` gets its answer. While a watcher's task is still open, new events are added

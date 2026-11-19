@@ -357,7 +357,7 @@ def cmd_caps(c, a, out):
     caps = store.cfg(c, "caps") or {}
     if a.action == "set":
         cap = {"window": a.window or "5h"}
-        for k in ("max_output", "max_cost", "max_runs", "max_calls"):
+        for k in ("max_output", "max_cost", "max_runs", "max_calls", "max_5h_pct", "max_7d_pct"):
             v = getattr(a, k)
             if v is not None:
                 cap[k] = v
@@ -1124,6 +1124,8 @@ def build_parser():
     s.add_argument("--max-cost", type=float)
     s.add_argument("--max-runs", type=float)
     s.add_argument("--max-calls", type=float)
+    s.add_argument("--max-5h-pct", type=float, help="pause the bucket at this %% of the provider's 5h window (claude-sub only)")
+    s.add_argument("--max-7d-pct", type=float, help="pause the bucket at this %% of the provider's weekly limit (claude-sub only)")
 
     sub("harness", cmd_harness, "installed harnesses and their state", ["harnesses"])
 

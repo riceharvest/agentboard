@@ -244,11 +244,57 @@ def window_totals(conn, bucket, window_s):
     return dict(r) | {"runs": runs}
 
 
+_PLAN = {"ts": 0.0, "data": None}
+PLAN_TTL_S = 120        # re-read the provider's own numbers at most this often
+PLAN_STALE_S = 1800     # a failed read falls back to the last good one for this long, then fails open
+
+
+def claude_plan_pct():
+    """Claude subscription utilisation as the provider reports it (what /usage shows):
+    {"five_hour": pct, "seven_day": pct, "five_hour_resets": iso, ...} or None when unreadable.
+    Uses the Claude Code OAuth login on this machine; the token is never printed or stored."""
+    now = time.time()
+    if _PLAN["data"] is not None and now - _PLAN["ts"] < PLAN_TTL_S:
+        return _PLAN["data"]
+    try:
+        import urllib.request
+        cred = json.loads((HOMEP / ".claude" / ".credentials.json").read_text())
+        tok = cred["claudeAiOauth"]["accessToken"]
+        req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "agentboard"})
+        j = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        _PLAN["data"] = {"five_hour": float(j["five_hour"]["utilization"]), "seven_day": float(j["seven_day"]["utilization"]),
+                         "five_hour_resets": j["five_hour"].get("resets_at"), "seven_day_resets": j["seven_day"].get("resets_at")}
+        _PLAN["ts"] = now
+    except Exception:
+        if _PLAN["data"] is not None and now - _PLAN["ts"] > PLAN_STALE_S:
+            _PLAN["data"] = None
+        elif _PLAN["data"] is not None:
+            _PLAN["ts"] = now - PLAN_TTL_S + 30   # retry in 30 s, keep serving the last good value
+    return _PLAN["data"]
+
+
+def plan_status(cap):
+    """Reason string if the provider-reported plan usage is at/over the cap's max_5h_pct / max_7d_pct."""
+    if cap.get("max_5h_pct") is None and cap.get("max_7d_pct") is None:
+        return None
+    p = claude_plan_pct()
+    if not p:
+        return None
+    for k, field, label in (("max_5h_pct", "five_hour", "5h"), ("max_7d_pct", "seven_day", "weekly")):
+        if cap.get(k) is not None and p[field] >= float(cap[k]):
+            return f"plan guard: {label} usage {p[field]:.0f}% >= {float(cap[k]):.0f}% (resets {p[field + '_resets']})"
+    return None
+
+
 def cap_status(conn, bucket):
     """None if the bucket is under its soft cap (or has none), else a reason string."""
     cap = (store.cfg(conn, "caps") or {}).get(bucket)
     if not cap:
         return None
+    r = plan_status(cap)
+    if r:
+        return r
     w = store.parse_dur(cap.get("window") or "5h")
     t = window_totals(conn, bucket, w)
     for k, field in (("max_output", "output"), ("max_cost", "cost_usd"), ("max_runs", "runs"), ("max_calls", "calls")):

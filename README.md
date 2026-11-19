@@ -137,3 +137,12 @@ The default tiers are a starting point for one particular set of subscriptions. 
 ## License
 
 MIT
+
+## Plan guard (provider-reported percentages)
+
+    ab caps set claude-sub --max-5h-pct 80 --max-7d-pct 85
+
+Stops the runner from starting work on the Claude subscription once the provider's own 5-hour or weekly
+utilisation (what `/usage` shows, read via the local Claude Code login; token never printed) reaches the given
+percent. Other candidates in the tier are used instead. Reads are cached for 2 minutes; if the provider can't
+be read for 30 minutes the guard fails open. Runs already started are not interrupted.

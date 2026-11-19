@@ -38,7 +38,7 @@ def _pythonpath(env):
 RUNNER_LEASE = 600          # the runner renews its children's claims every tick; this only matters if it dies
 STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "AI_AGENT", "HERMES_AGENT",
              "HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID",
-             "AB_TASK", "AB_ACTOR", "AB_RUN", "AB_JSON", "AB_BOARD")
+             "AB_TASK", "AB_ACTOR", "AB_RUN", "AB_RUN_HOME", "AB_JSON", "AB_BOARD")
 
 BRIEF = """You are an autonomous worker on agentboard task {id}. No human is watching: do not ask questions of a human, decide and act.
 Your name on the board is {actor} (board {board}). Other agents can mention you as @{actor}.
@@ -240,8 +240,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 
-def norm_dir(d):
-    return os.path.realpath(os.path.expanduser(str(d))) if d else ""
+norm_dir = store.norm_dir
 
 
 # ---------------------------------------------------------------- runner
@@ -439,19 +438,12 @@ class Runner:
 
     def lockfree(self, labels):
         """Non-code cards (watch/decision/dive/overseer, or label lock=none) don't take the workdir lock."""
-        lock = str(labels.get("lock", "")).lower()
-        if lock:
-            return lock in ("none", "off", "no", "free")
-        return str(labels.get("type", "")) in (cfg(self.conn, "lockfree_types") or [])
+        return store.lockfree(self.conn, labels)
 
     def busy_dirs(self):
         """Workdirs held right now by ANY claimed card (any board, any harness, any owner, runner child or
         manual claim, re-adopted run) that took the lock. Cards running in their own worktree or lock-free hold nothing."""
-        held = set()
-        for r in self.conn.execute("SELECT id, workdir, labels FROM tasks WHERE status='claimed' AND workdir IS NOT NULL AND workdir!=''"):
-            lb = json.loads(r["labels"] or "{}")
-            if not lb.get("worktree_dir") and not self.lockfree(lb):
-                held.add(norm_dir(r["workdir"]))
+        held = store.busy_dirs(self.conn)
         for ch in self.children.values():
             if ch.workdir and getattr(ch, "holds_lock", True):
                 held.add(norm_dir(ch.workdir))
@@ -506,9 +498,15 @@ class Runner:
             free = self.lockfree(labels)
             wt = None
             if not free and not cfg(c, "share_workdir") and norm_dir(workdir) in busy_dirs:
-                want = str(labels.get("worktree", "")).lower()
-                want = want in ("on", "1", "yes", "true") if want else bool(cfg(c, "worktree"))
-                if not want or not Path(workdir).is_dir():
+                git_ok = store.is_git_dir(workdir)
+                want = store.want_worktree(c, labels)
+                if not git_ok or not want:
+                    why = "workdir busy" if not git_ok else "workdir busy (auto worktree off)"
+                    if self.waiting.get(t["id"]) != why:
+                        self.waiting[t["id"]] = why
+                        with tx(c):
+                            event(c, t["id"], "runner", "waiting", {"why": why})
+                        self.log(f"{t['id']} waiting: {why}")
                     continue
                 wt = True  # made after the other checks pass, in spawn()
             cand, bucket, why = self.pick(t, limits)
@@ -592,8 +590,9 @@ class Runner:
             return False
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         env.update(xenv)
-        env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": str(store.HOME),
-                    "AB_BOARD": cur["board"],
+        home = str(store.HOME)
+        env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id),
+                    "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"],
                     "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
         try:
             with open(out_path, "wb") as fo, open(err_path, "wb") as fe:

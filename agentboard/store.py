@@ -81,7 +81,7 @@ DEFAULTS = {
     "sync_every_s": 120,
     "channels": "",             # comma list the runner serves; empty = all
     "share_workdir": False,     # allow two runs in the same workdir at once
-    "worktree": False,          # busy git workdir -> run the card in its own `git worktree` (card label worktree=on|off overrides)
+    "auto_worktree": True,      # busy git workdir -> run the card in its own `git worktree` (card label worktree=on|off overrides)
     "lockfree_types": ["watch", "decision", "dive", "overseer"],  # label type=X cards that neither wait for nor hold a workdir (label lock=none|hold overrides)
     "tier_fallback": "any",     # none | up | down | any: when every candidate of a tier is limited
     "default_tier": "medium",
@@ -637,6 +637,84 @@ def ready_tasks(conn, channel=None, labels=None, runnable_only=False, exclude=()
     sql += " ORDER BY t.priority DESC, t.created_at ASC LIMIT :lim"
     args["lim"] = limit
     return [r for r in conn.execute(sql, args).fetchall() if r["id"] not in exclude]
+
+
+def norm_dir(d):
+    return os.path.realpath(os.path.expanduser(str(d))) if d else ""
+
+
+def is_git_dir(d):
+    """True when `d` is an existing directory inside a git checkout or worktree (does not cross filesystems)."""
+    if not d:
+        return False
+    p = Path(os.path.expanduser(str(d)))
+    if not p.is_dir():
+        return False
+    p = p.resolve()
+    try:
+        dev = p.stat().st_dev
+    except OSError:
+        return False
+    for cur in (p, *p.parents):
+        if cur == cur.parent:
+            break
+        try:
+            if cur.stat().st_dev != dev:
+                break
+        except OSError:
+            break
+        if (cur / ".git").exists():
+            return True
+    return False
+
+
+def lockfree(conn, labels):
+    """Non-code cards (watch/decision/dive/overseer, or label lock=none) don't take the workdir lock."""
+    lock = str((labels or {}).get("lock", "")).lower()
+    if lock:
+        return lock in ("none", "off", "no", "free")
+    return str((labels or {}).get("type", "")) in (cfg(conn, "lockfree_types") or [])
+
+
+def want_worktree(conn, labels):
+    """Whether a busy git workdir should auto-create a per-task worktree for this card."""
+    raw = str((labels or {}).get("worktree", "")).lower()
+    if raw:
+        return raw in ("on", "1", "yes", "true")
+    return bool(cfg(conn, "auto_worktree"))
+
+
+def busy_dirs(conn):
+    """Workdirs held right now by ANY claimed card (any board, any harness, any owner) that took the lock."""
+    held = set()
+    for r in conn.execute("SELECT workdir, labels FROM tasks WHERE status='claimed' AND workdir IS NOT NULL AND workdir!=''"):
+        lb = json.loads(r["labels"] or "{}")
+        if not lb.get("worktree_dir") and not lockfree(conn, lb):
+            held.add(norm_dir(r["workdir"]))
+    return held
+
+
+def workdir_wait_reason(conn, task, held=None):
+    """If a ready runnable task will really wait on a busy workdir, return the reason text; else None."""
+    if not task.get("runnable", True) or cfg(conn, "share_workdir"):
+        return None
+    lb = task.get("labels") or {}
+    if isinstance(lb, str):
+        lb = json.loads(lb or "{}")
+    if lockfree(conn, lb):
+        return None
+    wd = task.get("workdir")
+    if not wd:
+        return None
+    if held is None:
+        held = busy_dirs(conn)
+    if norm_dir(wd) not in held:
+        return None
+    if not is_git_dir(wd):
+        return "workdir busy"
+    if not want_worktree(conn, lb):
+        return "workdir busy (auto worktree off)"
+    return None
 
 
 def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD):

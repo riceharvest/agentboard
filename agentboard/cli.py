@@ -70,6 +70,8 @@ def tline(d):
         extra.append(f"by {d['owner']}")
     if d["state"] == "waiting" and d.get("not_before") and d["not_before"] > now():
         extra.append(f"after {fmt_ts(d['not_before'])}")
+    if d.get("wait_reason"):
+        extra.append(d["wait_reason"])
     if d.get("deps"):
         extra.append("deps " + ",".join(d["deps"]))
     if d.get("attempts"):
@@ -183,6 +185,12 @@ def cmd_ls(c, a, out):
         sql += " ORDER BY CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 ELSE 2 END, priority DESC, updated_at DESC LIMIT ?"
         rows = c.execute(sql, args + [a.limit]).fetchall()
     items = [store.task_dict(c, r) for r in visible(c, a, rows)]
+    if a.ready and items:
+        held = store.busy_dirs(c)
+        for d in items:
+            why = store.workdir_wait_reason(c, d, held)
+            if why:
+                d["wait_reason"] = why
     out(items, lambda xs: "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)")
 
 
@@ -1536,7 +1544,17 @@ def cmd_tui(c, a, out):  # only reached through `ab --json tui` style calls: mai
     return run_tui(a.tui_args)
 
 
+def _sanitize_worker_env():
+    """When a runner-launched worker invokes `ab` against a different AB_HOME (e.g. a throwaway test board),
+    don't carry over AB_RUN/AB_ACTOR/AB_BOARD/AB_TASK from the worker's own board."""
+    run_home = os.environ.get("AB_RUN_HOME")
+    if run_home and store.norm_dir(str(store.HOME)) != store.norm_dir(run_home):
+        for k in ("AB_RUN", "AB_ACTOR", "AB_BOARD", "AB_TASK", "AB_RUN_HOME"):
+            os.environ.pop(k, None)
+
+
 def main(argv=None):
+    _sanitize_worker_env()
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv and argv[0] == "tui":
         return run_tui(argv[1:])

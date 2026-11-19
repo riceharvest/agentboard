@@ -65,10 +65,13 @@ cards a live session claimed by hand); paths are compared after `realpath`. Two 
   hold the lock, so a long build in a shared directory cannot block them. Force it per card with `-l lock=none`, or force
   the lock back with `-l lock=hold`. Such cards run in the workdir as given; give them `--workdir` of a scratch dir if
   they write files.
-- **Per-task git worktree (opt-in).** `ab config set worktree true` (all cards) or `-l worktree=on` (one card; `off` opts
-  out). When the workdir is a git repo and busy, the runner runs `git worktree add -b ab/<task> $AB_HOME/worktrees/<task> HEAD`,
-  starts the card there, tells the agent in its brief to merge the branch back, and records `worktree_dir` and
-  `worktree_branch` on the card (labels). A worktree run does not hold the original dir. Not a git repo, or git fails: the card just waits.
+- **Per-task git worktree (automatic by default).** When a card's workdir is a busy git checkout and the card has no
+  `-l worktree=off` label, the runner runs `git worktree add -b ab/<task> $AB_HOME/worktrees/<task> HEAD`, starts the
+  card there, tells the agent in its brief to merge the branch back, and records `worktree_dir` and `worktree_branch`
+  on the card (labels). A worktree run does not hold the original dir. Disable globally with
+  `ab config set auto_worktree false` (cards with `-l worktree=on` still opt in). Non-git workdirs, or cards with
+  worktree disabled, wait as before (`ab ls --ready` shows `workdir busy` / `workdir busy (auto worktree off)` only
+  when a card will actually wait).
 
 `ab config set share_workdir true` switches the lock off entirely.
 

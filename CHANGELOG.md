@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hermes runs with `hermes_isolate=false` (shared gateway): `ab kill`, timeout and lease expiry now stop the gateway-side session, not only the `hermes chat` client. The client's SIGINT only detaches ("accepted work continues at the gateway"), so the runner reads the session id (stderr `Session:` line, or the gateway session row for the run's workdir) and sends the documented `session.interrupt` over `hermes gateway attach --json` + WebSocket JSON-RPC (zero extra dependencies), once per run, and logs the outcome in the runner log. The shared gateway process is never stopped. Isolated runs (default) already stop their per-run gateway.
+
 - `ab park`: park a claimed card on a long external job and exit — `--pid PID` (wake when the process exits, start-time guarded) or `--file PATH [--grace 60s]` (wake when the file exists and stops growing), with a required `--note`. The run ends with outcome `parked` (no attempt counted), the slot frees immediately, the runner checks wake conditions every tick, and a fresh agent resumes the card with the park note and the parked run's last output lines in its brief. Parks survive a runner reload; `ab ls` / `ab show` / `ab snapshot` (task `park` field) and the TUI show what a parked card waits on. GUIDE: anything expected to take > 20 min runs detached and the card parks.
 
 - Hermes runs: the isolated per-run session transcript is exported to `runs/<run>.hermes-session.jsonl` before the temporary `HERMES_HOME` is deleted (audit what an agent did around a kill/timeout); with `hermes_isolate=false` the brief now spells out the `AB_*` values because a shared gateway's tools don't inherit them.

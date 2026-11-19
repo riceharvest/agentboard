@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from conftest import ROOT, clean_env
 from agentboard import harness as H
 
@@ -39,6 +41,22 @@ if argv[:2] == ["gateway", "stop"]:
             os.killpg(int(doc["pid"]), signal.SIGTERM)
         except OSError:
             pass
+    sys.exit(0)
+
+if argv[:2] == ["gateway", "attach"]:
+    # The public attach step: url + single-use ticket subprotocols for the home's running gateway.
+    if os.environ.get("FAKE_LOG"):
+        with open(os.environ["FAKE_LOG"], "a") as f:
+            f.write(json.dumps({"cmd": argv, "hermes_home": str(hh)}) + "\n")
+    info = os.environ.get("FAKE_GW_INFO")
+    if not info or not Path(info).is_file():
+        print(json.dumps({"state": "absent", "reason_code": "no_gateway", "endpoint": None}))
+        sys.exit(5)
+    doc = json.loads(Path(info).read_text())
+    print(json.dumps({"state": "ready", "url": doc["url"], "protocol": "hermes-gateway-v1",
+                      "protocols": ["hermes-gateway-v1", "hermes-gateway-ticket.fake-ticket"],
+                      "ticket": "fake-ticket",
+                      "endpoint": {"profile_id": "default", "instance_id": "fake"}}))
     sys.exit(0)
 
 mode = os.environ.get("FAKE_MODE", "fast")
@@ -79,17 +97,18 @@ with open(f"/proc/{gw.pid}/stat") as f:
 if os.environ.get("FAKE_GW_PID_FILE"):
     Path(os.environ["FAKE_GW_PID_FILE"]).write_text(json.dumps({"pid": gw.pid, "start": gw_start}))
 
-# Write a session row to $HERMES_HOME/state.db
-sid = f"sess_{os.getpid()}"
+# Write a session row to $HERMES_HOME/state.db (like the gateway does at session.create:
+# cwd = the client's workdir, ended_at NULL while the turn runs)
+sid = os.environ.get("FAKE_SESSION_ID") or f"sess_{os.getpid()}"
 db = sqlite3.connect(str(hh / "state.db"))
 db.execute(
     "CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, started_at REAL, ended_at REAL, model TEXT, "
     "billing_provider TEXT, input_tokens INT, output_tokens INT, cache_read_tokens INT, cache_write_tokens INT, "
-    "reasoning_tokens INT, actual_cost_usd REAL, estimated_cost_usd REAL)"
+    "reasoning_tokens INT, actual_cost_usd REAL, estimated_cost_usd REAL, cwd TEXT)"
 )
 db.execute(
-    "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?,10,5,3,0.012,0.010)",
-    (sid, time.time(), time.time(), "test-model", "openrouter", 200, 80),
+    "INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?,10,5,3,0.012,0.010,?)",
+    (sid, time.time(), None, "test-model", "openrouter", 200, 80, os.getcwd()),
 )
 db.commit()
 db.close()
@@ -111,12 +130,14 @@ if os.environ.get("FAKE_CAPTURE"):
         "config": (hh / "config.yaml").read_text() if (hh / "config.yaml").is_file() else "",
         "auth": (hh / "auth.json").read_text() if (hh / "auth.json").is_file() else "",
         "cwd": os.getcwd(),
+        "session_id": sid,
         "brief": argv[argv.index("-q") + 1] if "-q" in argv else "",
     }
     Path(os.environ["FAKE_CAPTURE"]).write_text(json.dumps(cap))
 
-sys.stderr.write(f"Session: {sid}\n")
-sys.stderr.flush()
+if os.environ.get("FAKE_NO_SESSION_LINE") != "1":
+    sys.stderr.write(f"Session: {sid}\n")
+    sys.stderr.flush()
 
 if mode == "hang":
     # Wait until killed; meanwhile the detached gateway is also alive.
@@ -587,3 +608,301 @@ def test_export_hermes_session_keeps_the_transcript_with_timestamps(tmp_path):
     rows = [json.loads(l) for l in dest.read_text().splitlines()]
     assert [r["role"] for r in rows] == ["user", "assistant", "tool"] and rows[1]["timestamp"] == 2.0
     assert H.export_hermes_session(tmp_path / "missing", tmp_path / "none.jsonl") == 0
+
+
+# A fake SHARED Hermes gateway speaking the documented external-client protocol: WebSocket JSON-RPC
+# (hermes-gateway-v1 + a ticket subprotocol), one running session that keeps "working" (appending to
+# FAKE_WORK_LOG) until session.interrupt arrives with the current execution_generation. Like the real
+# gateway it survives client disconnects: detaching a viewer never stops accepted work.
+FAKE_GATEWAY = r'''
+import base64, hashlib, json, os, socket, threading, time
+from pathlib import Path
+
+GEN = 7
+rpc_log = Path(os.environ["FAKE_RPC_LOG"])
+work_log = Path(os.environ["FAKE_WORK_LOG"])
+info_file = Path(os.environ["FAKE_GW_INFO"])
+state = {"running": True}
+
+def worker():
+    while state["running"]:
+        with open(work_log, "a") as f:
+            f.write(f"work {time.time()}\n")
+        time.sleep(0.2)
+
+threading.Thread(target=worker, daemon=True).start()
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0))
+srv.listen(4)
+port = srv.getsockname()[1]
+info_file.write_text(json.dumps({"url": f"ws://127.0.0.1:{port}/api/ws", "pid": os.getpid(), "port": port}))
+
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+def recv_exact(conn, buf, n):
+    while len(buf) < n:
+        chunk = conn.recv(65536)
+        if not chunk:
+            raise ConnectionError("client gone")
+        buf += chunk
+    return buf[:n], buf[n:]
+
+def read_frame(conn, buf):
+    head, buf = recv_exact(conn, buf, 2)
+    b1, b2 = head
+    fin, op = b1 & 0x80, b1 & 0x0F
+    masked, ln = b2 & 0x80, b2 & 0x7F
+    if ln == 126:
+        ext, buf = recv_exact(conn, buf, 2); ln = int.from_bytes(ext, "big")
+    elif ln == 127:
+        ext, buf = recv_exact(conn, buf, 8); ln = int.from_bytes(ext, "big")
+    mask = b""
+    if masked:
+        mask, buf = recv_exact(conn, buf, 4)
+    data, buf = recv_exact(conn, buf, ln)
+    if masked:
+        data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
+    return fin, op, data, buf
+
+def send_frame(conn, op, payload):
+    header = bytes([0x80 | op])
+    n = len(payload)
+    if n < 126:
+        header += bytes([n])
+    elif n < 65536:
+        header += bytes([126]) + n.to_bytes(2, "big")
+    else:
+        header += bytes([127]) + n.to_bytes(8, "big")
+    conn.sendall(header + payload)
+
+def handle(conn):
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return
+        buf += chunk
+    head, buf = buf.split(b"\r\n\r\n", 1)
+    lines = head.decode(errors="replace").split("\r\n")
+    hdrs = {k.strip().lower(): v.strip() for k, v in (l.split(":", 1) for l in lines[1:] if ":" in l)}
+    protos = [p.strip() for p in hdrs.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    with open(rpc_log, "a") as f:
+        f.write(json.dumps({"handshake": protos}) + "\n")
+    accept = base64.b64encode(hashlib.sha1((hdrs.get("sec-websocket-key", "") + GUID).encode()).digest()).decode()
+    conn.sendall((f"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  f"Sec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {protos[0] if protos else ''}\r\n\r\n").encode())
+    while True:
+        fin, op, data, buf = read_frame(conn, buf)
+        if op == 8:
+            send_frame(conn, 8, data[:2])
+            return
+        if op == 9:
+            send_frame(conn, 10, data)
+            continue
+        if op != 1:
+            continue
+        doc = json.loads(data)
+        method, params, rid = doc.get("method"), doc.get("params") or {}, doc.get("id")
+        with open(rpc_log, "a") as f:
+            f.write(json.dumps({"method": method, "params": params}) + "\n")
+        err, result = None, {}
+        if method == "session.resume":
+            result = {"session_id": params.get("session_id"), "stored_session_id": params.get("session_id"),
+                      "running": state["running"], "execution_generation": GEN, "subscription_id": "sub-1",
+                      "revision": 1, "messages": []}
+        elif method == "session.interrupt":
+            if params.get("execution_generation") != GEN:
+                err = {"code": -32000, "message": "stale_generation"}
+            else:
+                state["running"] = False
+                result = {"execution_state": "idle", "execution_generation": GEN}
+        elif method == "session.detach":
+            result = {"ok": True}
+        else:
+            err = {"code": -32601, "message": "unknown_method"}
+        answer = {"jsonrpc": "2.0", "id": rid}
+        if err:
+            answer["error"] = err
+        else:
+            answer["result"] = result
+        send_frame(conn, 1, json.dumps(answer).encode())
+
+while True:
+    conn, _ = srv.accept()
+    try:
+        handle(conn)
+    except (ConnectionError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+'''
+
+
+def _start_fake_gateway(tmp_path, env):
+    """Start FAKE_GATEWAY with the FAKE_* env; wait until it published its url. Returns (proc, info)."""
+    gw = subprocess.Popen([sys.executable, "-c", FAKE_GATEWAY], env={**os.environ, **env},
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    info_file = Path(env["FAKE_GW_INFO"])
+    for _ in range(80):
+        if info_file.exists():
+            try:
+                return gw, json.loads(info_file.read_text())
+            except ValueError:
+                pass
+        if gw.poll() is not None:
+            raise AssertionError("fake gateway exited early")
+        time.sleep(0.1)
+    gw.kill()
+    raise AssertionError("fake gateway did not start")
+
+
+def _gateway_rpcs(rpc_log):
+    return [json.loads(l) for l in Path(rpc_log).read_text().splitlines() if l.strip()]
+
+
+@pytest.mark.parametrize("session_line", [True, False], ids=["session-line", "gateway-store"])
+def test_non_isolated_kill_interrupts_gateway_session(abx, tmp_path, session_line):
+    """ab kill on a shared-gateway hermes run must stop the SESSION (session.interrupt over the
+    gateway RPC), not only signal the client: a detached or killed client can leave accepted work
+    running at the gateway. The shared gateway process itself must survive. Covers both session-id
+    sources: the early 'Session:' stderr line, and (classic -q prints none) the gateway's session
+    row matched by the run's workdir."""
+    fake_bin = _install_fake_hermes(tmp_path)
+    src_hh = _make_source_hermes_home(tmp_path)
+    (src_hh / "state.db").unlink()
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    capture = tmp_path / "capture.json"
+    gw_info_file = tmp_path / "gw-info.json"
+    rpc_log = tmp_path / "rpc.jsonl"
+    work_log = tmp_path / "work.log"
+    fake_log = tmp_path / "fake.log"
+    runner_log = tmp_path / "runner.log"
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    env = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "HERMES_HOME": str(src_hh),
+        "HOME": str(fake_home),
+        "FAKE_MODE": "hang",
+        "FAKE_CAPTURE": str(capture),
+        "FAKE_GW_INFO": str(gw_info_file),
+        "FAKE_RPC_LOG": str(rpc_log),
+        "FAKE_WORK_LOG": str(work_log),
+        "FAKE_LOG": str(fake_log),
+    }
+    if session_line:
+        env["FAKE_SESSION_ID"] = "sess_shared"
+    else:
+        env["FAKE_NO_SESSION_LINE"] = "1"
+    gw, gw_info = _start_fake_gateway(tmp_path, env)
+
+    def j(*args, rc=0):
+        code, out, err = abx("--json", *args, env=env)
+        assert code == rc, (args, code, out, err)
+        return json.loads(out) if out.strip() else None
+
+    j("config", "set", "min_free_gib", "0")
+    j("config", "set", "poll_s", "1")
+    j("config", "set", "pacer", "false")
+    j("config", "set", "hermes_isolate", "false")
+    tid = j("add", "hermes shared session kill", "--harness", "hermes/openrouter", "--model", "test-model",
+            "--workdir", str(workdir))["id"]
+    j("runner", "pause")
+    with open(runner_log, "w") as log_f:
+        p = subprocess.Popen(
+            [sys.executable, "-m", "agentboard", "runner", "run"],
+            cwd=ROOT, env=clean_env(abx.home, **env),
+            stdout=subprocess.DEVNULL, stderr=log_f, start_new_session=True,
+        )
+    try:
+        j("runner", "resume")
+        for _ in range(40):
+            if capture.exists():
+                break
+            time.sleep(0.25)
+        assert capture.exists()
+        expected_sid = json.loads(capture.read_text())["session_id"]
+        run_id = j("show", tid)["runs"][0]["id"]
+        assert work_log.exists() and work_log.stat().st_size > 0  # the session is working
+        j("runner", "pause")
+        j("kill", str(run_id))
+        for _ in range(80):
+            shown = j("show", tid)
+            if shown["runs"][0]["outcome"] == "killed":
+                break
+            time.sleep(0.25)
+        assert j("show", tid)["runs"][0]["outcome"] == "killed"
+        # The gateway received the session stop for THIS run's session, with the live generation.
+        rpcs = _gateway_rpcs(rpc_log)
+        interrupts = [r for r in rpcs if r.get("method") == "session.interrupt"]
+        assert interrupts, rpcs
+        assert interrupts[0]["params"]["session_id"] == expected_sid, interrupts
+        assert interrupts[0]["params"]["execution_generation"] == 7, interrupts
+        assert any(r.get("method") == "session.resume" for r in rpcs), rpcs
+        # the attach ticket subprotocols were used (the documented external-client dial)
+        assert any("hermes-gateway-ticket.fake-ticket" in r.get("handshake", []) for r in rpcs), rpcs
+        # The session's work stopped: the orphan keeps appending until interrupted.
+        size = work_log.stat().st_size
+        time.sleep(0.7)
+        assert work_log.stat().st_size == size, "gateway session kept working after the kill"
+        # The shared gateway process itself was NOT stopped.
+        assert H._pid_alive(gw.pid, None)
+        entries = [json.loads(l) for l in fake_log.read_text().splitlines() if l.strip()]
+        assert not any(e.get("cmd", [])[:2] == ["gateway", "stop"] for e in entries), entries
+        # The stop is recorded in the run log.
+        log_text = runner_log.read_text()
+        assert expected_sid in log_text and "interrupt" in log_text.lower(), log_text[-2000:]
+    finally:
+        j("runner", "stop", "--now")
+        try:
+            p.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        gw.kill()
+        gw.wait()
+
+
+@pytest.mark.parametrize("block_websockets", [False, True], ids=["websockets", "stdlib-fallback"])
+def test_interrupt_hermes_session_stops_only_that_session(tmp_path, monkeypatch, block_websockets):
+    """interrupt_hermes_session speaks the gateway RPC on both transports (websockets when installed,
+    the stdlib fallback otherwise) and never touches the gateway process."""
+    fake_bin = _install_fake_hermes(tmp_path)
+    rpc_log = tmp_path / "rpc.jsonl"
+    work_log = tmp_path / "work.log"
+    env = {
+        "FAKE_SESSION_ID": "sess_shared",
+        "FAKE_GW_INFO": str(tmp_path / "gw-info.json"),
+        "FAKE_RPC_LOG": str(rpc_log),
+        "FAKE_WORK_LOG": str(work_log),
+    }
+    gw, gw_info = _start_fake_gateway(tmp_path, env)
+    try:
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        if block_websockets:
+            monkeypatch.setitem(sys.modules, "websockets.sync.client", None)
+        ok, detail = H.interrupt_hermes_session("sess_shared")
+        assert ok, detail
+        assert "interrupted" in detail, detail
+        rpcs = _gateway_rpcs(rpc_log)
+        assert any(r.get("method") == "session.interrupt" and r["params"]["execution_generation"] == 7
+                   for r in rpcs), rpcs
+        size = work_log.stat().st_size
+        time.sleep(0.7)
+        assert work_log.stat().st_size == size
+        assert H._pid_alive(gw.pid, None)
+        # an already-idle session is a no-op success, not an error
+        ok, detail = H.interrupt_hermes_session("sess_shared")
+        assert ok and "not running" in detail, detail
+    finally:
+        gw.kill()
+        gw.wait()

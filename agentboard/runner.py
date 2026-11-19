@@ -716,17 +716,47 @@ class Runner:
         return True
 
     # -- watching
+    def _stop_hermes_session(self, ch):
+        """A killed shared-gateway Hermes run: stop the gateway-side session, not only the client.
+        The client's own SIGINT handler asks for an interrupt too, but best-effort (it can lose the
+        RPC, race startup, or be SIGKILLed), so the runner sends session.interrupt itself and logs
+        it. Retries each tick until the session id is known; acts once per run."""
+        if getattr(ch, "_hermes_session_stopped", False):
+            return
+        try:
+            err = Path(ch.err_path).read_text(errors="replace") if ch.err_path else ""
+        except OSError:
+            err = ""
+        sid = H.hermes_session_id_from_log(err)
+        if not sid:
+            # The classic -q client prints no id until it exits: the gateway's session row
+            # (cwd = the run's workdir) names it while the turn runs.
+            workdir = getattr(ch, "workdir", None)
+            if not workdir:
+                t = self.conn.execute("SELECT workdir, labels FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+                if t:
+                    workdir = (json.loads(t["labels"] or "{}") or {}).get("worktree_dir") or t["workdir"]
+            sid = H.hermes_run_session_id(workdir, ch.started)
+        if not sid:
+            return
+        ch._hermes_session_stopped = True
+        ok, detail = H.interrupt_hermes_session(sid)
+        self.log(f"run {ch.run_id} ({ch.task_id}): hermes session {sid} stop: {detail}")
+
     def kill(self, ch, reason):
         hermes_home = getattr(ch, "hermes_home", None)
         if ch.kill_reason is None:
             ch.kill_reason, ch.kill_at = reason, now()
             if ch.harness == "hermes" and not hermes_home:
-                # Non-isolated Hermes shares a gateway: SIGINT lets `hermes chat` send session.interrupt
-                # before escalating to SIGTERM/SIGKILL. Never stop the shared gateway.
+                # Non-isolated Hermes shares a gateway: the client's own SIGINT interrupt is
+                # best-effort (a detached transport client leaves accepted work running), so the
+                # runner stops the session over the gateway RPC itself. Never stop the shared
+                # gateway process.
                 try:
                     os.killpg(ch.pid, signal.SIGINT)
                 except (ProcessLookupError, PermissionError):
                     pass
+                self._stop_hermes_session(ch)
                 return
             try:
                 os.killpg(ch.pid, signal.SIGTERM)
@@ -736,12 +766,14 @@ class Runner:
                 H.stop_hermes_gateway(hermes_home, force=False)
         else:
             elapsed = now() - ch.kill_at
-            if ch.harness == "hermes" and not hermes_home and elapsed > 5 and not getattr(ch, "_sigterm_sent", False):
-                ch._sigterm_sent = True
-                try:
-                    os.killpg(ch.pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            if ch.harness == "hermes" and not hermes_home:
+                self._stop_hermes_session(ch)
+                if elapsed > 5 and not getattr(ch, "_sigterm_sent", False):
+                    ch._sigterm_sent = True
+                    try:
+                        os.killpg(ch.pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
             if elapsed > 15:
                 try:
                     os.killpg(ch.pid, signal.SIGKILL)
@@ -809,6 +841,9 @@ class Runner:
         try:
             if ch.harness == "hermes" and hermes_home:
                 H.stop_hermes_gateway(hermes_home, force=False, wait_s=3.0)
+            if ch.harness == "hermes" and not hermes_home and ch.kill_reason:
+                # last chance: the client may have exited before a kill tick read its session id
+                self._stop_hermes_session(ch)
             out, err = rd(ch.out_path), rd(ch.err_path)
             if ch.harness == "hermes" and hermes_home:
                 res = a.parse(0 if rc is None else rc, out, err, hermes_home=hermes_home)

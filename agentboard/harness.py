@@ -1077,6 +1077,296 @@ def stop_hermes_gateway(home, force=False, wait_s=0.0):
     return False
 
 
+def hermes_session_id_from_log(text):
+    """The session id a running `hermes chat` printed early on stderr ('Session: <id>').
+    Only complete lines count: the run's stderr is read while the client may still be writing it."""
+    m = (re.search(r"(?m)^Session:[ \t]*(\S+)[ \t]*$", text or "")
+         or re.search(r"(?m)^session_id:[ \t]*(\S+)[ \t]*$", text or ""))
+    return m[1] if m else None
+
+
+def hermes_run_session_id(workdir, started_at, home=None):
+    """The live session a run's `hermes chat` created, from the gateway's session store.
+
+    The classic `chat -q` client prints no session id until it exits, but the gateway records the
+    session row at creation with the client's cwd. Match the newest unterminated session in the
+    run's workdir started at/after the run: the workdir lock keeps concurrent runs out of the same
+    directory (with `share_workdir` two overlapping runs could match; the newest wins)."""
+    if not workdir or not started_at:
+        return None
+    try:
+        wd = os.path.realpath(workdir)
+    except OSError:
+        return None
+    for _, p in hermes_dbs(home):
+        try:
+            c = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
+            rows = c.execute("SELECT id, cwd FROM sessions WHERE ended_at IS NULL AND started_at >= ? "
+                             "ORDER BY started_at DESC LIMIT 20", (started_at - 10,)).fetchall()
+            c.close()
+            for sid, cwd in rows:
+                if cwd and os.path.realpath(cwd) == wd:
+                    return sid
+        except (sqlite3.Error, OSError):
+            continue
+    return None
+
+
+class _HermesRpcError(Exception):
+    """A gateway JSON-RPC error answer (its bounded reason text)."""
+
+
+class _WebsocketsRpc:
+    """One synchronous JSON-RPC connection over the gateway WebSocket, using `websockets` when installed."""
+
+    def __init__(self, url, protocols, timeout_s):
+        self._url = url
+        self._protocols = list(protocols)
+        self._timeout_s = timeout_s
+        self._conn = None
+        self._ws = None
+        self._id = 0
+
+    def call(self, method, **params):
+        self._id += 1
+        self._ws.send(json.dumps({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}))
+        deadline = time.monotonic() + self._timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"gateway rpc timed out: {method}")
+            doc = json.loads(self._ws.recv(timeout=remaining))
+            if not isinstance(doc, dict) or doc.get("id") != self._id:
+                continue  # an event or another answer
+            if "error" in doc:
+                raise _HermesRpcError(str((doc["error"] or {}).get("message") or doc["error"])[:200])
+            return doc.get("result") or {}
+
+    def __enter__(self):
+        from websockets.sync.client import connect
+        self._conn = connect(self._url, subprotocols=self._protocols, open_timeout=self._timeout_s,
+                             close_timeout=2, ping_interval=None, proxy=None, max_size=8 * 1024 * 1024)
+        self._ws = self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        if self._conn is not None:
+            self._conn.__exit__(*exc)
+
+
+class _StdlibWsRpc:
+    """The same JSON-RPC connection with no third-party dependency: a minimal RFC 6455 client
+    (text frames, fragmentation, ping/pong, close) for installs without `websockets`."""
+
+    _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def __init__(self, url, protocols, timeout_s):
+        import base64
+        import socket
+        import ssl
+        from urllib.parse import urlsplit
+        u = urlsplit(url)
+        if u.scheme not in ("ws", "wss") or not u.hostname:
+            raise ValueError(f"unsupported gateway url: {url[:80]}")
+        port = u.port or (443 if u.scheme == "wss" else 80)
+        self._sock = socket.create_connection((u.hostname, port), timeout=timeout_s)
+        if u.scheme == "wss":
+            self._sock = ssl.create_default_context().wrap_socket(self._sock, server_hostname=u.hostname)
+        self._timeout_s = timeout_s
+        self._id = 0
+        self._buf = b""
+        self._deadline = time.monotonic() + timeout_s
+        key = base64.b64encode(os.urandom(16)).decode()
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        self._sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {u.hostname}:{port}\r\n"
+                            f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                            f"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {', '.join(protocols)}\r\n\r\n").encode())
+        while b"\r\n\r\n" not in self._buf:
+            self._buf += self._recv_chunk()
+            if len(self._buf) > 65536:
+                raise ConnectionError("gateway handshake too large")
+        head, self._buf = self._buf.split(b"\r\n\r\n", 1)
+        lines = head.decode(errors="replace").split("\r\n")
+        if "101" not in lines[0]:
+            raise ConnectionError(f"gateway refused the websocket: {lines[0][:120]}")
+        hdrs = {k.strip().lower(): v.strip() for k, v in (l.split(":", 1) for l in lines[1:] if ":" in l)}
+        expect = base64.b64encode(hashlib.sha1((key + self._GUID).encode()).digest()).decode()
+        if hdrs.get("sec-websocket-accept") != expect:
+            raise ConnectionError("gateway websocket accept mismatch")
+        if hdrs.get("sec-websocket-protocol") not in protocols:
+            raise ConnectionError("gateway websocket protocol mismatch")
+
+    def _recv_chunk(self):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("gateway rpc timed out")
+        self._sock.settimeout(remaining)
+        chunk = self._sock.recv(65536)
+        if not chunk:
+            raise ConnectionError("gateway closed the websocket")
+        return chunk
+
+    def _recv_exact(self, n):
+        while len(self._buf) < n:
+            self._buf += self._recv_chunk()
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def _read_frame(self):
+        b1, b2 = self._recv_exact(2)
+        fin, opcode = b1 & 0x80, b1 & 0x0F
+        masked, ln = b2 & 0x80, b2 & 0x7F
+        if ln == 126:
+            ln = int.from_bytes(self._recv_exact(2), "big")
+        elif ln == 127:
+            ln = int.from_bytes(self._recv_exact(8), "big")
+        if ln > 16 * 1024 * 1024:
+            raise ConnectionError("gateway frame too large")
+        mask = self._recv_exact(4) if masked else None
+        data = self._recv_exact(ln)
+        if mask:
+            data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
+        return fin, opcode, data
+
+    def _send_frame(self, opcode, payload):
+        mask = os.urandom(4)
+        n = len(payload)
+        head = bytes([0x80 | opcode])
+        if n < 126:
+            head += bytes([0x80 | n])
+        elif n < 65536:
+            head += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else:
+            head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        self._sock.sendall(head + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+
+    def call(self, method, **params):
+        self._id += 1
+        self._deadline = time.monotonic() + self._timeout_s
+        self._send_frame(1, json.dumps({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}).encode())
+        frag = b""
+        while True:
+            fin, opcode, data = self._read_frame()
+            if opcode == 9:  # ping: answer and keep waiting
+                self._send_frame(10, data)
+                continue
+            if opcode == 8:
+                raise ConnectionError("gateway closed the websocket")
+            if opcode not in (0, 1, 2):
+                continue
+            frag += data
+            if not fin:
+                continue
+            payload, frag = frag, b""
+            try:
+                doc = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(doc, dict) or doc.get("id") != self._id:
+                continue
+            if "error" in doc:
+                raise _HermesRpcError(str((doc["error"] or {}).get("message") or doc["error"])[:200])
+            return doc.get("result") or {}
+
+    def close(self):
+        try:
+            self._deadline = time.monotonic() + 2
+            self._send_frame(8, (1000).to_bytes(2, "big"))
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _hermes_ws_rpc(url, protocols, timeout_s):
+    try:
+        import websockets.sync.client  # noqa: F401
+    except ImportError:
+        return _StdlibWsRpc(url, protocols, timeout_s)
+    return _WebsocketsRpc(url, protocols, timeout_s)
+
+
+def interrupt_hermes_session(session_id, home=None, timeout_s=5.0):
+    """Stop ONE session on a Hermes gateway without stopping the gateway process.
+
+    Killing `hermes chat` does not reliably stop the gateway-side session: the transport client
+    detaches on SIGINT ('accepted work continues at the gateway'), and the classic -q client's
+    signal interrupt is best-effort (a lost RPC, a startup race or SIGKILL leaves the turn running).
+    The documented external stop is the gateway JSON-RPC `session.interrupt` -- what chat's /stop
+    sends -- reached through `hermes gateway attach --json` (the owner's WebSocket url + single-use
+    ticket subprotocols). `session.interrupt` needs the live execution_generation, read from a
+    lightweight `session.resume`. Returns (ok, detail) for the run log; ok means the session is no
+    longer running. Never starts a gateway and never signals the gateway process, so a shared
+    gateway keeps serving everyone else.
+    """
+    if not session_id:
+        return False, "no session id"
+    if not shutil.which("hermes"):
+        return False, "hermes binary not found"
+    env = {k: v for k, v in os.environ.items() if not _is_stripped_hermes_env_key(k)}
+    if home:
+        env["HERMES_HOME"] = str(home)
+    try:
+        p = subprocess.run(["hermes", "gateway", "attach", "--json"], env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=max(8.0, timeout_s + 3))
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"gateway attach failed: {e}"
+    if p.returncode != 0:
+        # No attachable owner: nothing can be running there. (On success the stdout carries the
+        # single-use ticket and is never logged.)
+        return False, f"gateway attach exited {p.returncode}: {_tail(p.stderr or p.stdout)}"
+    try:
+        doc = json.loads(p.stdout)
+        url, protocols = doc["url"], list(doc["protocols"])
+    except (ValueError, KeyError, TypeError) as e:
+        return False, f"gateway attach gave no url/protocols: {e}"
+
+    def _detach(rpc, sub):
+        if sub:
+            try:
+                rpc.call("session.detach", session_id=session_id, subscription_id=sub)
+            except (_HermesRpcError, OSError, ValueError):
+                pass
+
+    try:
+        with _hermes_ws_rpc(url, protocols, timeout_s) as rpc:
+            snap = rpc.call("session.resume", session_id=session_id, omit_messages=True)
+            sub = snap.get("subscription_id")
+            if not snap.get("running"):
+                _detach(rpc, sub)
+                return True, "session was not running"
+            gen = snap.get("execution_generation")
+            try:
+                rpc.call("session.interrupt", session_id=session_id, execution_generation=gen)
+            except _HermesRpcError as e:
+                if "stale_generation" not in str(e):
+                    raise
+                # The turn settled or a new one started between resume and interrupt: re-read once.
+                snap = rpc.call("session.resume", session_id=session_id, omit_messages=True)
+                sub = snap.get("subscription_id") or sub
+                if not snap.get("running"):
+                    _detach(rpc, sub)
+                    return True, "session was not running"
+                gen = snap.get("execution_generation")
+                rpc.call("session.interrupt", session_id=session_id, execution_generation=gen)
+            _detach(rpc, sub)
+            return True, f"interrupted generation {gen}"
+    except _HermesRpcError as e:
+        if "not_found" in str(e):
+            return True, "session not found at the gateway"
+        return False, f"gateway refused the stop: {e}"
+    except (OSError, ValueError) as e:
+        return False, f"gateway rpc failed: {e}"
+
+
 def hermes_dbs(home=None):
     base = Path(home) if home else HERMES_HOME
     dbs = [("default", base / "state.db")]

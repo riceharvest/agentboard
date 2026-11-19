@@ -31,6 +31,7 @@ ONE of these and stop:
 
     ab done $AB_TASK "what changed, where, how you verified it"
     ab fail $AB_TASK "why it can't be done"            # counts an attempt
+    ab fail $AB_TASK --negative "intended negative"    # dead immediately, label outcome=negative (skipped by `ab anomalies` and `--on dead` watchers)
     ab defer $AB_TASK --after <ID> --why "..."          # wait for another task
     ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"
 

@@ -442,6 +442,21 @@ def _task_actor_ok(conn, row, actor, perm="manage"):
     require(conn, actor, perm, row["board"], row["channel"])
 
 
+def _can_mark_negative(conn, row, actor):
+    """Owner, creator, system, or any actor with write access (`post`, `claim`, or `manage`) on the card."""
+    if actor in (row["owner"], row["created_by"]) or is_system(actor):
+        return True
+    return any(can(conn, actor, p, row["board"], row["channel"]) for p in ("post", "claim", "manage"))
+
+
+def is_negative(task):
+    """True when a task is marked with label outcome=negative (intended negative, not an operational failure)."""
+    labels = task["labels"] if isinstance(task, dict) else task["labels"]
+    if isinstance(labels, str):
+        labels = json.loads(labels or "{}")
+    return (labels or {}).get("outcome") == "negative"
+
+
 # ---------------------------------------------------------------- tasks
 def new_id(conn):
     while True:
@@ -770,8 +785,50 @@ def answer(conn, tid, actor, text):
     return row["id"]
 
 
-def fail(conn, tid, actor, why, force=False):
+def fail(conn, tid, actor, why, force=False, negative=False):
     with tx(conn):
+        if negative:
+            row = must_task(conn, tid)
+            if row["status"] == "dead":
+                if not _can_mark_negative(conn, row, actor):
+                    raise PermissionError(f"{actor} has no write access on {row['board']}:{row['channel']}")
+                cur = json.loads(row["labels"] or "{}")
+                changed = {"outcome": "negative"} if cur.get("outcome") != "negative" else {}
+                cur["outcome"] = "negative"
+                res = row["result"] or why
+                conn.execute("UPDATE tasks SET labels=?, result=?, updated_at=? WHERE id=?",
+                             (json.dumps(cur), res, now(), row["id"]))
+                if why:
+                    post_message(conn, actor, "NEGATIVE: " + why, thread=row["id"], check=False, _in_tx=True)
+                if changed:
+                    event(conn, row["id"], actor, "label", {"changed": changed})
+                return row["id"], "dead"
+            if row["status"] == "claimed":
+                if row["owner"] != actor and not force:
+                    raise PermissionError(f"task {row['id']} is held by {row['owner']}, you are {actor} (use --force)")
+                if row["owner"] != actor:
+                    _task_actor_ok(conn, row, actor)
+            elif row["status"] == "open":
+                if force:
+                    _task_actor_ok(conn, row, actor)
+                elif not _can_mark_negative(conn, row, actor):
+                    raise PermissionError(f"{actor} has no write access on {row['board']}:{row['channel']}")
+            else:
+                raise ValueError(f"task {row['id']} is already {row['status']}")
+            cur = json.loads(row["labels"] or "{}")
+            changed = {"outcome": "negative"} if cur.get("outcome") != "negative" else {}
+            cur["outcome"] = "negative"
+            attempts = (row["attempts"] or 0) + 1
+            conn.execute("UPDATE tasks SET status='dead', attempts=?, owner=NULL, lease_until=NULL, "
+                         "labels=?, result=?, updated_at=? WHERE id=?",
+                         (attempts, json.dumps(cur), why, now(), row["id"]))
+            if why:
+                post_message(conn, actor, "NEGATIVE: " + why, thread=row["id"], check=False, _in_tx=True)
+            event(conn, row["id"], actor, "dead", {"why": why, "attempts": attempts, "after": "negative", "outcome": "negative"})
+            if changed:
+                event(conn, row["id"], actor, "label", {"changed": changed})
+            _report_back(conn, row, actor, f"NEGATIVE: {why}" if why else "NEGATIVE")
+            return row["id"], "dead"
         row = _owned(conn, tid, actor, force)
         if why:
             post_message(conn, actor, "FAILED: " + why, thread=row["id"], check=False, _in_tx=True)
@@ -829,6 +886,10 @@ def retry(conn, tid, actor):
         _task_actor_ok(conn, row, actor)
         if row["status"] == "claimed":
             raise PermissionError(f"task {row['id']} is claimed by {row['owner']}")
+        cur = json.loads(row["labels"] or "{}")
+        if cur.get("outcome") == "negative":
+            cur.pop("outcome", None)
+            conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(cur), row["id"]))
         conn.execute("UPDATE tasks SET status='open', attempts=0, owner=NULL, lease_until=NULL, not_before=NULL, updated_at=? WHERE id=?",
                      (now(), row["id"]))
         event(conn, row["id"], actor, "retry", {"was": row["status"]})
@@ -842,7 +903,11 @@ EDITABLE = {"title", "body", "channel", "priority", "tier", "harness", "model", 
 def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
     with tx(conn):
         row = must_task(conn, tid)
-        _task_actor_ok(conn, row, actor)
+        if not fields and not add_deps and not rm_deps and row["status"] == "dead" and labels == {"outcome": "negative"}:
+            if not _can_mark_negative(conn, row, actor):
+                raise PermissionError(f"{actor} has no write access on {row['board']}:{row['channel']}")
+        else:
+            _task_actor_ok(conn, row, actor)
         if "tier" in fields and fields["tier"] not in cfg(conn, "tiers"):
             raise ValueError(f"unknown tier {fields['tier']!r}")
         if "board" in fields or "channel" in fields:
@@ -879,6 +944,41 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
         if changed:
             event(conn, row["id"], actor, "label", {"changed": changed})
     return row["id"]
+
+
+def anomalies(conn, actor="agent", board=None, since=None):
+    """Scan visible tasks for anomalies: dead cards (skipping outcome=negative) and open cards stuck on dead/cancelled deps."""
+    sql, args = "SELECT * FROM tasks", []
+    if board:
+        require_board(conn, board)
+        sql += " WHERE board=?"
+        args.append(board)
+    rows = [r for r in conn.execute(sql, args).fetchall() if can(conn, actor, "read", r["board"], r["channel"])]
+    byid = {r["id"]: r for r in rows}
+    out = []
+    for r in sorted(rows, key=lambda x: x["updated_at"] or 0):
+        if r["status"] == "dead":
+            if is_negative(r):
+                continue
+            if since is not None and (r["updated_at"] or 0) < since:
+                continue
+            out.append({"kind": "dead", "task_id": r["id"], "board": r["board"], "title": r["title"],
+                        "updated_at": r["updated_at"], "message": f"dead card {r['id']} {r['title'][:60]}"})
+    for r in sorted(rows, key=lambda x: x["created_at"] or 0):
+        if r["status"] == "open":
+            deps = [d["dep_id"] for d in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (r["id"],))]
+            if not deps:
+                continue
+            bad = []
+            for d in deps:
+                p = byid.get(d) or conn.execute("SELECT status FROM tasks WHERE id=?", (d,)).fetchone()
+                if p and p["status"] in ("dead", "cancelled"):
+                    bad.append(d)
+            if bad:
+                out.append({"kind": "blocked", "task_id": r["id"], "board": r["board"], "deps": bad,
+                            "title": r["title"], "updated_at": r["updated_at"],
+                            "message": f"blocked: {r['id']} <{r['board']}> waits on dead/cancelled {','.join(bad)}: {r['title'][:60]}"})
+    return out
 
 
 # ---------------------------------------------------------------- limits (cooldowns)

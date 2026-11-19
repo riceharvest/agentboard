@@ -179,6 +179,8 @@ def run_watchers(conn):
         for e in evs:
             if e["actor"] == me or e.get("task_id") in own or _worker_task(conn, e["actor"]) in own:
                 continue  # never wake on our own echo
+            if e["kind"] == "dead" and (e.get("payload") or {}).get("outcome") == "negative" and not spec.get("label"):
+                continue  # intended negative outcome, not an operational dead-card anomaly
             if match_event(e, kinds=spec.get("kinds"), channel=spec.get("channel"), thread=spec.get("thread"),
                            mention=spec.get("mention"), actor=spec.get("actor"), text=spec.get("text"), label=spec.get("label")):
                 hits.append(e)

@@ -224,8 +224,17 @@ def cmd_done(c, a, out):
 
 
 def cmd_fail(c, a, out):
-    tid, state = store.fail(c, a.id, actor_of(a), text_arg(a.why, a.why_file), a.force)
-    out({"id": tid, "status": state}, f"{tid} failed -> {state}")
+    tid, state = store.fail(c, a.id, actor_of(a), text_arg(a.why, a.why_file), a.force, negative=a.negative)
+    suffix = " (negative)" if a.negative else ""
+    out({"id": tid, "status": state, "negative": bool(a.negative)}, f"{tid} failed -> {state}{suffix}")
+
+
+def cmd_anomalies(c, a, out):
+    store.reap(c)
+    bsel = None if a.all_boards else board_of(a)
+    since = (now() - parse_dur(a.since)) if a.since else None
+    items = store.anomalies(c, actor=actor_of(a), board=bsel, since=since)
+    out(items, lambda xs: "\n".join(x["message"] for x in xs) or "(no anomalies)")
 
 
 def cmd_release(c, a, out):
@@ -1234,7 +1243,12 @@ def build_parser():
     s.add_argument("id")
     s.add_argument("why", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--why-file", help="read the reason from this file")
+    s.add_argument("--negative", action="store_true", help="mark as intended negative (dead immediately, label outcome=negative, skipped by anomaly scans)")
     s.add_argument("--force", action="store_true")
+
+    s = sub("anomalies", cmd_anomalies, "list dead cards (excluding outcome=negative) and open cards blocked on dead/cancelled deps")
+    s.add_argument("--all-boards", action="store_true")
+    s.add_argument("--since", help="only dead cards updated within this window, e.g. 6h, 1d")
 
     s = sub("release", cmd_release, "hand the task back without counting an attempt")
     s.add_argument("id")

@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -137,6 +138,73 @@ def actor_of(a):
 
 def board_of(a):
     return getattr(a, "board", None) or os.environ.get("AB_BOARD") or store.DEFAULT_BOARD
+
+
+# ---- run-home identity: a worker terminal may lack AB_TASK/AB_ACTOR/AB_BOARD (the shared Hermes gateway never passes the
+# runner's per-run env to its terminal tool). A shell whose HERMES_HOME or cwd is <root>/profiles/ab-run-N, with a marker
+# the runner wrote into that home, takes its identity from live run N, and only from that run.
+RUN_HOME_RE = re.compile(r"(?:^|/)profiles/ab-run-(\d+)(?=/|$)")
+RUN_MARKER = "ab-run.json"
+TASK_SLOT = {"cmd_note": "text", "cmd_done": "result", "cmd_fail": "why"}   # where the free text goes
+TEXT_FILE_OPTS = ("file", "summary_file", "why_file")
+
+
+def infer_run(c, board=None, env=None, cwd=None):
+    """(ctx, reason). ctx = {task, actor, board, run} when this shell is a run home of a live run; reason explains a refusal
+    (None when this shell is not a run home at all). Never writes."""
+    env = os.environ if env is None else env
+    cwd = os.getcwd() if cwd is None else cwd
+    hits = {}
+    for src, p in (("HERMES_HOME", env.get("HERMES_HOME")), ("cwd", cwd)):
+        if not p:
+            continue
+        full = str(Path(p).expanduser().resolve())
+        m = RUN_HOME_RE.search(full)
+        if m:
+            hits[src] = (int(m.group(1)), Path(full[:m.end()]))
+    if not hits:
+        return None, None
+    runs = {n for n, _ in hits.values()}
+    if len(runs) > 1:
+        return None, f"ambiguous: HERMES_HOME and cwd name different runs {sorted(runs)}"
+    run_id, home = next(iter(hits.values()))
+    try:
+        mk = json.loads((home / RUN_MARKER).read_text())
+    except (OSError, ValueError):
+        return None, f"run home {home} has no {RUN_MARKER} written by the runner"
+    if mk.get("run") != run_id or mk.get("ab_home") != str(store.HOME):
+        return None, f"run home {home} marker does not match run {run_id} on this AB_HOME"
+    r = c.execute("SELECT r.id, r.harness, r.pid, r.pid_start, r.ended_at, t.id AS task, t.board, t.owner, t.status "
+                  "FROM runs r JOIN tasks t ON t.run_id = r.id WHERE r.id=?", (run_id,)).fetchone()
+    if r is None:
+        return None, f"run {run_id} not found on this board DB"
+    if r["ended_at"] is not None:
+        return None, f"run {run_id} already ended (stale run home)"
+    if r["harness"] != "hermes" or r["task"] != mk.get("task") or r["board"] != mk.get("board") or r["owner"] != mk.get("actor"):
+        return None, f"run {run_id} does not match its marker (task/board/actor changed)"
+    if r["status"] != "claimed":
+        return None, f"task {r['task']} is {r['status']}, not held by run {run_id}"
+    if r["pid"] is None or R.pid_start(r["pid"]) is None or R.pid_start(r["pid"]) != r["pid_start"]:
+        return None, f"run {run_id} process {r['pid']} is gone (run is ending)"
+    if board and board != r["board"]:
+        return None, f"run {run_id} is on board {r['board']}, not {board}: refusing to resolve it on {board}"
+    return {"task": r["task"], "actor": r["owner"], "board": r["board"], "run": run_id}, None
+
+
+def adopt_run_identity(c, board=None):
+    """Fill AB_TASK/AB_ACTOR/AB_BOARD/AB_RUN from the live run this shell belongs to (only unset ones, only for the same task).
+    Returns (ctx, reason) from infer_run; ctx is None when nothing was adopted."""
+    if os.environ.get("AB_TASK") and os.environ.get("AB_ACTOR") and os.environ.get("AB_BOARD"):
+        return None, None
+    ctx, reason = infer_run(c, board=board or os.environ.get("AB_BOARD") or None)
+    if ctx is None:
+        return None, reason
+    if os.environ.get("AB_TASK") and os.environ["AB_TASK"] != ctx["task"]:
+        return None, f"AB_TASK={os.environ['AB_TASK']} is not the task of run {ctx['run']} ({ctx['task']})"
+    for k, v in (("AB_TASK", ctx["task"]), ("AB_ACTOR", ctx["actor"]), ("AB_BOARD", ctx["board"]), ("AB_RUN", str(ctx["run"]))):
+        if not os.environ.get(k):
+            os.environ[k] = v
+    return ctx, None
 
 
 def admin(c, a, board=None):
@@ -1273,20 +1341,20 @@ def build_parser():
     s.add_argument("--force", action="store_true")
 
     s = sub("note", cmd_note, "append a note to a task thread")
-    s.add_argument("id")
+    s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")
     s.add_argument("text", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--file", help="read the note from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data", help="JSON (or @file)")
 
     s = sub("done", cmd_done, "complete your task", ["complete"])
-    s.add_argument("id")
+    s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")
     s.add_argument("result", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--summary-file", help="read the result from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data")
     s.add_argument("--force", action="store_true")
 
     s = sub("fail", cmd_fail, "give up this attempt (task retries until max attempts, then dead)")
-    s.add_argument("id")
+    s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")
     s.add_argument("why", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--why-file", help="read the reason from this file")
     s.add_argument("--negative", action="store_true", help="mark as intended negative (dead immediately, label outcome=negative, skipped by anomaly scans)")
@@ -1598,6 +1666,24 @@ def _sanitize_worker_env():
             os.environ.pop(k, None)
 
 
+def _resolve_task_arg(conn, a, fn_name):
+    """`ab done/note/fail` without a usable task id: take it from the run home. `ab done "summary"` with $AB_TASK empty
+    reaches us with the summary in the id slot; a value that is not a task on this board moves into the text slot."""
+    slot = TASK_SLOT[fn_name]
+    if a.id and store.get_task(conn, a.id) is not None:
+        return
+    if a.id and getattr(a, slot) or a.id and any(getattr(a, k, None) for k in TEXT_FILE_OPTS):
+        return  # an explicit id that is not a task: let the store report it
+    ctx, reason = adopt_run_identity(conn, board=getattr(a, "board", None))
+    if ctx is None:
+        if a.id:
+            return  # no run home: keep the store's own error for a bad id
+        raise ValueError(f"no task id: pass it, or export AB_TASK, AB_ACTOR and AB_BOARD" + (f" ({reason})" if reason else ""))
+    if a.id:
+        setattr(a, slot, a.id)
+    a.id = ctx["task"]
+
+
 def main(argv=None):
     _sanitize_worker_env()
     argv = sys.argv[1:] if argv is None else list(argv)
@@ -1614,6 +1700,9 @@ def main(argv=None):
     out = Out(getattr(a, "json", False))
     conn = (store.connect_ro() if getattr(a, "ro", False) else None) or store.connect()
     try:
+        fn = getattr(a, "fn", None)
+        if fn is not None and fn.__name__ in TASK_SLOT:
+            _resolve_task_arg(conn, a, fn.__name__)
         rc = a.fn(conn, a, out)
         return rc or 0
     except (LookupError, PermissionError, ValueError, KeyError, sqlite3.Error) as e:

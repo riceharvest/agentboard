@@ -50,18 +50,20 @@ workdir: {workdir}
 
 {body}
 {park}{context}{deps}{notes}
-BOARD (the `ab` CLI is on PATH; AB_TASK={id}, AB_ACTOR and AB_BOARD are already set for you):
-  ab note $AB_TASK "progress, findings, decisions"     keep a trail for whoever picks this up next
+BOARD (the `ab` CLI is on PATH). Your task is {id}, you act as {actor} on board {board}. Use these literal ids in the commands
+below. Your shell may not export AB_TASK/AB_ACTOR/AB_BOARD; `ab` then works them out from this run's home, and if it cannot, prefix:
+  AB_TASK={id} AB_ACTOR={actor} AB_BOARD={board} ab done {id} "..."     (never --force to get past "held by")
+  ab note {id} "progress, findings, decisions"     keep a trail for whoever picks this up next
   ab add "title" --body "..." [--dep ID] [--tier low|medium|high|max]   hand sub-work to other agents
   ab ask CHANNEL "question for @someone" --wait 10m   ask another agent and block for the answer
   ab reply THREAD "text" ; ab read CHANNEL ; ab inbox   talk in threads (THREAD = task id or m<id>)
-  ab followup $AB_TASK "check CI for the PR" --in 5m  schedule a later check that reports back here
-  ab defer $AB_TASK --after ID [--why "..."]           park this task until ID is done, then stop
-  ab park $AB_TASK --pid PID --note "..."              long job detached (nohup/setsid): exit now, a fresh agent resumes when it ends
-  ab park $AB_TASK --file PATH [--grace 60s] --note "..."   same, waking when the file exists and stops growing
-  ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"   escalate, then stop
-  ab done $AB_TASK "short result: what changed, where, how it was verified"
-  ab fail $AB_TASK "why it cannot be done"
+  ab followup {id} "check CI for the PR" --in 5m  schedule a later check that reports back here
+  ab defer {id} --after ID [--why "..."]           park this task until ID is done, then stop
+  ab park {id} --pid PID --note "..."              long job detached (nohup/setsid): exit now, a fresh agent resumes when it ends
+  ab park {id} --file PATH [--grace 60s] --note "..."   same, waking when the file exists and stops growing
+  ab edit {id} --tier high && ab release {id} "needs a stronger model"   escalate, then stop
+  ab done {id} "short result: what changed, where, how it was verified"
+  ab fail {id} "why it cannot be done"
   ab show ID | ab ls --ready | ab guide                 read the board
 Do the work, verify it for real, then call exactly ONE of done / fail / defer / park / release and stop.
 """
@@ -715,6 +717,9 @@ class Runner:
             hermes_home = str(H.prepare_hermes_home(H.hermes_run_home(run_id)))
             env = {k: v for k, v in env.items() if not H._is_stripped_hermes_env_key(k)}
             env["HERMES_HOME"] = hermes_home
+            # identity marker for `ab`: a shell whose HERMES_HOME/cwd is this home resolves its task from this run (cli.infer_run)
+            Path(hermes_home, "ab-run.json").write_text(json.dumps({"run": run_id, "task": task["id"], "actor": owner,
+                                                                    "board": cur["board"], "ab_home": str(store.HOME)}))
         home = str(store.HOME)
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id),
                     "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"],

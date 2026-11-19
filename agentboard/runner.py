@@ -318,6 +318,16 @@ class Runner:
     def reload(self):
         """Re-exec this runner with the code on disk. Running harnesses live in their own sessions and are
         re-adopted from the db by the new process (same pid, so they are still our children)."""
+        # Pre-flight: a broken edit on disk must not take the runner (and its agents) down.
+        chk = subprocess.run([sys.executable, "-c", "import agentboard.cli, agentboard.runner, agentboard.harness, "
+                              "agentboard.usage, agentboard.store, agentboard.automation"],
+                             capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
+        if chk.returncode:
+            self.log(f"reload refused, new code does not import: {(chk.stderr or chk.stdout).strip()[-400:]}")
+            with tx(self.conn):
+                store.cfg_set(self.conn, "stop", "", "runner")
+                event(self.conn, None, "runner", "runner_reload_refused", {"error": (chk.stderr or "")[-400:]})
+            return
         self.log(f"reloading with {len(self.children)} run(s) in flight")
         with tx(self.conn):
             store.cfg_set(self.conn, "stop", "", "runner")

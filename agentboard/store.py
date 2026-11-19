@@ -1,4 +1,5 @@
-"""SQLite store: tasks, deps, notes, events, runs, usage, limits, control, schedules."""
+"""SQLite store: boards, tasks, deps, messages, events, grants, runs, usage, limits, control, schedules."""
+import fnmatch
 import json
 import os
 import re
@@ -11,10 +12,13 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("AB_HOME", "~/.agentboard")).expanduser()
 DB_PATH = HOME / "board.db"
+DEFAULT_BOARD = "main"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS boards(name TEXT PRIMARY KEY, description TEXT DEFAULT '', paused INTEGER DEFAULT 0,
+  max_slots INTEGER, default_tier TEXT, default_workdir TEXT, created_by TEXT, created_at REAL);
 CREATE TABLE IF NOT EXISTS tasks(
-  id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT DEFAULT '', channel TEXT DEFAULT 'main',
+  id TEXT PRIMARY KEY, board TEXT DEFAULT 'main', title TEXT NOT NULL, body TEXT DEFAULT '', channel TEXT DEFAULT 'main',
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
   tier TEXT DEFAULT 'medium', harness TEXT, model TEXT, workdir TEXT, runnable INTEGER DEFAULT 1,
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 3, timeout_s INTEGER,
@@ -23,9 +27,21 @@ CREATE TABLE IF NOT EXISTS tasks(
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, priority);
 CREATE TABLE IF NOT EXISTS deps(task_id TEXT, dep_id TEXT, PRIMARY KEY(task_id, dep_id));
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, task_id TEXT, author TEXT, body TEXT, data TEXT, ts REAL);
-CREATE INDEX IF NOT EXISTS notes_task ON notes(task_id, id);
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts REAL, task_id TEXT, actor TEXT, kind TEXT, payload TEXT);
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, board TEXT, channel TEXT, thread TEXT, author TEXT,
+  body TEXT, data TEXT, mentions TEXT DEFAULT '[]', ts REAL);
+CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread, id);
+CREATE INDEX IF NOT EXISTS messages_chan ON messages(board, channel, id);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts REAL, board TEXT, channel TEXT, task_id TEXT, actor TEXT,
+  kind TEXT, payload TEXT);
 CREATE INDEX IF NOT EXISTS events_task ON events(task_id, id);
+CREATE TABLE IF NOT EXISTS grants(id INTEGER PRIMARY KEY, board TEXT DEFAULT '*', who TEXT, channel TEXT DEFAULT '*',
+  perms TEXT, note TEXT, created_by TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS watchers(id INTEGER PRIMARY KEY, board TEXT, name TEXT, spec TEXT, action TEXT,
+  enabled INTEGER DEFAULT 1, last_event_id INTEGER DEFAULT 0, last_fired REAL, fired INTEGER DEFAULT 0,
+  created_by TEXT, created_at REAL, UNIQUE(board, name));
+CREATE TABLE IF NOT EXISTS syncs(id INTEGER PRIMARY KEY, board TEXT, name TEXT, kind TEXT, spec TEXT,
+  enabled INTEGER DEFAULT 1, state TEXT DEFAULT '{}', last_run REAL, last_error TEXT,
+  created_by TEXT, created_at REAL, UNIQUE(board, name));
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY, task_id TEXT, harness TEXT, model TEXT, effort TEXT, tier TEXT, bucket TEXT,
   pid INTEGER, pid_start TEXT, started_at REAL, ended_at REAL, exit_code INTEGER, outcome TEXT,
@@ -49,7 +65,7 @@ CREATE TABLE IF NOT EXISTS runner(id INTEGER PRIMARY KEY CHECK(id=1), pid INTEGE
 CREATE TABLE IF NOT EXISTS models(harness TEXT, model TEXT, label TEXT, seen_at REAL, PRIMARY KEY(harness, model));
 """
 
-# Every runtime setting lives in `control`, so any agent can change it with `ab config set`.
+# Every runtime setting lives in `control`, so any agent with admin rights can change it with `ab config set`.
 DEFAULTS = {
     "slots": 2,                 # parallel agents when no schedule window says otherwise
     "paused": False,
@@ -60,9 +76,10 @@ DEFAULTS = {
     "timeout": "2h",            # default per-run wall clock
     "min_free_gib": 10,         # don't start an agent below this much free RAM
     "harvest_every_s": 60,
+    "sync_every_s": 120,
     "channels": "",             # comma list the runner serves; empty = all
     "share_workdir": False,     # allow two runs in the same workdir at once
-    "tier_fallback": "none",    # none | up | down | any: when every candidate of a tier is limited
+    "tier_fallback": "any",     # none | up | down | any: when every candidate of a tier is limited
     "default_tier": "medium",
     "cooldown.limit": "30m",    # used when a limit error carries no reset time
     "cooldown.unavailable": "5m",
@@ -82,6 +99,12 @@ DEFAULTS = {
     "extra_args": {},           # harness -> [args] appended to every launch
 }
 
+PERMS = ("read", "post", "create", "claim", "manage", "admin")
+SYSTEM_ACTORS = ("runner", "board")
+SYSTEM_PREFIXES = ("sched:", "watch:", "sync:")
+# Runner-launched workers act as "<harness>#<run>". By default they can work but not steer the board.
+DEFAULT_GRANTS = [("*", "*#*", "*", "read,post,create,claim", "runner workers: work, don't administer")]
+
 
 def now():
     return time.time()
@@ -94,9 +117,45 @@ def connect(path=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=OFF")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
+
+
+def _cols(conn, table):
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate(conn):
+    if "board" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN board TEXT DEFAULT 'main'")
+    ev = _cols(conn, "events")
+    if "board" not in ev:
+        conn.execute("ALTER TABLE events ADD COLUMN board TEXT")
+    if "channel" not in ev:
+        conn.execute("ALTER TABLE events ADD COLUMN channel TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
+    if conn.execute("SELECT value FROM control WHERE key='_schema'").fetchone() is not None:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT value FROM control WHERE key='_schema'").fetchone() is None:
+            # notes -> messages (thread = task id)
+            for n in conn.execute("SELECT n.*, t.board, t.channel FROM notes n LEFT JOIN tasks t ON t.id=n.task_id").fetchall():
+                conn.execute("INSERT INTO messages(board,channel,thread,author,body,data,mentions,ts) VALUES(?,?,?,?,?,?,'[]',?)",
+                             (n["board"] or DEFAULT_BOARD, n["channel"], n["task_id"], n["author"], n["body"], n["data"], n["ts"]))
+            conn.execute("DELETE FROM notes")
+            conn.execute("INSERT OR IGNORE INTO boards(name,description,created_by,created_at) VALUES(?,?,?,?)",
+                         (DEFAULT_BOARD, "default board", "board", now()))
+            for b, who, ch, perms, note_ in DEFAULT_GRANTS:
+                conn.execute("INSERT INTO grants(board,who,channel,perms,note,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                             (b, who, ch, perms, note_, "board", now()))
+            conn.execute("INSERT INTO control(key,value) VALUES('_schema','2')")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
 
 
 @contextmanager
@@ -111,19 +170,17 @@ def tx(conn):
 
 
 # ---------------------------------------------------------------- parsing helpers
-_DUR = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|w|weeks?)?\s*$", re.I)
-
-
 def parse_dur(s, default_unit="s"):
-    """'90s' '30m' '2h' '1d' '1w' or a plain number of seconds -> seconds (float)."""
+    """'90s' '30m' '2h' '1d' '1w' '1h30m' or a plain number of seconds -> seconds (float)."""
     if s is None or s == "":
         return None
     if isinstance(s, (int, float)):
         return float(s)
-    total, rest = 0.0, str(s).strip()
+    rest = str(s).strip()
     parts = re.findall(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]*)", rest)
     if not parts or "".join(a + b for a, b in parts) != re.sub(r"\s+", "", rest):
         raise ValueError(f"bad duration: {s!r}")
+    total = 0.0
     for num, unit in parts:
         u = (unit or default_unit).lower()
         mult = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}.get(u[0])
@@ -151,8 +208,7 @@ def parse_time(s, base=None):
             t += timedelta(days=1)
         return t.timestamp()
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.timestamp()
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except ValueError:
         pass
     try:
@@ -170,9 +226,7 @@ def fmt_ts(t):
 def fmt_dur(sec):
     if sec is None:
         return "-"
-    sec = int(sec)
-    if sec < 0:
-        sec = 0
+    sec = max(0, int(sec))
     if sec < 90:
         return f"{sec}s"
     if sec < 5400:
@@ -224,9 +278,133 @@ def coerce(value):
     return v
 
 
-def event(conn, task_id, actor, kind, payload=None):
-    conn.execute("INSERT INTO events(ts,task_id,actor,kind,payload) VALUES(?,?,?,?,?)",
-                 (now(), task_id, actor, kind, json.dumps(payload) if payload is not None else None))
+def event(conn, task_id, actor, kind, payload=None, board=None, channel=None):
+    if task_id and (board is None or channel is None):
+        r = conn.execute("SELECT board, channel FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if r:
+            board, channel = board or r["board"], channel or r["channel"]
+    cur = conn.execute("INSERT INTO events(ts,board,channel,task_id,actor,kind,payload) VALUES(?,?,?,?,?,?,?)",
+                       (now(), board, channel, task_id, actor, kind, json.dumps(payload) if payload is not None else None))
+    return cur.lastrowid
+
+
+# ---------------------------------------------------------------- boards
+def board_row(conn, name):
+    return conn.execute("SELECT * FROM boards WHERE name=?", (name,)).fetchone()
+
+
+def require_board(conn, name):
+    row = board_row(conn, name)
+    if row is None:
+        names = ", ".join(r["name"] for r in conn.execute("SELECT name FROM boards ORDER BY name"))
+        raise LookupError(f"no board {name!r} (boards: {names}); create it with `ab boards create {name}`")
+    return row
+
+
+def board_create(conn, name, actor, description="", max_slots=None, default_tier=None, default_workdir=None):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name or ""):
+        raise ValueError("board names: letters, digits, _ . - (max 64)")
+    with tx(conn):
+        if board_row(conn, name):
+            raise ValueError(f"board {name!r} exists")
+        conn.execute("INSERT INTO boards(name,description,max_slots,default_tier,default_workdir,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                     (name, description or "", max_slots, default_tier, default_workdir, actor, now()))
+        event(conn, None, actor, "board_created", {"name": name}, board=name)
+
+
+def board_update(conn, name, actor, **fields):
+    allowed = {"description", "paused", "max_slots", "default_tier", "default_workdir"}
+    with tx(conn):
+        require_board(conn, name)
+        for k, v in fields.items():
+            if k not in allowed:
+                raise ValueError(f"cannot set {k}")
+            conn.execute(f"UPDATE boards SET {k}=? WHERE name=?", (v, name))
+        event(conn, None, actor, "board_updated", {"name": name, **fields}, board=name)
+
+
+def board_delete(conn, name, actor, force=False):
+    with tx(conn):
+        require_board(conn, name)
+        if name == DEFAULT_BOARD:
+            raise ValueError("the main board can't be removed")
+        live = conn.execute("SELECT COUNT(*) FROM tasks WHERE board=? AND status IN ('open','claimed')", (name,)).fetchone()[0]
+        if live and not force:
+            raise ValueError(f"board {name} has {live} open/claimed tasks (use --force to cancel them)")
+        conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL WHERE board=? AND status IN ('open','claimed')", (name,))
+        for t in ("watchers", "syncs"):
+            conn.execute(f"DELETE FROM {t} WHERE board=?", (name,))
+        conn.execute("DELETE FROM grants WHERE board=?", (name,))
+        conn.execute("DELETE FROM boards WHERE name=?", (name,))
+        event(conn, None, actor, "board_deleted", {"name": name}, board=name)
+
+
+# ---------------------------------------------------------------- access (guardrails, not security: actors are self-declared)
+def parse_perms(s):
+    s = (s or "").strip().lower()
+    if s in ("all", "*"):
+        return set(PERMS)
+    if s in ("none", ""):
+        return set()
+    out = {p.strip() for p in s.split(",") if p.strip()}
+    bad = out - set(PERMS)
+    if bad:
+        raise ValueError(f"unknown permissions {sorted(bad)}; use {', '.join(PERMS)}, all, none")
+    return out
+
+
+def is_system(actor):
+    return actor in SYSTEM_ACTORS or any(actor.startswith(p) for p in SYSTEM_PREFIXES)
+
+
+def _who_rank(who):
+    if who == "*":
+        return 0
+    return 1 if any(ch in who for ch in "*?[") else 2
+
+
+def explain(conn, actor, perm, board, channel=None):
+    """-> (allowed, deciding grants). Most specific channel scope wins, then board-specific, then exact actor."""
+    if is_system(actor):
+        return True, []
+    best, chosen = None, []
+    for g in conn.execute("SELECT * FROM grants WHERE board IN (?, '*')", (board,)).fetchall():
+        if not fnmatch.fnmatchcase(actor, g["who"]):
+            continue
+        scope = (g["channel"] or "*").strip()
+        if scope != "*":
+            if perm == "admin":
+                continue  # admin is board-wide
+            s = scope.rstrip("/")
+            if channel is None or not (channel == s or channel.startswith(s + "/")):
+                continue
+        spec = (0 if scope == "*" else len(scope.rstrip("/")), 0 if g["board"] == "*" else 1, _who_rank(g["who"]))
+        if best is None or spec > best:
+            best, chosen = spec, [g]
+        elif spec == best:
+            chosen.append(g)
+    if best is None:
+        return True, []  # no grant mentions this actor here: open by default
+    perms = set()
+    for g in chosen:
+        perms |= parse_perms(g["perms"])
+    return perm in perms, [dict(g) for g in chosen]
+
+
+def can(conn, actor, perm, board, channel=None):
+    return explain(conn, actor, perm, board, channel)[0]
+
+
+def require(conn, actor, perm, board, channel=None):
+    if not can(conn, actor, perm, board, channel):
+        raise PermissionError(f"{actor} has no '{perm}' on {board}:{channel or '*'} (see `ab grants explain {actor} {perm}`)")
+
+
+def _task_actor_ok(conn, row, actor, perm="manage"):
+    """Owner and creator may act on their own task; everyone else needs `manage` on its channel."""
+    if actor in (row["owner"], row["created_by"]) or is_system(actor):
+        return
+    require(conn, actor, perm, row["board"], row["channel"])
 
 
 # ---------------------------------------------------------------- tasks
@@ -235,6 +413,20 @@ def new_id(conn):
         tid = "t_" + secrets.token_hex(4)
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
             return tid
+
+
+def msg_dict(r):
+    d = dict(r)
+    d["data"] = json.loads(d["data"]) if d.get("data") else None
+    d["mentions"] = json.loads(d.get("mentions") or "[]")
+    return d
+
+
+def thread_messages(conn, thread, limit=None):
+    rows = conn.execute("SELECT * FROM messages WHERE thread=? ORDER BY id", (thread,)).fetchall()
+    if limit:
+        rows = rows[-limit:]
+    return [msg_dict(r) for r in rows]
 
 
 def task_dict(conn, row, full=False):
@@ -246,8 +438,7 @@ def task_dict(conn, row, full=False):
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
     if full:
-        d["notes"] = [dict(r) | {"data": json.loads(r["data"]) if r["data"] else None}
-                      for r in conn.execute("SELECT author,body,data,ts FROM notes WHERE task_id=? ORDER BY id", (d["id"],))]
+        d["notes"] = thread_messages(conn, d["id"])
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]
         d["runs"] = [dict(r) for r in conn.execute(
             "SELECT id,harness,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
@@ -271,12 +462,20 @@ def derived_state(conn, d):
 
 
 def get_task(conn, tid):
+    if not tid:
+        return None
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
     if row is None:
-        # allow unique prefix
         rows = conn.execute("SELECT * FROM tasks WHERE id LIKE ?", (tid + "%",)).fetchall()
         if len(rows) == 1:
             row = rows[0]
+    return row
+
+
+def must_task(conn, tid):
+    row = get_task(conn, tid)
+    if row is None:
+        raise LookupError(f"no task {tid}")
     return row
 
 
@@ -294,27 +493,35 @@ def would_cycle(conn, tid, dep):
 
 
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
-             workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None):
-    with tx(conn):
+             workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
+             board=DEFAULT_BOARD, _in_tx=False):
+    def go():
+        b = require_board(conn, board)
+        ch = channel or "main"
+        require(conn, actor, "create", board, ch)
         tid = new_id(conn)
         for d in deps:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
                 raise ValueError(f"dependency {d} does not exist")
-        tier = tier or cfg(conn, "default_tier")
+        tr = tier or b["default_tier"] or cfg(conn, "default_tier")
         tiers = cfg(conn, "tiers")
-        if tier not in tiers:
-            raise ValueError(f"unknown tier {tier!r}; tiers: {', '.join(tiers)}")
+        if tr not in tiers:
+            raise ValueError(f"unknown tier {tr!r}; tiers: {', '.join(tiers)}")
         t = now()
         conn.execute(
-            "INSERT INTO tasks(id,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
-            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at) VALUES(?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (tid, title, body or "", channel or "main", int(priority or 0), json.dumps(labels or {}), tier, harness, model,
-             workdir, 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
+            "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
+            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
+             workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
              json.dumps(data) if data is not None else None, actor, t, t))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
-        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tier})
-    return tid
+        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {}})
+        return tid
+    if _in_tx:
+        return go()
+    with tx(conn):
+        return go()
 
 
 def _fail_attempt(conn, row, actor, why, kind="failed"):
@@ -324,6 +531,7 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
         conn.execute("UPDATE tasks SET status='dead', attempts=?, owner=NULL, lease_until=NULL, result=?, updated_at=? WHERE id=?",
                      (attempts, why, now(), row["id"]))
         event(conn, row["id"], actor, "dead", {"why": why, "attempts": attempts, "after": kind})
+        _report_back(conn, row, actor, f"DEAD after {attempts} attempts: {why}")
         return "dead"
     nb = now() + (parse_dur(cfg(conn, "backoff")) or 0) * attempts
     conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, not_before=?, updated_at=? WHERE id=?",
@@ -335,7 +543,7 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
 def reap(conn):
     """Expired leases go back to the pool (counted as an attempt). Runner-held claims are renewed by the runner."""
     t = now()
-    rows = conn.execute("SELECT * FROM tasks WHERE status='claimed' AND lease_until IS NOT NULL AND lease_until < ?", (t,)).fetchall()
+    rows = conn.execute("SELECT id FROM tasks WHERE status='claimed' AND lease_until IS NOT NULL AND lease_until < ?", (t,)).fetchall()
     if not rows:
         return 0
     with tx(conn):
@@ -347,15 +555,20 @@ def reap(conn):
 
 
 READY_SQL = """
-SELECT t.* FROM tasks t
+SELECT t.* FROM tasks t JOIN boards b ON b.name=t.board
 WHERE t.status='open' AND (t.not_before IS NULL OR t.not_before <= :now)
   AND NOT EXISTS (SELECT 1 FROM deps x LEFT JOIN tasks p ON p.id=x.dep_id
                   WHERE x.task_id=t.id AND (p.status IS NULL OR p.status!='done'))
 """
 
 
-def ready_tasks(conn, channel=None, labels=None, runnable_only=False, exclude=(), limit=200):
+def ready_tasks(conn, channel=None, labels=None, runnable_only=False, exclude=(), limit=200, board=None, skip_paused=False):
     sql, args = READY_SQL, {"now": now()}
+    if board:
+        sql += " AND t.board=:board"
+        args["board"] = board
+    if skip_paused:
+        sql += " AND b.paused=0"
     if channel:
         chans = [c.strip() for c in channel.split(",") if c.strip()]
         ors = []
@@ -373,19 +586,18 @@ def ready_tasks(conn, channel=None, labels=None, runnable_only=False, exclude=()
     return [r for r in conn.execute(sql, args).fetchall() if r["id"] not in exclude]
 
 
-def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None):
+def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD):
     lease_s = lease_s or parse_dur(cfg(conn, "lease"))
     reap(conn)
     with tx(conn):
         if tid:
-            row = get_task(conn, tid)
-            if row is None:
-                raise LookupError(f"no task {tid}")
-            ready = {r["id"] for r in ready_tasks(conn)}
-            if row["id"] not in ready:
+            row = must_task(conn, tid)
+            if row["id"] not in {r["id"] for r in ready_tasks(conn, limit=100000)}:
                 return None, f"task {row['id']} is {derived_state(conn, dict(row))}, not ready"
+            require(conn, actor, "claim", row["board"], row["channel"])
         else:
-            rows = ready_tasks(conn, channel, labels, limit=1)
+            rows = [r for r in ready_tasks(conn, channel, labels, board=board, limit=500)
+                    if can(conn, actor, "claim", r["board"], r["channel"])]
             if not rows:
                 return None, "nothing ready"
             row = rows[0]
@@ -398,14 +610,14 @@ def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None):
 
 
 def _owned(conn, tid, actor, force):
-    row = get_task(conn, tid)
-    if row is None:
-        raise LookupError(f"no task {tid}")
-    if not force:
-        if row["status"] != "claimed":
-            raise PermissionError(f"task {row['id']} is {row['status']}, not claimed (use --force)")
-        if row["owner"] != actor:
-            raise PermissionError(f"task {row['id']} is held by {row['owner']}, you are {actor} (use --force)")
+    row = must_task(conn, tid)
+    if force:
+        _task_actor_ok(conn, row, actor)
+        return row
+    if row["status"] != "claimed":
+        raise PermissionError(f"task {row['id']} is {row['status']}, not claimed (use --force)")
+    if row["owner"] != actor:
+        raise PermissionError(f"task {row['id']} is held by {row['owner']}, you are {actor} (use --force)")
     return row
 
 
@@ -418,16 +630,78 @@ def renew(conn, tid, actor, lease_s=None, force=False):
     return row["id"]
 
 
-def note(conn, tid, actor, body, data=None):
-    row = get_task(conn, tid)
+# ---------------------------------------------------------------- messages
+MENTION_RE = re.compile(r"(?<![\w@/.])@([A-Za-z0-9_][A-Za-z0-9_.#:-]*[A-Za-z0-9_#*])")
+
+
+def resolve_thread(conn, thread):
+    """-> (board, channel, kind, thread id). Threads are task ids (t_...) or root message ids (m123)."""
+    thread = (thread or "").strip()
+    if re.fullmatch(r"m\d+", thread):
+        r = conn.execute("SELECT board, channel, thread FROM messages WHERE id=?", (int(thread[1:]),)).fetchone()
+        if r is None:
+            raise LookupError(f"no thread {thread}")
+        root = r["thread"]
+        if root.startswith("t_"):
+            return r["board"], r["channel"], "task", root
+        return r["board"], r["channel"], "post", root
+    row = get_task(conn, thread)
     if row is None:
-        raise LookupError(f"no task {tid}")
+        raise LookupError(f"no thread {thread} (use a task id or m<message id>)")
+    return row["board"], row["channel"], "task", row["id"]
+
+
+def post_message(conn, actor, body, board=None, channel=None, thread=None, data=None, check=True, _in_tx=False):
+    """New thread (board+channel) or reply (thread). Returns (message id, thread id, event id)."""
+    def go():
+        nonlocal board, channel, thread
+        if thread:
+            board, channel, kind, thread = resolve_thread(conn, thread)
+            if check:
+                row = get_task(conn, thread) if kind == "task" else None
+                if not (row is not None and actor in (row["owner"], row["created_by"])):
+                    require(conn, actor, "post", board, channel)
+        else:
+            require_board(conn, board)
+            channel = channel or "main"
+            if check:
+                require(conn, actor, "post", board, channel)
+        mentions = sorted({m.rstrip(".:") for m in MENTION_RE.findall(body or "")})
+        cur = conn.execute("INSERT INTO messages(board,channel,thread,author,body,data,mentions,ts) VALUES(?,?,?,?,?,?,?,?)",
+                           (board, channel, thread, actor, body, json.dumps(data) if data is not None else None,
+                            json.dumps(mentions), now()))
+        mid = cur.lastrowid
+        if not thread:
+            thread = f"m{mid}"
+            conn.execute("UPDATE messages SET thread=? WHERE id=?", (thread, mid))
+        task_id = thread if thread.startswith("t_") else None
+        if task_id:
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now(), task_id))
+        eid = event(conn, task_id, actor, "message", {"msg": mid, "thread": thread, "mentions": mentions,
+                                                      "body": (body or "")[:400], "data": data}, board=board, channel=channel)
+        return mid, thread, eid
+    if _in_tx:
+        return go()
     with tx(conn):
-        conn.execute("INSERT INTO notes(task_id,author,body,data,ts) VALUES(?,?,?,?,?)",
-                     (row["id"], actor, body, json.dumps(data) if data is not None else None, now()))
-        conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now(), row["id"]))
-        event(conn, row["id"], actor, "note", {"chars": len(body or "")})
+        return go()
+
+
+def note(conn, tid, actor, body, data=None):
+    row = must_task(conn, tid)
+    post_message(conn, actor, body, thread=row["id"], data=data)
     return row["id"]
+
+
+def _report_back(conn, row, actor, text):
+    """Tasks made with --reply-to / `ab followup` post their outcome into that thread."""
+    target = json.loads(row["labels"] or "{}").get("reply_to")
+    if not target:
+        return
+    try:
+        post_message(conn, actor, f"[{row['id']}] {text}", thread=target, check=False, _in_tx=True,
+                     data={"from_task": row["id"]})
+    except LookupError:
+        pass
 
 
 def complete(conn, tid, actor, result="", data=None, force=False):
@@ -436,6 +710,7 @@ def complete(conn, tid, actor, result="", data=None, force=False):
         conn.execute("UPDATE tasks SET status='done', result=?, data=COALESCE(?,data), owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
                      (result, json.dumps(data) if data is not None else None, now(), row["id"]))
         event(conn, row["id"], actor, "done", {"result": (result or "")[:500]})
+        _report_back(conn, row, actor, result or "done")
     return row["id"]
 
 
@@ -443,7 +718,7 @@ def fail(conn, tid, actor, why, force=False):
     with tx(conn):
         row = _owned(conn, tid, actor, force)
         if why:
-            conn.execute("INSERT INTO notes(task_id,author,body,ts) VALUES(?,?,?,?)", (row["id"], actor, "FAILED: " + why, now()))
+            post_message(conn, actor, "FAILED: " + why, thread=row["id"], check=False, _in_tx=True)
         state = _fail_attempt(conn, row, actor, why)
     return row["id"], state
 
@@ -455,20 +730,19 @@ def release(conn, tid, actor, why="", force=False, count_attempt=False):
             return row["id"], _fail_attempt(conn, row, actor, why or "released")
         conn.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), row["id"]))
         if why:
-            conn.execute("INSERT INTO notes(task_id,author,body,ts) VALUES(?,?,?,?)", (row["id"], actor, "RELEASED: " + why, now()))
+            post_message(conn, actor, "RELEASED: " + why, thread=row["id"], check=False, _in_tx=True)
         event(conn, row["id"], actor, "released", {"why": why})
     return row["id"], "open"
 
 
 def defer(conn, tid, actor, until=None, after=(), why="", force=False):
     with tx(conn):
-        row = get_task(conn, tid)
-        if row is None:
-            raise LookupError(f"no task {tid}")
-        if row["status"] == "claimed" and row["owner"] != actor and not force:
-            raise PermissionError(f"task {row['id']} is held by {row['owner']} (use --force)")
+        row = must_task(conn, tid)
         if row["status"] not in ("open", "claimed"):
             raise PermissionError(f"task {row['id']} is {row['status']}")
+        if row["status"] == "claimed" and row["owner"] != actor and not force:
+            raise PermissionError(f"task {row['id']} is held by {row['owner']} (use --force)")
+        _task_actor_ok(conn, row, actor)
         for d in after:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
                 raise ValueError(f"dependency {d} does not exist")
@@ -478,16 +752,15 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
         conn.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, not_before=COALESCE(?,not_before), updated_at=? WHERE id=?",
                      (until, now(), row["id"]))
         if why:
-            conn.execute("INSERT INTO notes(task_id,author,body,ts) VALUES(?,?,?,?)", (row["id"], actor, "DEFERRED: " + why, now()))
+            post_message(conn, actor, "DEFERRED: " + why, thread=row["id"], check=False, _in_tx=True)
         event(conn, row["id"], actor, "deferred", {"until": until, "after": list(after), "why": why})
     return row["id"]
 
 
 def cancel(conn, tid, actor, why=""):
     with tx(conn):
-        row = get_task(conn, tid)
-        if row is None:
-            raise LookupError(f"no task {tid}")
+        row = must_task(conn, tid)
+        _task_actor_ok(conn, row, actor)
         conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, result=COALESCE(NULLIF(?,''),result), updated_at=? WHERE id=?",
                      (why, now(), row["id"]))
         event(conn, row["id"], actor, "cancelled", {"why": why})
@@ -496,9 +769,8 @@ def cancel(conn, tid, actor, why=""):
 
 def retry(conn, tid, actor):
     with tx(conn):
-        row = get_task(conn, tid)
-        if row is None:
-            raise LookupError(f"no task {tid}")
+        row = must_task(conn, tid)
+        _task_actor_ok(conn, row, actor)
         if row["status"] == "claimed":
             raise PermissionError(f"task {row['id']} is claimed by {row['owner']}")
         conn.execute("UPDATE tasks SET status='open', attempts=0, owner=NULL, lease_until=NULL, not_before=NULL, updated_at=? WHERE id=?",
@@ -508,26 +780,34 @@ def retry(conn, tid, actor):
 
 
 EDITABLE = {"title", "body", "channel", "priority", "tier", "harness", "model", "workdir", "runnable",
-            "max_attempts", "timeout_s", "not_before"}
+            "max_attempts", "timeout_s", "not_before", "board"}
 
 
 def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
     with tx(conn):
-        row = get_task(conn, tid)
-        if row is None:
-            raise LookupError(f"no task {tid}")
+        row = must_task(conn, tid)
+        _task_actor_ok(conn, row, actor)
         if "tier" in fields and fields["tier"] not in cfg(conn, "tiers"):
             raise ValueError(f"unknown tier {fields['tier']!r}")
+        if "board" in fields or "channel" in fields:
+            nb = fields.get("board") or row["board"]
+            require_board(conn, nb)
+            require(conn, actor, "create", nb, fields.get("channel") or row["channel"])
         for k, v in fields.items():
             if k not in EDITABLE:
                 raise ValueError(f"cannot edit {k}")
             conn.execute(f"UPDATE tasks SET {k}=? WHERE id=?", (v, row["id"]))
+        changed = {}
         if labels:
             cur = json.loads(row["labels"] or "{}")
             for k, v in labels.items():
                 if v in (None, ""):
+                    if k in cur:
+                        changed[k] = None
                     cur.pop(k, None)
                 else:
+                    if cur.get(k) != v:
+                        changed[k] = v
                     cur[k] = v
             conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(cur), row["id"]))
         for d in add_deps:
@@ -537,7 +817,9 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
         for d in rm_deps:
             conn.execute("DELETE FROM deps WHERE task_id=? AND dep_id=?", (row["id"], d))
         conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now(), row["id"]))
-        event(conn, row["id"], actor, "edited", {"fields": list(fields), "labels": labels, "add_deps": list(add_deps), "rm_deps": list(rm_deps)})
+        event(conn, row["id"], actor, "edited", {"fields": list(fields), "add_deps": list(add_deps), "rm_deps": list(rm_deps)})
+        if changed:
+            event(conn, row["id"], actor, "label", {"changed": changed})
     return row["id"]
 
 
@@ -550,8 +832,7 @@ def set_limit(conn, scope, kind, until, reason, actor="runner"):
 
 
 def active_limits(conn):
-    t = now()
-    return {r["scope"]: dict(r) for r in conn.execute("SELECT * FROM limits WHERE until > ?", (t,))}
+    return {r["scope"]: dict(r) for r in conn.execute("SELECT * FROM limits WHERE until > ?", (now(),))}
 
 
 def clear_limit(conn, scope, actor="?"):

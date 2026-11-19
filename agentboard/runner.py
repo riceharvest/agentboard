@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import automation
 from . import harness as H
 from . import store, usage
 from .store import cfg, event, now, parse_dur, tx
@@ -19,19 +20,23 @@ AB_SCRIPT = Path(__file__).resolve().parent.parent / "ab"
 RUNNER_LEASE = 600          # the runner renews its children's claims every tick; this only matters if it dies
 STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "AI_AGENT", "HERMES_AGENT",
              "HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID",
-             "AB_TASK", "AB_ACTOR", "AB_RUN", "AB_JSON")
+             "AB_TASK", "AB_ACTOR", "AB_RUN", "AB_JSON", "AB_BOARD")
 
-BRIEF = """You are an autonomous worker on agentboard task {id}. No human is watching: do not ask questions, decide and act.
+BRIEF = """You are an autonomous worker on agentboard task {id}. No human is watching: do not ask questions of a human, decide and act.
+Your name on the board is {actor} (board {board}). Other agents can mention you as @{actor}.
 
 TASK: {title}
-channel={channel} tier={tier} attempt={attempt}/{max_attempts}{labels}
+board={board} channel={channel} tier={tier} attempt={attempt}/{max_attempts}{labels}
 workdir: {workdir}
 
 {body}
-{deps}{notes}
-BOARD (the `ab` CLI is on PATH; AB_TASK={id} and AB_ACTOR are already set for you):
+{context}{deps}{notes}
+BOARD (the `ab` CLI is on PATH; AB_TASK={id}, AB_ACTOR and AB_BOARD are already set for you):
   ab note $AB_TASK "progress, findings, decisions"     keep a trail for whoever picks this up next
   ab add "title" --body "..." [--dep ID] [--tier low|medium|high|max]   hand sub-work to other agents
+  ab ask CHANNEL "question for @someone" --wait 10m   ask another agent and block for the answer
+  ab reply THREAD "text" ; ab read CHANNEL ; ab inbox   talk in threads (THREAD = task id or m<id>)
+  ab followup $AB_TASK "check CI for the PR" --in 5m  schedule a later check that reports back here
   ab defer $AB_TASK --after ID [--why "..."]           park this task until ID is done, then stop
   ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"   escalate, then stop
   ab done $AB_TASK "short result: what changed, where, how it was verified"
@@ -181,7 +186,7 @@ def effective_slots(conn):
 
 
 # ---------------------------------------------------------------- brief
-def build_brief(conn, task, workdir, attempt):
+def build_brief(conn, task, workdir, attempt, actor="?"):
     deps = conn.execute("SELECT p.id, p.title, p.result FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=?",
                         (task["id"],)).fetchall()
     dtxt = ""
@@ -194,7 +199,15 @@ def build_brief(conn, task, workdir, attempt):
         ntxt = "\nNOTES SO FAR (earlier attempts and other agents, oldest first):\n" + "\n".join(
             f"- [{store.fmt_ts(n['ts'])} {n['author']}] {(n['body'] or '')[:1200]}" for n in reversed(notes)) + "\n"
     labels = json.loads(task["labels"] or "{}")
+    ctx = ""
+    if labels.get("reply_to"):
+        try:
+            ctx = ("\nYOU ARE ANSWERING / FOLLOWING UP ON THIS THREAD (your `ab done` result is posted back into it):\n"
+                   + automation.thread_context(conn, labels["reply_to"]) + "\n")
+        except LookupError:
+            pass
     return BRIEF.format(id=task["id"], title=task["title"], channel=task["channel"], tier=task["tier"],
+                        actor=actor, board=task["board"], context=ctx,
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
@@ -248,6 +261,7 @@ class Runner:
             timeout_s = (t["timeout_s"] if t else None) or parse_dur(cfg(self.conn, "timeout"))
             c = Child(r["id"], r["task_id"], f"{r['harness']}#{r['id']}", r["harness"], r["model"], r["bucket"], r["pid"],
                       r["pid_start"], None, timeout_s, None, r["out_path"], r["err_path"], r["started_at"])
+            c.board = t["board"] if t else store.DEFAULT_BOARD
             if alive(r["pid"], r["pid_start"]):
                 self.children[r["id"]] = c
                 self.log(f"adopted run {r['id']} ({r['task_id']}, pid {r['pid']})")
@@ -292,6 +306,14 @@ class Runner:
         if now() - self.last_harvest >= float(cfg(c, "harvest_every_s") or 60):
             self.last_harvest = now()
             usage.harvest(c)
+        try:
+            for name, tid, n in automation.run_watchers(c):
+                self.log(f"watcher {name} fired on {n} event(s) -> {tid}")
+        except Exception as e:
+            self.log(f"watchers error: {e!r}")
+        for name, res in automation.run_syncs(c).items():
+            if res.get("error") or any(res.values()):
+                self.log(f"sync {name}: {res}")
         paused, draining = bool(cfg(c, "paused")), bool(cfg(c, "draining"))
         if stop == "graceful":
             if not self.children:
@@ -347,10 +369,14 @@ class Runner:
         chans = cfg(c, "channels") or None
         busy_dirs = {ch.workdir for ch in self.children.values() if ch.workdir}
         limits = store.active_limits(c)
+        caps = {r["name"]: r["max_slots"] for r in c.execute("SELECT name, max_slots FROM boards")}
         note = None
-        for t in store.ready_tasks(c, channel=chans, runnable_only=True):
+        for t in store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True):
             if len(self.children) >= slots:
                 break
+            cap = caps.get(t["board"])
+            if cap is not None and sum(1 for ch in self.children.values() if ch.board == t["board"]) >= cap:
+                continue
             gib = free_gib()
             if gib < float(cfg(c, "min_free_gib") or 0):
                 note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
@@ -377,7 +403,7 @@ class Runner:
         a = H.ADAPTERS[cand.harness]
         with tx(c):
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
-            if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True)}:
+            if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
             c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at) VALUES(?,?,?,?,?,?,?)",
                       (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now()))
@@ -391,11 +417,12 @@ class Runner:
         runs_dir = store.HOME / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
-        brief = build_brief(c, cur, workdir, (cur["attempts"] or 0) + 1)
+        brief = build_brief(c, cur, workdir, (cur["attempts"] or 0) + 1, owner)
         extra = (cfg(c, "extra_args") or {}).get(cand.harness, [])
         cmd = a.command(brief, cand.model, cand.effort, extra)
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": str(store.HOME),
+                    "AB_BOARD": cur["board"],
                     "PATH": f"{AB_SCRIPT.parent}:{env.get('PATH', '')}"})
         try:
             with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
@@ -414,6 +441,7 @@ class Runner:
         timeout_s = cur["timeout_s"] or parse_dur(cfg(c, "timeout"))
         self.children[run_id] = Child(run_id, task["id"], owner, cand.harness, cand.model, bucket, proc.pid, start, proc,
                                       timeout_s, workdir, out_path, err_path, now())
+        self.children[run_id].board = cur["board"]
         self.log(f"run {run_id}: {task['id']} -> {cand.label()} [{bucket}] pid {proc.pid}")
         return True
 
@@ -485,16 +513,18 @@ class Runner:
                 outcome = ch.kill_reason
             elif mine:
                 if res.ok:
-                    c.execute("INSERT INTO notes(task_id,author,body,ts) VALUES(?,?,?,?)",
-                              (ch.task_id, "runner", "Agent exited without `ab done`; its final answer is kept as the result.", now()))
+                    store.post_message(c, "runner", "Agent exited without `ab done`; its final answer is kept as the result.",
+                                       thread=ch.task_id, check=False, _in_tx=True)
+                    result = (res.text or "finished, no summary")[:8000]
                     c.execute("UPDATE tasks SET status='done', result=?, owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
-                              ((res.text or "finished, no summary")[:8000], now(), ch.task_id))
+                              (result, now(), ch.task_id))
                     event(c, ch.task_id, "runner", "done", {"run": ch.run_id, "auto": True})
+                    store._report_back(c, t, ch.owner, result)
                     outcome = "done_auto"
                 else:
                     why = (res.error or "agent failed")[:1500]
-                    c.execute("INSERT INTO notes(task_id,author,body,ts) VALUES(?,?,?,?)",
-                              (ch.task_id, "runner", f"Run {ch.run_id} on {ch.harness} failed ({res.error_kind}): {why}", now()))
+                    store.post_message(c, "runner", f"Run {ch.run_id} on {ch.harness} failed ({res.error_kind}): {why}",
+                                       thread=ch.task_id, check=False, _in_tx=True)
                     outcome = "timeout" if ch.kill_reason == "timeout" else "failed"
                     store._fail_attempt(c, t, "runner", why, outcome)
             else:

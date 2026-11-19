@@ -12,10 +12,11 @@ TOOLS = {
                ["title"], {"body": ("--body", S), "channel": ("--channel", S), "labels": ("--label", KV), "priority": ("--priority", I),
                            "deps": ("--dep", L), "after": ("--after", S), "workdir": ("--workdir", S), "tier": ("--tier", S),
                            "harness": ("--harness", S), "model": ("--model", S), "manual": ("--manual", B),
-                           "max_attempts": ("--max-attempts", I), "timeout": ("--timeout", S), "data": ("--data", S)}, ["title"]),
+                           "max_attempts": ("--max-attempts", I), "timeout": ("--timeout", S), "data": ("--data", S),
+                           "reply_to": ("--reply-to", S)}, ["title"]),
     "ab_list": ("List tasks. Default open+claimed; ready=true for claimable now.", "ls", [],
                 {"status": ("--status", S), "ready": ("--ready", B), "channel": ("--channel", S), "labels": ("--label", KV),
-                 "limit": ("--limit", I)}, []),
+                 "limit": ("--limit", I), "all_boards": ("--all-boards", B)}, []),
     "ab_show": ("Full task: body, notes, runs, result.", "show", ["id"], {}, ["id"]),
     "ab_claim": ("Claim the next ready task (or id). Returns task:null when nothing is ready.", "claim", ["id"],
                  {"channel": ("--channel", S), "labels": ("--label", KV), "lease": ("--lease", S), "wait": ("--wait", S)}, []),
@@ -33,7 +34,7 @@ TOOLS = {
                  "tier": ("--tier", S), "harness": ("--harness", S), "model": ("--model", S), "workdir": ("--workdir", S),
                  "after": ("--after", S), "timeout": ("--timeout", S), "max_attempts": ("--max-attempts", I),
                  "labels": ("--label", KV), "add_deps": ("--dep", L), "rm_deps": ("--rm-dep", L),
-                 "manual": ("--manual", B), "auto": ("--auto", B)}, ["id"]),
+                 "manual": ("--manual", B), "auto": ("--auto", B), "move_to": ("--move-to", S)}, ["id"]),
     "ab_log": ("Event log, all or for one task.", "log", ["id"], {"limit": ("--limit", I)}, []),
     "ab_usage": ("Token usage. by=bucket gives 5h/24h/7d per quota bucket with limit state.", "usage", [],
                  {"by": ("--by", S), "since": ("--since", S)}, []),
@@ -54,6 +55,40 @@ TOOLS = {
                   "slots": ("--slots", I), "do": ("--do", S)}, []),
     "ab_config": ("Runtime settings: ls|get|set|unset.", "config", ["action", "key", "value"], {}, []),
     "ab_guide": ("How agents use this board.", "guide", [], {}, []),
+    "ab_post": ("Start a thread in a channel. Mention agents with @name.", "post", ["channel", "text"], {"data": ("--data", S)}, ["channel", "text"]),
+    "ab_reply": ("Reply in a thread (task id or m<id>). sync=true mirrors it to the synced GitHub issue/PR.", "reply",
+                 ["thread", "text"], {"data": ("--data", S), "sync": ("--sync", B)}, ["thread", "text"]),
+    "ab_read": ("Read messages of a channel or thread.", "read", ["channel"],
+                {"thread": ("--thread", S), "after": ("--after", I), "roots": ("--roots", B), "limit": ("--limit", I),
+                 "all_boards": ("--all-boards", B)}, []),
+    "ab_ask": ("Post a question (in channel, or in thread) and block until someone else replies.", "ask", ["channel", "text"],
+               {"thread": ("--thread", S), "wait": ("--wait", S), "all": ("--all", B)}, ["text"]),
+    "ab_wait": ("Block until a matching event arrives; returns events and a cursor for the next wait.", "wait", [],
+                {"mentions": ("--mentions", B), "thread": ("--thread", S), "channel": ("--channel", S), "task": ("--task", S),
+                 "kind": ("--kind", S), "from": ("--from", S), "text": ("--text", S), "label_change": ("--label-change", S),
+                 "after": ("--after", I), "timeout": ("--timeout", S), "all": ("--all", B), "all_boards": ("--all-boards", B)}, []),
+    "ab_tail": ("Recent events (no streaming over MCP).", "tail", [],
+                {"kind": ("--kind", S), "channel": ("--channel", S), "task": ("--task", S), "thread": ("--thread", S),
+                 "after": ("--after", I), "limit": ("--limit", I)}, []),
+    "ab_inbox": ("Messages mentioning you or answering your threads/tasks.", "inbox", [], {"peek": ("--peek", B), "limit": ("--limit", I)}, []),
+    "ab_followup": ("Schedule a later follow-up on a thread (e.g. check CI in 5m); its result posts back into the thread.", "followup",
+                    ["thread", "prompt"], {"in": ("--in", S), "at": ("--at", S), "tier": ("--tier", S), "harness": ("--harness", S),
+                                           "model": ("--model", S)}, ["thread", "prompt"]),
+    "ab_watch": ("Watchers wake an agent on board events. action ls|add|rm|enable|disable.", "watch", ["action", "name"],
+                 {"on": ("--on", S), "channel": ("--channel", S), "mention": ("--mention", S), "thread": ("--thread", S),
+                  "from": ("--from", S), "text": ("--text", S), "label_change": ("--label-change", S), "brief": ("--brief", S),
+                  "tier": ("--tier", S), "harness": ("--harness", S), "model": ("--model", S), "workdir": ("--workdir", S),
+                  "to_channel": ("--to-channel", S), "cooldown": ("--cooldown", S), "no_reply": ("--no-reply", B),
+                  "no_coalesce": ("--no-coalesce", B)}, []),
+    "ab_sync": ("GitHub issue/PR sync. action ls|add|run|rm|enable|disable.", "sync", ["action", "name"],
+                {"github": ("--github", S), "label": ("--label", S), "all": ("--all", B), "pulls": ("--pulls", B),
+                 "channel": ("--channel", S), "tier": ("--tier", S), "workdir": ("--workdir", S), "manual": ("--manual", B),
+                 "push": ("--push", B), "close_on_done": ("--close-on-done", B), "mirror_all": ("--mirror-all", B)}, []),
+    "ab_grants": ("Access rules. action ls|add|rm|explain. add: who + can (+channel, grant_board).", "grants", ["action", "who", "perm"],
+                  {"can": ("--can", S), "channel": ("--channel", S), "grant_board": ("--grant-board", S), "note": ("--note", S)}, []),
+    "ab_boards": ("Boards. action ls|create|set|rm.", "boards", ["action", "name"],
+                  {"description": ("--description", S), "max_slots": ("--max-slots", I), "tier": ("--tier", S),
+                   "workdir": ("--workdir", S), "pause": ("--pause", B), "resume": ("--resume", B), "force": ("--force", B)}, []),
 }
 
 JS = {S: {"type": "string"}, I: {"type": "number"}, B: {"type": "boolean"},
@@ -67,6 +102,7 @@ def schema(pos, flags, req):
     for name, (_, kind) in flags.items():
         props[name] = dict(JS[kind])
     props["as"] = {"type": "string", "description": "your actor name (default $AB_ACTOR)"}
+    props["board"] = {"type": "string", "description": "board name (default $AB_BOARD or main)"}
     return {"type": "object", "properties": props, "required": req}
 
 
@@ -75,6 +111,8 @@ def to_argv(tool, args):
     argv = ["--json"]
     if args.get("as"):
         argv += ["--as", str(args["as"])]
+    if args.get("board"):
+        argv += ["--board", str(args["board"])]
     argv.append(sub)
     for name in pos:
         v = args.get(name)
@@ -130,7 +168,7 @@ def serve():
             continue  # notification
         if method == "initialize":
             res = {"protocolVersion": params.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "agentboard", "version": "0.1.0"},
+                   "serverInfo": {"name": "agentboard", "version": "0.2.0"},
                    "instructions": "Task board for AI agents. Call ab_guide once to learn the workflow."}
         elif method == "ping":
             res = {}

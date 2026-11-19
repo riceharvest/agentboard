@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "generated_at": 1795077221.241432,
+ "generated_at": 1795100002.1602116,
  "board": null,
  "actor": "tui-test",
  "db": "/home/user/ab-home/db.sqlite",
@@ -16,12 +16,12 @@
     "claimed": 2,
     "dead": 1,
     "done": 2,
-    "open": 9
+    "open": 10
    },
    "states": {
     "claimed": 2,
     "ready": 6,
-    "waiting": 3
+    "waiting": 4
    },
    "running": 2
   },
@@ -43,7 +43,7 @@
  ],
  "tasks": [
   {
-   "id": "t_7572zzdf",
+   "id": "t_6b25zz8d",
    "board": "main",
    "title": "Port the usage harvester to the new log format",
    "channel": "main",
@@ -61,19 +61,20 @@
    "max_attempts": 3,
    "timeout_s": 2700,
    "owner": "worker-1",
-   "lease_until": 1795079019.6818469,
+   "lease_until": 1795101800.699668,
    "not_before": null,
    "run_id": 1,
    "created_by": "tui-test",
-   "created_at": 1795077216.8625717,
-   "updated_at": 1795077219.681847,
+   "created_at": 1795099998.316224,
+   "updated_at": 1795100000.6996694,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "claimed"
   },
   {
-   "id": "t_dfbbzz98",
+   "id": "t_7103zzf2",
    "board": "main",
    "title": "Summarise last week's failed runs",
    "channel": "main",
@@ -91,19 +92,20 @@
    "max_attempts": 3,
    "timeout_s": 1200,
    "owner": "worker-2",
-   "lease_until": 1795079019.8535316,
+   "lease_until": 1795101801.0317266,
    "not_before": null,
    "run_id": 2,
    "created_by": "tui-test",
-   "created_at": 1795077217.0310242,
-   "updated_at": 1795077219.853532,
+   "created_at": 1795099998.442271,
+   "updated_at": 1795100001.0317276,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "claimed"
   },
   {
-   "id": "t_a5dezzab",
+   "id": "t_c7e5zz89",
    "board": "main",
    "title": "Decide: default slot count",
    "channel": "main",
@@ -126,15 +128,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077216.5490057,
-   "updated_at": 1795077219.5430334,
+   "created_at": 1795099998.0302577,
+   "updated_at": 1795100000.506165,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_f7abzzbc",
+   "id": "t_4852zz1d",
    "board": "main",
    "title": "Add a health endpoint to the runner",
    "channel": "main",
@@ -156,19 +159,20 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077215.6882217,
-   "updated_at": 1795077215.6882217,
+   "created_at": 1795099997.2901292,
+   "updated_at": 1795099997.2901292,
+   "park": null,
    "result_head": null,
    "deps": [
-    "t_3a1dzzf8"
+    "t_5cddzz47"
    ],
    "deps_open": [
-    "t_3a1dzzf8"
+    "t_5cddzz47"
    ],
    "state": "waiting"
   },
   {
-   "id": "t_7472zzfb",
+   "id": "t_cb56zzd3",
    "board": "main",
    "title": "Decide: drop python 3.9 support?",
    "channel": "main",
@@ -191,15 +195,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077216.6914775,
-   "updated_at": 1795077216.6914775,
+   "created_at": 1795099998.2134924,
+   "updated_at": 1795099998.2134924,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_3a1dzzf8",
+   "id": "t_5cddzz47",
    "board": "main",
    "title": "Survey the retry strategies of other task boards",
    "channel": "main",
@@ -221,15 +226,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077215.2089593,
-   "updated_at": 1795077219.3551512,
+   "created_at": 1795099996.967508,
+   "updated_at": 1795100000.3536494,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_3dfezzdb",
+   "id": "t_f993zzdf",
    "board": "main",
    "title": "Does a shorter lease cut stuck runs?",
    "channel": "main",
@@ -251,15 +257,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077215.517447,
-   "updated_at": 1795077215.517447,
+   "created_at": 1795099997.1101012,
+   "updated_at": 1795099997.1101012,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_a200zz27",
+   "id": "t_9086zzac",
    "board": "main",
    "title": "Review the lease patch",
    "channel": "main",
@@ -281,15 +288,53 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077216.3652875,
-   "updated_at": 1795077216.3652875,
+   "created_at": 1795099997.7011478,
+   "updated_at": 1795099997.7011478,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_68b5zzdb",
+   "id": "t_c2d4zz3b",
+   "board": "main",
+   "title": "Score the overnight eval",
+   "channel": "main",
+   "status": "open",
+   "priority": 2,
+   "labels": {
+    "type": "experiment"
+   },
+   "tier": "medium",
+   "harness": null,
+   "model": null,
+   "workdir": null,
+   "runnable": true,
+   "attempts": 0,
+   "max_attempts": 3,
+   "timeout_s": null,
+   "owner": null,
+   "lease_until": null,
+   "not_before": null,
+   "run_id": null,
+   "created_by": "tui-test",
+   "created_at": 1795100001.1768632,
+   "updated_at": 1795100001.4939587,
+   "park": {
+    "note": "eval runs detached; results land in /work/eval/results.json - score it and report the number",
+    "at": 1795100001.493723,
+    "file": "/work/eval/results.json",
+    "grace_s": 60.0,
+    "run": null
+   },
+   "result_head": null,
+   "deps": [],
+   "deps_open": [],
+   "state": "waiting"
+  },
+  {
+   "id": "t_aebdzz9a",
    "board": "main",
    "title": "Cut release 0.4",
    "channel": "main",
@@ -311,21 +356,22 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077215.9080298,
-   "updated_at": 1795077215.9080298,
+   "created_at": 1795099997.4099717,
+   "updated_at": 1795099997.4099717,
+   "park": null,
    "result_head": null,
    "deps": [
-    "t_3dfezzdb",
-    "t_f7abzzbc"
+    "t_4852zz1d",
+    "t_f993zzdf"
    ],
    "deps_open": [
-    "t_3dfezzdb",
-    "t_f7abzzbc"
+    "t_4852zz1d",
+    "t_f993zzdf"
    ],
    "state": "waiting"
   },
   {
-   "id": "t_ff53zz7f",
+   "id": "t_d0a6zzf9",
    "board": "main",
    "title": "Watch the nightly soak",
    "channel": "main",
@@ -347,15 +393,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077216.1257513,
-   "updated_at": 1795077216.1257513,
+   "created_at": 1795099997.5860255,
+   "updated_at": 1795099997.5860255,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_7602zz62",
+   "id": "t_a857zz50",
    "board": "web",
    "title": "Landing page copy",
    "channel": "main",
@@ -377,15 +424,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077217.8629382,
-   "updated_at": 1795077217.8629382,
+   "created_at": 1795099999.0645185,
+   "updated_at": 1795099999.0645185,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "ready"
   },
   {
-   "id": "t_4a7ezzd1",
+   "id": "t_3149zz16",
    "board": "main",
    "title": "Nightly report",
    "channel": "main",
@@ -404,18 +452,19 @@
    "timeout_s": null,
    "owner": null,
    "lease_until": null,
-   "not_before": 1795098818.0297043,
+   "not_before": 1795121599.235068,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077218.030166,
-   "updated_at": 1795077218.030166,
+   "created_at": 1795099999.2362003,
+   "updated_at": 1795099999.2362003,
+   "park": null,
    "result_head": null,
    "deps": [],
    "deps_open": [],
    "state": "waiting"
   },
   {
-   "id": "t_dea9zz71",
+   "id": "t_f3eczz08",
    "board": "main",
    "title": "Flaky integration test on arm64",
    "channel": "main",
@@ -437,15 +486,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077217.6352773,
-   "updated_at": 1795077219.1847284,
+   "created_at": 1795099998.883856,
+   "updated_at": 1795100000.2132144,
+   "park": null,
    "result_head": "segfault in the arm64 build, no repro",
    "deps": [],
    "deps_open": [],
    "state": "dead"
   },
   {
-   "id": "t_8364zzd5",
+   "id": "t_39cdzz22",
    "board": "main",
    "title": "Compare two lease lengths",
    "channel": "main",
@@ -467,15 +517,16 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077217.4068458,
-   "updated_at": 1795077218.8232036,
+   "created_at": 1795099998.729787,
+   "updated_at": 1795099999.8910336,
+   "park": null,
    "result_head": "finished: all checks passed, 12 tests",
    "deps": [],
    "deps_open": [],
    "state": "done"
   },
   {
-   "id": "t_96abzzed",
+   "id": "t_dd41zz2e",
    "board": "main",
    "title": "Write the snapshot schema",
    "channel": "main",
@@ -497,21 +548,22 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795077217.2202983,
-   "updated_at": 1795077218.4470665,
+   "created_at": 1795099998.5853555,
+   "updated_at": 1795099999.5886056,
+   "park": null,
    "result_head": "finished: all checks passed, 12 tests",
    "deps": [],
    "deps_open": [],
    "state": "done"
   }
  ],
- "tasks_open": 12,
+ "tasks_open": 13,
  "tasks_closed_shown": 3,
  "runner": {
   "running": true,
-  "pid": 3756486,
+  "pid": 1015846,
   "host": "devbox",
-  "started_at": 1795071821.1513057,
+  "started_at": 1795094602.0790653,
   "state": "running",
   "active": 2,
   "slots": 3,
@@ -520,47 +572,51 @@
   "paused": false,
   "draining": false,
   "stop": "",
-  "heartbeat": 1795077221.1513057,
-  "heartbeat_age_s": 0.09012627601623535,
+  "heartbeat": 1795100002.0790653,
+  "heartbeat_age_s": 0.081146240234375,
   "note": "tick",
-  "free_gib": 36.62,
+  "free_gib": 34.58,
   "min_free_gib": 10.0,
   "ready": 3,
+  "launch_per_tick": 2,
+  "pace_interval": "10m",
+  "pacer": true,
+  "auto_worktree": true,
   "windowed": true,
   "children": [
    {
     "run": 1,
-    "task_id": "t_7572zzdf",
+    "task_id": "t_6b25zz8d",
     "harness": "claude",
     "endpoint": null,
     "model": "sonnet-5",
     "effort": "high",
     "bucket": "claude-sub",
-    "pid": 3756486,
-    "started_at": 1795075961.1513057,
+    "pid": 1015846,
+    "started_at": 1795098742.0790653,
     "out_path": "/home/user/ab-home/runs/1.out",
     "err_path": "/home/user/ab-home/runs/1.err",
     "title": "Port the usage harvester to the new log format",
     "board": "main",
     "timeout_s": 2700,
-    "elapsed_s": 1260.0901262760162
+    "elapsed_s": 1260.0811462402344
    },
    {
     "run": 2,
-    "task_id": "t_dfbbzz98",
+    "task_id": "t_7103zzf2",
     "harness": "pi",
     "endpoint": null,
     "model": "local-27b",
     "effort": "high",
     "bucket": "local",
-    "pid": 3756486,
-    "started_at": 1795076881.1513057,
+    "pid": 1015846,
+    "started_at": 1795099662.0790653,
     "out_path": "/home/user/ab-home/runs/2.out",
     "err_path": "/home/user/ab-home/runs/2.err",
     "title": "Summarise last week's failed runs",
     "board": "main",
     "timeout_s": 1200,
-    "elapsed_s": 340.09012627601624
+    "elapsed_s": 340.0811462402344
    }
   ]
  },
@@ -568,10 +624,10 @@
   {
    "scope": "bucket:opencode-free",
    "kind": "manual",
-   "until": 1795078721.0781581,
+   "until": 1795101502.0165076,
    "reason": "rate limited",
-   "set_at": 1795077221.0817194,
-   "remaining_s": 1499.8367261886597
+   "set_at": 1795100002.016719,
+   "remaining_s": 1499.8562960624695
   }
  ],
  "caps": {
@@ -586,16 +642,16 @@
   "claude_plan_pct": {
    "five_hour": 38.0,
    "seven_day": 64.0,
-   "five_hour_resets": "2026-11-19T10:03:41+00:00",
-   "seven_day_resets": "2026-11-22T13:21:41+00:00",
-   "age_s": 40.091798067092896,
+   "five_hour_resets": "2026-11-19T16:23:22+00:00",
+   "seven_day_resets": "2026-11-22T19:41:22+00:00",
+   "age_s": 40.082958936691284,
    "stale": false
   },
   "weekly_pace_pct": 58.5,
   "guards": [
    {
     "bucket": "claude-sub",
-    "reason": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T13:21:41+00:00)"
+    "reason": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T19:41:22+00:00)"
    }
   ]
  },
@@ -630,7 +686,18 @@
     "max_5h_pct": 80,
     "pace_7d_lead_h": 12
    },
-   "cap_hit": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T13:21:41+00:00)"
+   "cap_hit": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T19:41:22+00:00)",
+   "launch_budget": 0,
+   "budget_why": "pace",
+   "pacer": {
+    "budget": 0,
+    "why": "pace",
+    "interval": "10m",
+    "interval_s": 600.0,
+    "used_in_interval": 0,
+    "remaining": 0,
+    "detail": "pace 7d: 64% >= 58% pace"
+   }
   },
   {
    "bucket": "local",
@@ -657,7 +724,18 @@
    },
    "limit": null,
    "cap": null,
-   "cap_hit": null
+   "cap_hit": null,
+   "launch_budget": 1,
+   "budget_why": "aimd",
+   "pacer": {
+    "budget": 1,
+    "why": "aimd",
+    "interval": "10m",
+    "interval_s": 600.0,
+    "used_in_interval": 1,
+    "remaining": 0,
+    "detail": "AIMD 1/10m"
+   }
   },
   {
    "bucket": "opencode-free",
@@ -684,11 +762,22 @@
    },
    "limit": {
     "kind": "manual",
-    "until": 1795078721.0781581,
+    "until": 1795101502.0165076,
     "reason": "rate limited"
    },
    "cap": null,
-   "cap_hit": null
+   "cap_hit": null,
+   "launch_budget": 1,
+   "budget_why": "aimd",
+   "pacer": {
+    "budget": 1,
+    "why": "aimd",
+    "interval": "10m",
+    "interval_s": 600.0,
+    "used_in_interval": 0,
+    "remaining": 1,
+    "detail": "AIMD 1/10m"
+   }
   }
  ],
  "usage_hourly": {
@@ -1211,7 +1300,7 @@
    "calls": 528,
    "output": 459252,
    "fresh_in": 1068948,
-   "cost_usd": 0
+   "cost_usd": 0.0
   },
   {
    "harness": "pi",
@@ -1220,7 +1309,7 @@
    "calls": 276,
    "output": 231012,
    "fresh_in": 555588,
-   "cost_usd": 0
+   "cost_usd": 0.0
   },
   {
    "harness": "opencode",
@@ -1229,7 +1318,7 @@
    "calls": 179,
    "output": 151895,
    "fresh_in": 361055,
-   "cost_usd": 0
+   "cost_usd": 0.0
   }
  ],
  "watchers": [
@@ -1267,7 +1356,8 @@
     "cooldown": "0",
     "reply": true,
     "coalesce": true,
-    "priority": 0
+    "priority": 0,
+    "labels": {}
    }
   }
  ],
@@ -1331,7 +1421,7 @@
  "events": [
   {
    "id": 1,
-   "ts": 1795077214.6607306,
+   "ts": 1795099996.6789541,
    "board": "web",
    "channel": null,
    "task_id": null,
@@ -1343,7 +1433,7 @@
   },
   {
    "id": 2,
-   "ts": 1795077214.8937228,
+   "ts": 1795099996.809477,
    "board": "web",
    "channel": null,
    "task_id": null,
@@ -1357,10 +1447,10 @@
   },
   {
    "id": 3,
-   "ts": 1795077215.209274,
+   "ts": 1795099996.9676654,
    "board": "main",
    "channel": "main",
-   "task_id": "t_3a1dzzf8",
+   "task_id": "t_5cddzz47",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1374,10 +1464,10 @@
   },
   {
    "id": 4,
-   "ts": 1795077215.51762,
+   "ts": 1795099997.1102362,
    "board": "main",
    "channel": "main",
-   "task_id": "t_3dfezzdb",
+   "task_id": "t_f993zzdf",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1391,16 +1481,16 @@
   },
   {
    "id": 5,
-   "ts": 1795077215.6885762,
+   "ts": 1795099997.2902462,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f7abzzbc",
+   "task_id": "t_4852zz1d",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Add a health endpoint to the runner",
     "deps": [
-     "t_3a1dzzf8"
+     "t_5cddzz47"
     ],
     "tier": "high",
     "labels": {
@@ -1410,17 +1500,17 @@
   },
   {
    "id": 6,
-   "ts": 1795077215.908736,
+   "ts": 1795099997.410073,
    "board": "main",
    "channel": "main",
-   "task_id": "t_68b5zzdb",
+   "task_id": "t_aebdzz9a",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Cut release 0.4",
     "deps": [
-     "t_f7abzzbc",
-     "t_3dfezzdb"
+     "t_4852zz1d",
+     "t_f993zzdf"
     ],
     "tier": "low",
     "labels": {
@@ -1430,10 +1520,10 @@
   },
   {
    "id": 7,
-   "ts": 1795077216.1259546,
+   "ts": 1795099997.58616,
    "board": "main",
    "channel": "main",
-   "task_id": "t_ff53zz7f",
+   "task_id": "t_d0a6zzf9",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1447,10 +1537,10 @@
   },
   {
    "id": 8,
-   "ts": 1795077216.3654919,
+   "ts": 1795099997.7013533,
    "board": "main",
    "channel": "main",
-   "task_id": "t_a200zz27",
+   "task_id": "t_9086zzac",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1464,10 +1554,10 @@
   },
   {
    "id": 9,
-   "ts": 1795077216.5491138,
+   "ts": 1795099998.030357,
    "board": "main",
    "channel": "main",
-   "task_id": "t_a5dezzab",
+   "task_id": "t_c7e5zz89",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1482,10 +1572,10 @@
   },
   {
    "id": 10,
-   "ts": 1795077216.6915948,
+   "ts": 1795099998.2136037,
    "board": "main",
    "channel": "main",
-   "task_id": "t_7472zzfb",
+   "task_id": "t_cb56zzd3",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1500,10 +1590,10 @@
   },
   {
    "id": 11,
-   "ts": 1795077216.862663,
+   "ts": 1795099998.3163316,
    "board": "main",
    "channel": "main",
-   "task_id": "t_7572zzdf",
+   "task_id": "t_6b25zz8d",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1517,10 +1607,10 @@
   },
   {
    "id": 12,
-   "ts": 1795077217.03117,
+   "ts": 1795099998.4423478,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dfbbzz98",
+   "task_id": "t_7103zzf2",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1534,10 +1624,10 @@
   },
   {
    "id": 13,
-   "ts": 1795077217.2204132,
+   "ts": 1795099998.5854418,
    "board": "main",
    "channel": "main",
-   "task_id": "t_96abzzed",
+   "task_id": "t_dd41zz2e",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1551,10 +1641,10 @@
   },
   {
    "id": 14,
-   "ts": 1795077217.408238,
+   "ts": 1795099998.7299316,
    "board": "main",
    "channel": "main",
-   "task_id": "t_8364zzd5",
+   "task_id": "t_39cdzz22",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1568,10 +1658,10 @@
   },
   {
    "id": 15,
-   "ts": 1795077217.6354465,
+   "ts": 1795099998.883945,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dea9zz71",
+   "task_id": "t_f3eczz08",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1585,10 +1675,10 @@
   },
   {
    "id": 16,
-   "ts": 1795077217.8631852,
+   "ts": 1795099999.0646236,
    "board": "web",
    "channel": "main",
-   "task_id": "t_7602zz62",
+   "task_id": "t_a857zz50",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1602,10 +1692,10 @@
   },
   {
    "id": 17,
-   "ts": 1795077218.0302968,
+   "ts": 1795099999.236493,
    "board": "main",
    "channel": "main",
-   "task_id": "t_4a7ezzd1",
+   "task_id": "t_3149zz16",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
@@ -1619,10 +1709,10 @@
   },
   {
    "id": 18,
-   "ts": 1795077218.255644,
+   "ts": 1795099999.4182374,
    "board": "main",
    "channel": "main",
-   "task_id": "t_96abzzed",
+   "task_id": "t_dd41zz2e",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1631,10 +1721,10 @@
   },
   {
    "id": 19,
-   "ts": 1795077218.4472568,
+   "ts": 1795099999.5886924,
    "board": "main",
    "channel": "main",
-   "task_id": "t_96abzzed",
+   "task_id": "t_dd41zz2e",
    "actor": "worker-1",
    "kind": "done",
    "payload": {
@@ -1643,10 +1733,10 @@
   },
   {
    "id": 20,
-   "ts": 1795077218.6271963,
+   "ts": 1795099999.7328718,
    "board": "main",
    "channel": "main",
-   "task_id": "t_8364zzd5",
+   "task_id": "t_39cdzz22",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1655,10 +1745,10 @@
   },
   {
    "id": 21,
-   "ts": 1795077218.823274,
+   "ts": 1795099999.8911781,
    "board": "main",
    "channel": "main",
-   "task_id": "t_8364zzd5",
+   "task_id": "t_39cdzz22",
    "actor": "worker-1",
    "kind": "done",
    "payload": {
@@ -1667,10 +1757,10 @@
   },
   {
    "id": 22,
-   "ts": 1795077218.9872792,
+   "ts": 1795100000.0526133,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dea9zz71",
+   "task_id": "t_f3eczz08",
    "actor": "worker-2",
    "kind": "claimed",
    "payload": {
@@ -1679,15 +1769,15 @@
   },
   {
    "id": 23,
-   "ts": 1795077219.1846638,
+   "ts": 1795100000.2131832,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dea9zz71",
+   "task_id": "t_f3eczz08",
    "actor": "worker-2",
    "kind": "message",
    "payload": {
     "msg": 1,
-    "thread": "t_dea9zz71",
+    "thread": "t_f3eczz08",
     "mentions": [],
     "body": "FAILED: segfault in the arm64 build, no repro",
     "data": null
@@ -1695,10 +1785,10 @@
   },
   {
    "id": 24,
-   "ts": 1795077219.1847723,
+   "ts": 1795100000.2132502,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dea9zz71",
+   "task_id": "t_f3eczz08",
    "actor": "worker-2",
    "kind": "dead",
    "payload": {
@@ -1709,15 +1799,15 @@
   },
   {
    "id": 25,
-   "ts": 1795077219.3552341,
+   "ts": 1795100000.353687,
    "board": "main",
    "channel": "main",
-   "task_id": "t_3a1dzzf8",
+   "task_id": "t_5cddzz47",
    "actor": "worker-1",
    "kind": "message",
    "payload": {
     "msg": 2,
-    "thread": "t_3a1dzzf8",
+    "thread": "t_5cddzz47",
     "mentions": [],
     "body": "Found two boards worth comparing; notes in the thread.",
     "data": null
@@ -1725,15 +1815,15 @@
   },
   {
    "id": 26,
-   "ts": 1795077219.5430655,
+   "ts": 1795100000.506199,
    "board": "main",
    "channel": "main",
-   "task_id": "t_a5dezzab",
+   "task_id": "t_c7e5zz89",
    "actor": "worker-1",
    "kind": "message",
    "payload": {
     "msg": 3,
-    "thread": "t_a5dezzab",
+    "thread": "t_c7e5zz89",
     "mentions": [],
     "body": "Context: three agents are idle while two slots are busy.",
     "data": null
@@ -1741,10 +1831,10 @@
   },
   {
    "id": 27,
-   "ts": 1795077219.681946,
+   "ts": 1795100000.6997702,
    "board": "main",
    "channel": "main",
-   "task_id": "t_7572zzdf",
+   "task_id": "t_6b25zz8d",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1753,10 +1843,10 @@
   },
   {
    "id": 28,
-   "ts": 1795077219.8536043,
+   "ts": 1795100001.0318625,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dfbbzz98",
+   "task_id": "t_7103zzf2",
    "actor": "worker-2",
    "kind": "claimed",
    "payload": {
@@ -1765,7 +1855,68 @@
   },
   {
    "id": 29,
-   "ts": 1795077220.0402493,
+   "ts": 1795100001.1770022,
+   "board": "main",
+   "channel": "main",
+   "task_id": "t_c2d4zz3b",
+   "actor": "tui-test",
+   "kind": "created",
+   "payload": {
+    "title": "Score the overnight eval",
+    "deps": [],
+    "tier": "medium",
+    "labels": {
+     "type": "experiment"
+    }
+   }
+  },
+  {
+   "id": 30,
+   "ts": 1795100001.327404,
+   "board": "main",
+   "channel": "main",
+   "task_id": "t_c2d4zz3b",
+   "actor": "worker-3",
+   "kind": "claimed",
+   "payload": {
+    "lease_s": 1800.0
+   }
+  },
+  {
+   "id": 31,
+   "ts": 1795100001.49398,
+   "board": "main",
+   "channel": "main",
+   "task_id": "t_c2d4zz3b",
+   "actor": "worker-3",
+   "kind": "message",
+   "payload": {
+    "msg": 4,
+    "thread": "t_c2d4zz3b",
+    "mentions": [],
+    "body": "PARKED on file /work/eval/results.json (stable for 60s): eval runs detached; results land in /work/eval/results.json - score it and report the number",
+    "data": null
+   }
+  },
+  {
+   "id": 32,
+   "ts": 1795100001.4940276,
+   "board": "main",
+   "channel": "main",
+   "task_id": "t_c2d4zz3b",
+   "actor": "worker-3",
+   "kind": "parked",
+   "payload": {
+    "note": "eval runs detached; results land in /work/eval/results.json - score it and report the number",
+    "at": 1795100001.493723,
+    "file": "/work/eval/results.json",
+    "grace_s": 60.0,
+    "run": null
+   }
+  },
+  {
+   "id": 33,
+   "ts": 1795100001.6265986,
    "board": "main",
    "channel": null,
    "task_id": null,
@@ -1788,8 +1939,8 @@
    }
   },
   {
-   "id": 30,
-   "ts": 1795077220.2734795,
+   "id": 34,
+   "ts": 1795100001.7596345,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1809,8 +1960,8 @@
    }
   },
   {
-   "id": 31,
-   "ts": 1795077220.5026953,
+   "id": 35,
+   "ts": 1795100001.9037654,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1829,8 +1980,8 @@
    }
   },
   {
-   "id": 32,
-   "ts": 1795077221.0818725,
+   "id": 36,
+   "ts": 1795100002.016824,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1839,16 +1990,16 @@
    "payload": {
     "scope": "bucket:opencode-free",
     "kind": "manual",
-    "until": 1795078721.0781581,
+    "until": 1795101502.0165076,
     "reason": "rate limited"
    }
   }
  ],
- "events_cursor": 32,
+ "events_cursor": 36,
  "events_truncated": false,
  "tail": {
   "run": 1,
-  "task_id": "t_7572zzdf",
+  "task_id": "t_6b25zz8d",
   "harness": "claude",
   "running": true,
   "bytes": 2000,
@@ -1860,5 +2011,5 @@
   "err_truncated": false,
   "error": null
  },
- "took_ms": 11.2
+ "took_ms": 12.1
 }

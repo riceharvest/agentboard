@@ -16,7 +16,7 @@ RESULT_HEAD = 300
 MAX_TAIL = 4 * 1024 * 1024
 
 TASK_COLS = ("id, board, title, channel, status, priority, labels, tier, harness, model, workdir, runnable, attempts, "
-             "max_attempts, timeout_s, owner, lease_until, not_before, run_id, created_by, created_at, updated_at, "
+             "max_attempts, timeout_s, owner, lease_until, not_before, run_id, created_by, created_at, updated_at, park, "
              f"substr(result,1,{RESULT_HEAD}) AS result_head")
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b[()][0-2AB]")
@@ -85,11 +85,14 @@ def _task(r, keys, deps, dep_status, t):
     d["runnable"] = bool(d["runnable"])
     lab = d["labels"]
     d["labels"] = json.loads(lab) if lab and lab != "{}" else {}
+    d["park"] = json.loads(d["park"]) if d.get("park") else None
     ds = deps.get(d["id"], [])
     d["deps"] = ds
     d["deps_open"] = [x for x in ds if dep_status.get(x) != "done"]
     if d["status"] != "open":
         d["state"] = d["status"]
+    elif store.park_active(d["park"]):
+        d["state"] = "waiting"
     elif any(dep_status.get(x) in ("dead", "cancelled") for x in ds):
         d["state"] = "stuck"
     elif d["deps_open"] or (d["not_before"] and d["not_before"] > t):

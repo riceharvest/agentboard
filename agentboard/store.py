@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
   tier TEXT DEFAULT 'medium', harness TEXT, model TEXT, workdir TEXT, runnable INTEGER DEFAULT 1,
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 3, timeout_s INTEGER,
-  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, run_id INTEGER,
+  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER,
   created_by TEXT, created_at REAL, updated_at REAL);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, priority);
 CREATE TABLE IF NOT EXISTS deps(task_id TEXT, dep_id TEXT, PRIMARY KEY(task_id, dep_id));
@@ -142,7 +142,7 @@ def connect_ro(path=None):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
         ok = ("board" in _cols(conn, "tasks") and {"board", "channel"} <= _cols(conn, "events")
-              and "endpoint" in _cols(conn, "runs")
+              and "endpoint" in _cols(conn, "runs") and "park" in _cols(conn, "tasks")
               and conn.execute("SELECT 1 FROM control WHERE key='_schema'").fetchone() is not None)
     except sqlite3.Error:
         return None
@@ -168,6 +168,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN endpoint TEXT")
     if "provider" not in _cols(conn, "runs"):
         conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT")
+    if "park" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN park TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
@@ -489,6 +491,7 @@ def task_dict(conn, row, full=False):
     d = dict(row)
     d["labels"] = json.loads(d.get("labels") or "{}")
     d["data"] = json.loads(d["data"]) if d.get("data") else None
+    d["park"] = json.loads(d["park"]) if d.get("park") else None
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
     if full:
@@ -500,10 +503,32 @@ def task_dict(conn, row, full=False):
     return d
 
 
+def park_active(park):
+    """True when a park spec (JSON string, dict or None) is still waiting (not woken yet)."""
+    if isinstance(park, str):
+        park = json.loads(park) if park else None
+    return bool(park) and not park.get("woken_at")
+
+
+def park_cond(park):
+    """Human text for what a parked card waits on."""
+    if isinstance(park, str):
+        park = json.loads(park) if park else None
+    if not park:
+        return ""
+    if park.get("pid"):
+        return f"pid {park['pid']} to exit"
+    if park.get("file"):
+        return f"file {park['file']} (stable for {fmt_dur(park.get('grace_s') or 0)})"
+    return "a wake condition"
+
+
 def derived_state(conn, d):
-    """open tasks are 'ready', 'waiting' (deps/not_before) or 'stuck' (a dep is dead/cancelled)."""
+    """open tasks are 'ready', 'waiting' (deps/not_before/park) or 'stuck' (a dep is dead/cancelled)."""
     if d["status"] != "open":
         return d["status"]
+    if park_active(d.get("park")):
+        return "waiting"
     bad = conn.execute("SELECT 1 FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=? AND p.status IN ('dead','cancelled')",
                        (d["id"],)).fetchone()
     if bad:
@@ -582,13 +607,13 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
     """Count an attempt; dead after max_attempts, else back to open with backoff."""
     attempts = (row["attempts"] or 0) + 1
     if attempts >= (row["max_attempts"] or 3):
-        conn.execute("UPDATE tasks SET status='dead', attempts=?, owner=NULL, lease_until=NULL, result=?, updated_at=? WHERE id=?",
+        conn.execute("UPDATE tasks SET status='dead', attempts=?, owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
                      (attempts, why, now(), row["id"]))
         event(conn, row["id"], actor, "dead", {"why": why, "attempts": attempts, "after": kind})
         _report_back(conn, row, actor, f"DEAD after {attempts} attempts: {why}")
         return "dead"
     nb = now() + (parse_dur(cfg(conn, "backoff")) or 0) * attempts
-    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, not_before=?, updated_at=? WHERE id=?",
+    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, not_before=?, updated_at=? WHERE id=?",
                  (attempts, nb, now(), row["id"]))
     event(conn, row["id"], actor, kind, {"why": why, "attempts": attempts, "retry_at": nb})
     return "open"
@@ -611,6 +636,7 @@ def reap(conn):
 READY_SQL = """
 SELECT t.* FROM tasks t JOIN boards b ON b.name=t.board
 WHERE t.status='open' AND (t.not_before IS NULL OR t.not_before <= :now)
+  AND (t.park IS NULL OR json_extract(t.park, '$.woken_at') IS NOT NULL)
   AND NOT EXISTS (SELECT 1 FROM deps x LEFT JOIN tasks p ON p.id=x.dep_id
                   WHERE x.task_id=t.id AND (p.status IS NULL OR p.status!='done'))
 """
@@ -837,7 +863,7 @@ def _report_back(conn, row, actor, text):
 
 
 def _complete(conn, row, actor, result, data=None):
-    conn.execute("UPDATE tasks SET status='done', result=?, data=COALESCE(?,data), owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+    conn.execute("UPDATE tasks SET status='done', result=?, data=COALESCE(?,data), owner=NULL, lease_until=NULL, park=NULL, updated_at=? WHERE id=?",
                  (result, json.dumps(data) if data is not None else None, now(), row["id"]))
     event(conn, row["id"], actor, "done", {"result": (result or "")[:500]})
     _report_back(conn, row, actor, result or "done")
@@ -952,11 +978,57 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
     return row["id"]
 
 
+def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False):
+    """Park a claimed card on a long external job: release the claim WITHOUT counting an attempt and record
+    the wake condition (process gone, or file present and stable for grace_s). The runner wakes it later."""
+    if not note or not note.strip():
+        raise ValueError("ab park needs --note: what you wait for and what the next agent should do with the result")
+    if bool(pid) == bool(file):
+        raise ValueError("give exactly one of --pid PID or --file PATH")
+    with tx(conn):
+        row = _owned(conn, tid, actor, force)
+        if row["status"] not in ("open", "claimed"):
+            raise ValueError(f"task {row['id']} is {row['status']}, cannot park")
+        spec = {"note": note.strip(), "at": now()}
+        if pid:
+            spec.update(pid=int(pid), pid_start=pid_start)
+        else:
+            path = os.path.abspath(os.path.expanduser(file or ""))
+            spec.update(file=path, grace_s=float(grace_s or 0))
+            try:
+                st = os.stat(path)
+                spec.update(file_size=st.st_size, file_mtime=st.st_mtime, stable_since=now())
+            except OSError:
+                pass  # not there yet: wake when it appears and stops growing
+        live = conn.execute("SELECT id FROM runs WHERE task_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+                            (row["id"],)).fetchone()
+        spec["run"] = live["id"] if live else None
+        conn.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, park=?, updated_at=? WHERE id=?",
+                     (json.dumps(spec), now(), row["id"]))
+        post_message(conn, actor, f"PARKED on {park_cond(spec)}: {spec['note']}", thread=row["id"], check=False, _in_tx=True)
+        event(conn, row["id"], actor, "parked", spec)
+    return row["id"], spec
+
+
+def park_wake(conn, tid, why, actor="runner"):
+    """Mark a park woken (inside a tx): the card becomes ready again; the note and wake reason stay in the
+    park spec so the next agent's brief can carry them, until a new run starts."""
+    row = must_task(conn, tid)
+    spec = json.loads(row["park"]) if row["park"] else None
+    if not spec or spec.get("woken_at"):
+        return None
+    spec["woken_at"], spec["woke"] = now(), why
+    conn.execute("UPDATE tasks SET park=?, updated_at=? WHERE id=?", (json.dumps(spec), now(), tid))
+    post_message(conn, actor, f"PARK WOKE ({why}): {spec.get('note', '')}", thread=tid, check=False, _in_tx=True)
+    event(conn, tid, actor, "park_woken", {"why": why, "run": spec.get("run")})
+    return spec
+
+
 def cancel(conn, tid, actor, why=""):
     with tx(conn):
         row = must_task(conn, tid)
         _task_actor_ok(conn, row, actor)
-        conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, result=COALESCE(NULLIF(?,''),result), updated_at=? WHERE id=?",
+        conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, park=NULL, result=COALESCE(NULLIF(?,''),result), updated_at=? WHERE id=?",
                      (why, now(), row["id"]))
         event(conn, row["id"], actor, "cancelled", {"why": why})
     return row["id"]
@@ -972,7 +1044,7 @@ def retry(conn, tid, actor):
         if cur.get("outcome") == "negative":
             cur.pop("outcome", None)
             conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(cur), row["id"]))
-        conn.execute("UPDATE tasks SET status='open', attempts=0, owner=NULL, lease_until=NULL, not_before=NULL, updated_at=? WHERE id=?",
+        conn.execute("UPDATE tasks SET status='open', attempts=0, owner=NULL, lease_until=NULL, not_before=NULL, park=NULL, updated_at=? WHERE id=?",
                      (now(), row["id"]))
         event(conn, row["id"], actor, "retry", {"was": row["status"]})
     return row["id"]

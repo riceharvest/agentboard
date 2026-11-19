@@ -73,6 +73,11 @@ def build(home, run_pids=None):
     ab("note", t["dec1"], "Context: three agents are idle while two slots are busy.", actor="worker-1")
     for key in ("run1", "run2"):
         ab("claim", t[key], actor="worker-%s" % key[-1])
+    # a card parked on a long external job: waiting lane shows what it waits on
+    t["park1"] = add("Score the overnight eval", "The eval runs detached; score its output when it lands.", "type=experiment", tier="medium", priority=2)
+    ab("claim", t["park1"], actor="worker-3")
+    ab("park", t["park1"], "--file", "/work/eval/results.json", "--grace", "60s",
+       "--note", "eval runs detached; results land in /work/eval/results.json - score it and report the number", actor="worker-3")
     ab("watch", "add", "on-dead", "--on", "dead", "--brief", "Look at the dead card and say why it died.", "--all-boards")
     ab("sched", "add", "always", "--window", "00:00-23:59", "--slots", "3")
     ab("config", "set", "caps", json.dumps({"claude-sub": {"window": "5h", "max_output": 400000, "max_5h_pct": 80, "pace_7d_lead_h": 12}}))
@@ -133,7 +138,8 @@ def snapshot(home, run=1):
 def scrub(s, home):
     """No local paths, and task ids reshaped (t_ + 4 hex + zz + 2 hex) so they stay distinct but never look like real board ids."""
     import re
-    txt = json.dumps(s).replace(str(home), "/home/user/ab-home")
+    from agentboard import store  # local: AB_HOME must already point at the fixture home, never the real board
+    txt = json.dumps(s).replace(str(home), "/home/user/ab-home").replace(store.DB_PATH.name, "db.sqlite")
     txt = re.sub(r"t_[0-9a-f]{8}", lambda m: "t_" + m.group(0)[2:6] + "zz" + m.group(0)[8:10], txt)
     return json.loads(txt)
 

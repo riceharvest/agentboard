@@ -78,6 +78,36 @@ pub struct Task {
     pub updated_at: Option<f64>,
     pub result_head: Option<String>,
     pub wait_reason: Option<String>,
+    pub park: Option<Park>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Park {
+    pub pid: Option<i64>,
+    pub file: Option<String>,
+    pub grace_s: Option<f64>,
+    pub note: Option<String>,
+    pub run: Option<i64>,
+    pub at: Option<f64>,
+    pub woken_at: Option<f64>,
+    pub woke: Option<String>,
+}
+
+impl Park {
+    pub fn active(&self) -> bool {
+        self.woken_at.is_none()
+    }
+
+    pub fn what(&self) -> String {
+        if let Some(pid) = self.pid {
+            format!("pid {pid}")
+        } else if let Some(f) = &self.file {
+            format!("file {}", f.rsplit('/').next().unwrap_or(f))
+        } else {
+            "a job".into()
+        }
+    }
 }
 
 impl Task {
@@ -336,6 +366,7 @@ pub struct Detail {
     pub children: Vec<Value>,
     pub notes: Vec<Note>,
     pub runs: Vec<RunRow>,
+    pub park: Option<Park>,
 }
 
 /// An id out of a value that is either "t_x" or {"id": "t_x", ...}.

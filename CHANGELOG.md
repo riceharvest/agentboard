@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab park`: park a claimed card on a long external job and exit — `--pid PID` (wake when the process exits, start-time guarded) or `--file PATH [--grace 60s]` (wake when the file exists and stops growing), with a required `--note`. The run ends with outcome `parked` (no attempt counted), the slot frees immediately, the runner checks wake conditions every tick, and a fresh agent resumes the card with the park note and the parked run's last output lines in its brief. Parks survive a runner reload; `ab ls` / `ab show` / `ab snapshot` (task `park` field) and the TUI show what a parked card waits on. GUIDE: anything expected to take > 20 min runs detached and the card parks.
+
 - Hermes runs: the isolated per-run session transcript is exported to `runs/<run>.hermes-session.jsonl` before the temporary `HERMES_HOME` is deleted (audit what an agent did around a kill/timeout); with `hermes_isolate=false` the brief now spells out the `AB_*` values because a shared gateway's tools don't inherit them.
 - Runner auto-worktree: when a ready card's workdir is a busy git checkout, the runner automatically starts it in a per-task git worktree (`ab/<task>` from `HEAD`) unless disabled per card (`-l worktree=off`) or globally (`ab config set auto_worktree false`). `ab ls --ready` reports `workdir busy (auto worktree off)` only when a card actually waits.
 - Worker env hygiene: the runner exports `AB_RUN_HOME`, and `ab` strips `AB_RUN`, `AB_ACTOR`, `AB_BOARD`, and `AB_TASK` whenever invoked with a different `AB_HOME` than the worker's own board.

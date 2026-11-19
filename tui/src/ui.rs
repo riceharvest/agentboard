@@ -305,6 +305,9 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
         }
     }
     if t.state == "waiting" {
+        if let Some(p) = t.park.as_ref().filter(|p| p.active()) {
+            return Some(format!("  ⏸ parked on {}", p.what()));
+        }
         if !t.deps_open.is_empty() {
             return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| d.chars().skip(2).take(4).collect::<String>()).collect::<Vec<_>>().join(", ")));
         }
@@ -600,6 +603,13 @@ fn card(app: &mut App, f: &mut Frame, area: Rect) {
         }
         if let Some(why) = t.wait_reason.as_deref().filter(|s| !s.is_empty()) {
             lines.push(Line::from(vec![sp("wait ", fg(theme::WARN).add_modifier(Modifier::BOLD)), sp(why.to_string(), fg(theme::WARN))]));
+        }
+        if let Some(p) = &t.park {
+            let head = if p.active() { format!("parked on {}", p.what()) } else { format!("park woken ({})", p.woke.clone().unwrap_or_else(|| p.what())) };
+            lines.push(Line::from(vec![sp("park ", fg(theme::WARN).add_modifier(Modifier::BOLD)), sp(head, fg(theme::WARN))]));
+            if let Some(n) = &p.note {
+                lines.push(Line::from(vec![sp("note ", dim()), sp(n.clone(), base())]));
+            }
         }
     }
     lines.push(Line::from(""));

@@ -98,7 +98,7 @@ fn board_lanes_with_counts_types_and_waits_on() {
         &[
             "ready 4",
             "running 2/3",
-            "waiting 3",
+            "waiting 4",
             "review 3",
             "done 2",
             "dead 1",
@@ -106,6 +106,7 @@ fn board_lanes_with_counts_types_and_waits_on() {
             "Port the usage",
             "Flaky integration test",
             "↳ waits on",
+            "⏸ parked on file results.json",
             "PAUSED",
             "web",
             "caps claude-sub",
@@ -564,6 +565,16 @@ fn card_detail_renders_worktree_metadata_and_wait_reason() {
             "wait workdir busy (auto worktree off)",
         ],
     );
+}
+
+#[test]
+fn card_detail_renders_park_condition_and_note() {
+    let mut a = app(false);
+    let id = id_of(&a, "Score the overnight eval");
+    a.open_card(id.clone());
+    a.detail = Some((id, card_detail("x", "Body text"), Instant::now()));
+    let s = draw(&mut a, 220, 44);
+    has(&s, &["park parked on file results.json", "score it and report the number"]);
 }
 
 #[test]

@@ -13,7 +13,7 @@ from . import store
 from ._lazy import Lazy
 from .store import cfg, event, now, parse_dur, tx
 
-automation, H, usage = Lazy("automation"), Lazy("harness"), Lazy("usage")
+automation, H, usage, S = Lazy("automation"), Lazy("harness"), Lazy("usage"), Lazy("snapshot")
 # stdlib modules only the runner process itself needs: not worth their import time for `ab snapshot`
 fcntl, shutil, signal, socket, subprocess = (Lazy(n, absolute=True) for n in ("fcntl", "shutil", "signal", "socket", "subprocess"))
 
@@ -49,7 +49,7 @@ board={board} channel={channel} tier={tier} attempt={attempt}/{max_attempts}{lab
 workdir: {workdir}
 
 {body}
-{context}{deps}{notes}
+{park}{context}{deps}{notes}
 BOARD (the `ab` CLI is on PATH; AB_TASK={id}, AB_ACTOR and AB_BOARD are already set for you):
   ab note $AB_TASK "progress, findings, decisions"     keep a trail for whoever picks this up next
   ab add "title" --body "..." [--dep ID] [--tier low|medium|high|max]   hand sub-work to other agents
@@ -57,11 +57,13 @@ BOARD (the `ab` CLI is on PATH; AB_TASK={id}, AB_ACTOR and AB_BOARD are already 
   ab reply THREAD "text" ; ab read CHANNEL ; ab inbox   talk in threads (THREAD = task id or m<id>)
   ab followup $AB_TASK "check CI for the PR" --in 5m  schedule a later check that reports back here
   ab defer $AB_TASK --after ID [--why "..."]           park this task until ID is done, then stop
+  ab park $AB_TASK --pid PID --note "..."              long job detached (nohup/setsid): exit now, a fresh agent resumes when it ends
+  ab park $AB_TASK --file PATH [--grace 60s] --note "..."   same, waking when the file exists and stops growing
   ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"   escalate, then stop
   ab done $AB_TASK "short result: what changed, where, how it was verified"
   ab fail $AB_TASK "why it cannot be done"
   ab show ID | ab ls --ready | ab guide                 read the board
-Do the work, verify it for real, then call exactly ONE of done / fail / defer / release and stop.
+Do the work, verify it for real, then call exactly ONE of done / fail / defer / park / release and stop.
 """
 
 
@@ -101,6 +103,45 @@ def alive(pid, start):
     except OSError:
         return False
     return start is None or st == start
+
+
+def wake_parked(conn):
+    """Check every parked card's wake condition each tick: pid liveness + start time (like alive()), or the
+    file present and unchanged (size+mtime) for grace_s. Returns [(task_id, why)]. A woken park stays on the
+    card so the next agent's brief carries the note; a new run clears it."""
+    woken = []
+    for r in conn.execute("SELECT id, park FROM tasks WHERE status='open' AND park IS NOT NULL").fetchall():
+        spec = json.loads(r["park"])
+        if spec.get("woken_at"):
+            continue
+        if conn.execute("SELECT 1 FROM runs WHERE task_id=? AND ended_at IS NULL", (r["id"],)).fetchone():
+            continue  # the parking run has not exited yet; wake once it is settled
+        why, t = None, now()
+        if spec.get("pid"):
+            if not alive(spec["pid"], spec.get("pid_start")):
+                why = f"pid {spec['pid']} exited"
+        elif spec.get("file"):
+            try:
+                st = os.stat(spec["file"])
+            except OSError:
+                st = None
+            if st is None:
+                if spec.get("file_size") is not None:  # it was there once and vanished: wait for it again
+                    spec.update(file_size=None, file_mtime=None, stable_since=None)
+                    with tx(conn):
+                        conn.execute("UPDATE tasks SET park=? WHERE id=?", (json.dumps(spec), r["id"]))
+            elif (st.st_size, st.st_mtime) != (spec.get("file_size"), spec.get("file_mtime")):
+                spec.update(file_size=st.st_size, file_mtime=st.st_mtime, stable_since=t)  # still growing
+                with tx(conn):
+                    conn.execute("UPDATE tasks SET park=? WHERE id=?", (json.dumps(spec), r["id"]))
+            elif t - (spec.get("stable_since") or spec.get("at") or t) >= (spec.get("grace_s") or 0):
+                why = (f"file {spec['file']} present and stable for {store.fmt_dur(spec.get('grace_s') or 0)} "
+                       f"({st.st_size} bytes)")
+        if why:
+            with tx(conn):
+                store.park_wake(conn, r["id"], why)
+            woken.append((r["id"], why))
+    return woken
 
 
 def runner_status(conn):
@@ -214,6 +255,31 @@ def effective_slots(conn):
 
 
 # ---------------------------------------------------------------- brief
+def park_resume(conn, task):
+    """Brief section for a card whose park just woke: the park note and the parked run's last output lines,
+    so a fresh agent continues where the previous one stopped."""
+    park = json.loads(task["park"]) if task["park"] else None
+    if not park or not park.get("woken_at"):
+        return ""
+    tail = ""
+    if park.get("run"):
+        r = conn.execute("SELECT out_path FROM runs WHERE id=?", (park["run"],)).fetchone()
+        if r and r["out_path"]:
+            try:
+                with open(r["out_path"], "rb") as f:
+                    f.seek(0, 2)
+                    f.seek(max(0, f.tell() - 2000))
+                    tail = S.strip_ansi(f.read().decode("utf-8", errors="replace")).strip()
+            except OSError:
+                pass
+    txt = (f"\nRESUMING AFTER PARK: a previous run parked this card waiting for {store.park_cond(park)}; that wait is over "
+           f"({park.get('woke') or 'wake condition met'}). Do not start the job again; continue where it stopped "
+           f"(read its outputs, verify, finish).\nPARK NOTE: {park.get('note') or '(none)'}\n")
+    if tail:
+        txt += f"LAST OUTPUT LINES OF THE PARKED RUN (run {park['run']}):\n{tail[-1500:]}\n"
+    return txt + "\n"
+
+
 def build_brief(conn, task, workdir, attempt, actor="?"):
     deps = conn.execute("SELECT p.id, p.title, p.result FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=?",
                         (task["id"],)).fetchall()
@@ -235,7 +301,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
         except LookupError:
             pass
     return BRIEF.format(id=task["id"], title=task["title"], channel=task["channel"], tier=task["tier"],
-                        actor=actor, board=task["board"], context=ctx,
+                        actor=actor, board=task["board"], context=ctx, park=park_resume(conn, task),
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
@@ -363,6 +429,8 @@ class Runner:
             if ch.task_id in expired_ids:
                 self.kill(ch, "expired")
         self.poll_children()
+        for tid, why in wake_parked(c):
+            self.log(f"{tid} park woke: {why}")
         stop = cfg(c, "stop") or ""
         if stop == "reload":
             self.reload()
@@ -634,6 +702,8 @@ class Runner:
         start = pid_start(proc.pid)
         with tx(c):
             c.execute("UPDATE runs SET pid=?, pid_start=?, out_path=?, err_path=? WHERE id=?", (proc.pid, start, out_path, err_path, run_id))
+            # a woken park served its purpose (its note is in this run's brief); drop it so the card is plain again
+            c.execute("UPDATE tasks SET park=NULL WHERE id=? AND json_extract(park, '$.woken_at') IS NOT NULL", (task["id"],))
         timeout_s = cur["timeout_s"] or parse_dur(cfg(c, "timeout"))
         self.children[run_id] = Child(run_id, task["id"], owner, cand.harness, cand.model, bucket, proc.pid, start, proc,
                                       timeout_s, workdir, out_path, err_path, now())
@@ -750,7 +820,13 @@ class Runner:
             with tx(c):
                 t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
                 mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
-                if res.error_kind in ("auth", "limit", "unavailable"):
+                park = json.loads(t["park"]) if t is not None and t["park"] else None
+                parked_by_me = bool(park) and not park.get("woken_at") and park.get("run") == ch.run_id
+                if parked_by_me:
+                    # `ab park` already released the claim with the wake condition recorded: not an attempt,
+                    # not a failure, whatever the exit code. The runner wakes the card when the job ends.
+                    outcome = "parked"
+                elif res.error_kind in ("auth", "limit", "unavailable"):
                     kind = res.error_kind
                     if kind == "auth" and not getattr(ch, "provider", None):
                         scope = harness_scope(ch.harness, getattr(ch, "endpoint", None))

@@ -56,7 +56,7 @@ machine.
 The runner gives each agent a brief with the task, the results of its dependencies, the thread so far and
 the board commands. After you change agentboard itself, `ab runner reload` makes the runner re-exec with the new
 code without waiting for or killing running agents (they are re-adopted); `ab runner stop` waits for them to finish
-and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `fail --negative` (records an intended negative with label `outcome=negative` so `ab anomalies` and `--on dead` watchers skip it; also works retroactively on dead cards for any actor with write access), `defer` or `release`.
+and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `fail --negative` (records an intended negative with label `outcome=negative` so `ab anomalies` and `--on dead` watchers skip it; also works retroactively on dead cards for any actor with write access), `defer`, `park` (wait for a long external job, see below) or `release`.
 
 ### One workdir, one run (the workdir lock)
 
@@ -88,6 +88,10 @@ cards a live session claimed by hand); paths are compared after `realpath`. Two 
   is posted back into the thread.
 - **Follow-ups:** `ab followup THREAD "check CI" --in 5m` starts an agent later, and its result lands in the
   same thread.
+- **Park long jobs:** `ab park $AB_TASK --pid PID --note "..."` (or `--file PATH [--grace 60s]`) frees the
+  slot while a detached eval/training/build runs; the runner wakes the card when the process exits or the
+  output file stops growing, and a fresh agent resumes with the park note and the last output lines in its
+  brief. No attempt counted, survives a runner reload. Agents don't babysit jobs.
 - **Multiple boards:** each has its own pause switch, slot cap, default tier and default workdir. Quota and
   the runner are shared.
 - **Permissions:** read, post, create, claim, manage and admin, per board, channel and actor glob. Runner
@@ -281,6 +285,7 @@ Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on s
 
     ab runner pause|resume|drain|reload|stop [--now]|slots N      ab boards set NAME --pause|--resume|--max-slots N
     ab retry|cancel|defer ID ...    ab edit ID --priority --tier --harness --model --dep --rm-dep    ab note ID "..."
+    ab park ID --pid PID|--file PATH [--grace 60s] --note "..."   (wait for a long external job; a fresh agent resumes the card)
     ab done ID "result" --force     ab decision ls [--owner X] | answer ID "text"    (manual cards: note, then done)
     ab kill RUN_ID                  (stops one run; the task goes back to the queue without an attempt. `cancel` ends the work)
     ab watch|sched enable|disable NAME

@@ -27,6 +27,11 @@ TOOLS = {
     "ab_release": ("Hand a task back without counting an attempt.", "release", ["id", "why"], {"force": ("--force", B)}, ["id"]),
     "ab_defer": ("Park a task until a time and/or until other tasks are done.", "defer", ["id"],
                  {"until": ("--until", S), "after": ("--after", L), "why": ("--why", S), "force": ("--force", B)}, ["id"]),
+    "ab_park": ("Park your claimed card on a long external job and exit (no attempt counted): exactly one of pid (wake when the "
+                "process exits) or file (wake when it exists and stops growing for grace, default 60s). note is required: what you "
+                "wait for and what the next agent should do. The runner resumes the card with a fresh agent whose brief carries the note.",
+                "park", ["id"], {"pid": ("--pid", I), "file": ("--file", S), "grace": ("--grace", S),
+                                 "note": ("--note", S), "note_file": ("--note-file", S), "force": ("--force", B)}, []),
     "ab_cancel": ("Cancel a task (stops its run).", "cancel", ["id", "why"], {}, ["id"]),
     "ab_retry": ("Reopen a dead/cancelled/done task with fresh attempts.", "retry", ["id"], {}, ["id"]),
     "ab_edit": ("Change task fields. labels: {key: value} ('' removes).", "edit", ["id"],

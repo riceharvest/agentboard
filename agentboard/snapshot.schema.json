@@ -74,7 +74,7 @@
         "channel": {"type": "string"},
         "status": {"enum": ["open", "claimed", "done", "dead", "cancelled"]},
         "state": {"enum": ["ready", "waiting", "stuck", "claimed", "done", "dead", "cancelled"],
-                  "description": "open tasks are ready (claimable now), waiting (deps or not_before) or stuck (a dep is dead/cancelled)"},
+                  "description": "open tasks are ready (claimable now), waiting (deps, not_before or an active park) or stuck (a dep is dead/cancelled)"},
         "runnable": {"type": "boolean", "description": "false = manual card: the runner never starts it"},
         "priority": {"type": "integer"},
         "tier": {"type": "string"},
@@ -95,6 +95,20 @@
         "created_at": {"type": ["number", "null"]},
         "updated_at": {"type": ["number", "null"]},
         "result_head": {"type": ["string", "null"], "description": "first 300 characters of the result"},
+        "park": {"type": ["object", "null"], "description": "parked on a long external job (ab park): the wake condition and note. Active parks make the state waiting; once woken (woken_at set) the card is ready again and the next run's brief carries the note. Null when not parked.",
+                 "properties": {
+                   "pid": {"type": ["integer", "null"], "description": "wake when this process exits"},
+                   "pid_start": {"type": ["string", "null"], "description": "/proc start time recorded at park (pid-reuse guard)"},
+                   "file": {"type": ["string", "null"], "description": "wake when this file exists and stops growing"},
+                   "grace_s": {"type": ["number", "null"], "description": "file stability window in seconds"},
+                   "file_size": {"type": ["integer", "null"]}, "file_mtime": {"type": ["number", "null"]},
+                   "stable_since": {"type": ["number", "null"]},
+                   "note": {"type": ["string", "null"], "description": "what the parking agent waits for and what the next agent should do"},
+                   "run": {"type": ["integer", "null"], "description": "the run that parked the card"},
+                   "at": {"type": ["number", "null"], "description": "when the card was parked"},
+                   "woken_at": {"type": ["number", "null"], "description": "set when the wake condition fired; the card is ready again"},
+                   "woke": {"type": ["string", "null"], "description": "why it woke (pid exited / file stable)"}
+                 }},
         "wait_reason": {"type": ["string", "null"], "description": "why a ready task is waiting before launch, e.g. workdir busy (auto worktree off)"}
       }
     },

@@ -70,6 +70,9 @@ def tline(d):
         extra.append(f"by {d['owner']}")
     if d["state"] == "waiting" and d.get("not_before") and d["not_before"] > now():
         extra.append(f"after {fmt_ts(d['not_before'])}")
+    if d.get("park") and not d["park"].get("woken_at"):
+        p = d["park"]
+        extra.append("parked: " + (f"pid {p['pid']}" if p.get("pid") else f"file {p.get('file')}"))
     if d.get("wait_reason"):
         extra.append(d["wait_reason"])
     if d.get("deps"):
@@ -94,6 +97,12 @@ def show_text(d):
         lines.append("labels " + ", ".join(f"{k}={v}" for k, v in d["labels"].items()))
     if d.get("deps"):
         lines.append("depends on " + ", ".join(d["deps"]))
+    if d.get("park"):
+        p = d["park"]
+        if p.get("woken_at"):
+            lines.append(f"park woken {fmt_ts(p['woken_at'])} ({p.get('woke') or 'condition met'}); note: {p.get('note')}")
+        else:
+            lines.append(f"PARKED since {fmt_ts(p.get('at'))} on {store.park_cond(p)}; note: {p.get('note')}")
     if d.get("children"):
         lines.append("blocks " + ", ".join(d["children"]))
     if d.get("body"):
@@ -254,6 +263,28 @@ def cmd_defer(c, a, out):
     deps = [store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.after_task or [])]
     tid = store.defer(c, a.id, actor_of(a), parse_time(a.until) if a.until else None, deps, a.why or "", a.force)
     out({"id": tid, "status": "open", "deferred": True}, f"{tid} deferred")
+
+
+def cmd_park(c, a, out):
+    tid = a.id or os.environ.get("AB_TASK")
+    if not tid:
+        raise ValueError("give a task ID (or run inside a runner-started agent where AB_TASK is set)")
+    if (a.pid is None) == (not a.file):
+        raise ValueError("give exactly one of --pid PID or --file PATH")
+    pid = pid_start = None
+    if a.pid is not None:
+        pid = int(a.pid)
+        if pid <= 0:
+            raise ValueError(f"bad pid {a.pid}")
+        pid_start = R.pid_start(pid)
+        if pid_start is None:
+            raise ValueError(f"pid {pid} is not running (job already finished? read its outputs and continue)")
+    grace = parse_dur(a.grace or "60s")
+    grace = 60.0 if grace is None else grace
+    tid, spec = store.park(c, tid, actor_of(a), text_arg(a.note, a.note_file), pid=pid, pid_start=pid_start,
+                           file=a.file, grace_s=grace, force=a.force)
+    out({"id": tid, "status": "open", "parked": True, "wake": {k: v for k, v in spec.items() if k in ("pid", "file", "grace_s")}},
+        f"{tid} parked on {store.park_cond(spec)}; exit now - the runner wakes this card and a fresh agent continues with your note")
 
 
 def cmd_cancel(c, a, out):
@@ -1270,6 +1301,15 @@ def build_parser():
     s.add_argument("--until")
     s.add_argument("--after", dest="after_task", action="append", help="task id (repeatable)")
     s.add_argument("--why")
+    s.add_argument("--force", action="store_true")
+
+    s = sub("park", cmd_park, "park a claimed card on a long external job and exit; the runner resumes it with a fresh agent")
+    s.add_argument("id", nargs="?", help="default $AB_TASK")
+    s.add_argument("--pid", type=int, help="wake when this process exits (start it detached: nohup/setsid)")
+    s.add_argument("--file", help="wake when this file exists and stops growing for --grace")
+    s.add_argument("--grace", default="60s", help="file stability window (default 60s)")
+    s.add_argument("--note", help="what you wait for and what the next agent should do ('-' reads stdin)")
+    s.add_argument("--note-file", help="read the note from this file")
     s.add_argument("--force", action="store_true")
 
     s = sub("kill", cmd_kill, "stop one run (the task goes back to the queue, no attempt counted); `cancel` stops the work for good")

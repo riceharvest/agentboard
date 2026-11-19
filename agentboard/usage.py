@@ -158,6 +158,8 @@ def harvest_hermes(conn, cutoff):
     pinned = {r["session_id"]: r["bucket"] for r in conn.execute(
         "SELECT session_id, bucket FROM runs WHERE harness='hermes' AND provider IS NOT NULL AND session_id IS NOT NULL")}
     for prof, p in H.hermes_dbs():
+        if prof.startswith(H.RUN_PROFILE_PREFIX):
+            continue   # board run homes live under <root>/profiles; their usage is recorded per run
         try:
             hc = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
             hc.row_factory = sqlite3.Row

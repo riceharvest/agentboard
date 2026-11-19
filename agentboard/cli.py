@@ -121,6 +121,10 @@ def show_text(d):
                          f"{fmt_dur((r['ended_at'] or now()) - r['started_at'])} -> {r['outcome'] or 'running'} "
                          f"in={r['input']} out={r['output']} cache_r={r['cache_read']}"
                          + (f" ${r['cost_usd']:.3f}" if r.get("cost_usd") else ""))
+            for kept in ("hermes-agent.log", "hermes-session.jsonl"):
+                f = store.HOME / "runs" / f"{r['id']}.{kept}"
+                if f.is_file():
+                    lines.append(f"  kept {f} ({f.stat().st_size} bytes)")
     return "\n".join(lines)
 
 

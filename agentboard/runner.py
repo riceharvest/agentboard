@@ -399,7 +399,7 @@ class Runner:
             c.endpoint = r["endpoint"]
             c.provider = r["provider"]
             if r["harness"] == "hermes":
-                hh = store.HOME / "runs" / f"{r['id']}.hermes"
+                hh = H.hermes_run_home(r["id"])
                 if hh.is_dir():
                     c.hermes_home = str(hh)
             if alive(r["pid"], r["pid_start"]):
@@ -712,7 +712,7 @@ class Runner:
         env.update(xenv)
         hermes_home = None
         if cand.harness == "hermes" and cfg(c, "hermes_isolate"):
-            hermes_home = str(H.prepare_hermes_home(runs_dir / f"{run_id}.hermes"))
+            hermes_home = str(H.prepare_hermes_home(H.hermes_run_home(run_id)))
             env = {k: v for k, v in env.items() if not H._is_stripped_hermes_env_key(k)}
             env["HERMES_HOME"] = hermes_home
         home = str(store.HOME)
@@ -1068,6 +1068,7 @@ class Runner:
         finally:
             if hermes_home:
                 H.export_hermes_session(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-session.jsonl")
+                H.keep_hermes_agent_log(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-agent.log")
                 shutil.rmtree(hermes_home, ignore_errors=True)
 
 

@@ -272,3 +272,28 @@ def test_quoted_429_lines_do_not_trip_the_watchdog(rig):
     time.sleep(14)  # > 2x stall_retry_after
     sh = j("show", t)
     assert sh["status"] == "claimed" and sh["runs"][0]["outcome"] is None and not j("limits"), sh
+
+
+def test_run_home_is_profile_shaped_and_agent_log_is_kept(rig, abx):
+    j = rig
+    assert H.hermes_run_home(7, j.tmp / "root") == j.tmp / "root" / "profiles" / "ab-run-7"
+    t = j("add", "finishes fine", "--body", "work", "--workdir", str(j.tmp / "w"))["id"]
+    j.env["FAKE_MODE"] = "recover"
+    j.start()
+    kept = j.tmp / "ab" / "runs"
+    assert wait(lambda: any(kept.glob("*.hermes-agent.log")), 40), "agent.log was not kept"
+    log = next(kept.glob("*.hermes-agent.log"))
+    assert "API call #2" in log.read_text()
+    run_id = log.name.split(".")[0]
+    assert not (j.tmp / "fakehome" / ".hermes" / "profiles" / f"ab-run-{run_id}").exists()   # home removed after finalize
+    code, out, _ = abx("show", t, env=j.env)
+    assert f"kept {log} ({log.stat().st_size} bytes)" in out
+
+
+def test_keep_agent_log_is_size_capped(tmp_path):
+    home = tmp_path / "h"
+    (home / "logs").mkdir(parents=True)
+    (home / "logs" / "agent.log").write_bytes(b"x" * 100 + b"TAIL")
+    assert H.keep_hermes_agent_log(home, tmp_path / "o.log", cap=10) == 10
+    assert (tmp_path / "o.log").read_bytes().endswith(b"TAIL")
+    assert H.keep_hermes_agent_log(tmp_path / "none", tmp_path / "p.log") is None

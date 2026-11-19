@@ -939,6 +939,31 @@ def _sanitize_hermes_config(text):
     return "".join(out)
 
 
+RUN_PROFILE_PREFIX = "ab-run-"
+
+
+def hermes_run_home(run_id, root=None):
+    """Per-run HERMES_HOME shaped as a named profile, <root>/profiles/ab-run-N. Hermes' protected-instruction gate then
+    exempts the Hermes root as well as the home; a home outside <root>/profiles made it treat the real root's files as
+    project-local .hermes config and block every write to them (AB_FRICTION hermes#191)."""
+    return Path(root or HERMES_HOME) / "profiles" / f"{RUN_PROFILE_PREFIX}{run_id}"
+
+
+def keep_hermes_agent_log(home, dest, cap=2 * 1024 * 1024):
+    """Copy the last *cap* bytes of the run home's logs/agent.log to *dest* before the home is deleted, so a dead run's
+    provider 429/retry lines stay readable. Returns the bytes kept, or None."""
+    src = Path(home) / "logs" / "agent.log"
+    try:
+        with open(src, "rb") as f:
+            size = f.seek(0, 2)
+            f.seek(max(0, size - cap))
+            data = f.read()
+        Path(dest).write_bytes(data)
+        return len(data)
+    except OSError:
+        return None
+
+
 def prepare_hermes_home(dest, source=None):
     """Create an isolated per-run HERMES_HOME with provider auth/config but no bot tokens or gateway locks."""
     src = Path(source) if source else HERMES_HOME

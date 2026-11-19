@@ -182,7 +182,7 @@ accounting from the per-run `state.db`, and removes the temporary directory with
 Disable with `ab config set hermes_isolate false` (in non-isolated mode `ab kill` sends `SIGINT` before `SIGTERM` so
 `hermes chat` can interrupt its session without stopping the shared gateway). The shared gateway's tools don't inherit the run's `AB_*` variables, so in that mode the runner also writes the
 values (`AB_HOME`, `AB_TASK`, `AB_ACTOR`, `AB_RUN`, `AB_BOARD`) into the brief. Before the isolated home is deleted its transcript
-(messages with timestamps and tool calls) is kept as `$AB_HOME/runs/<run>.hermes-session.jsonl`.
+(messages with timestamps and tool calls) is kept as `$AB_HOME/runs/<run>.hermes-session.jsonl`, and the last 2 MB of its `logs/agent.log` as `$AB_HOME/runs/<run>.hermes-agent.log` (both listed by `ab show`). The run home is a named profile, `<hermes root>/profiles/ab-run-<run>`, so Hermes' protected-instruction gate keeps exempting the real Hermes root.
 
 Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Opencode only runs `-free` models
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:

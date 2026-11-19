@@ -322,7 +322,7 @@ def test_isolated_run_propagates_ab_env_strips_tokens_harvests_usage_and_cleans_
         # Verify captured worker env and sanitized HERMES_HOME
         cap = json.loads(capture.read_text())
         assert cap["hermes_home"] != str(src_hh)
-        assert cap["hermes_home"].startswith(str(abx.home / "runs"))
+        assert cap["hermes_home"] == str(src_hh / "profiles" / f"ab-run-{run['id']}")   # named-profile shape (hermes#191)
         assert cap["ab_home"] == str(abx.home)
         assert cap["ab_actor"] == f"hermes#{run['id']}"
         assert cap["ab_board"] == "main"

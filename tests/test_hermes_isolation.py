@@ -111,6 +111,7 @@ if os.environ.get("FAKE_CAPTURE"):
         "config": (hh / "config.yaml").read_text() if (hh / "config.yaml").is_file() else "",
         "auth": (hh / "auth.json").read_text() if (hh / "auth.json").is_file() else "",
         "cwd": os.getcwd(),
+        "brief": argv[argv.index("-q") + 1] if "-q" in argv else "",
     }
     Path(os.environ["FAKE_CAPTURE"]).write_text(json.dumps(cap))
 
@@ -542,6 +543,10 @@ def test_non_isolated_hermes_sends_sigint_and_preserves_shared_gateway(abx, tmp_
         assert capture.exists() and gw_pid_file.exists()
         gw_info = json.loads(gw_pid_file.read_text())
         run_id = j("show", tid)["runs"][0]["id"]
+        # the shared gateway's tools do not see the run's env, so the brief has to spell the AB_* values out
+        brief = json.loads(capture.read_text())["brief"]
+        assert brief.startswith("ENVIRONMENT NOTE")
+        assert f"AB_HOME={abx.home}" in brief and f"AB_TASK={tid}" in brief and f"AB_RUN={run_id}" in brief, brief[:400]
         j("runner", "pause")
         j("kill", str(run_id))
         for _ in range(40):
@@ -566,3 +571,19 @@ def test_non_isolated_hermes_sends_sigint_and_preserves_shared_gateway(abx, tmp_
                 os.killpg(gw_info["pid"], signal.SIGKILL)
             except OSError:
                 pass
+
+
+def test_export_hermes_session_keeps_the_transcript_with_timestamps(tmp_path):
+    home = tmp_path / "hh"
+    home.mkdir()
+    db = sqlite3.connect(str(home / "state.db"))
+    db.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, timestamp REAL)")
+    db.executemany("INSERT INTO messages(session_id, role, content, tool_calls, timestamp) VALUES('s',?,?,?,?)",
+                   [("user", "hi", None, 1.0), ("assistant", None, '[{"name":"terminal"}]', 2.0), ("tool", "ok", None, 3.0)])
+    db.commit()
+    db.close()
+    dest = tmp_path / "out.jsonl"
+    assert H.export_hermes_session(home, dest) == 3
+    rows = [json.loads(l) for l in dest.read_text().splitlines()]
+    assert [r["role"] for r in rows] == ["user", "assistant", "tool"] and rows[1]["timestamp"] == 2.0
+    assert H.export_hermes_session(tmp_path / "missing", tmp_path / "none.jsonl") == 0

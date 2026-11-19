@@ -159,7 +159,9 @@ that ephemeral gateway. On `ab kill`, timeout, lease expiry, cancellation, or no
 ephemeral gateway (`hermes gateway stop --yes` plus process-group teardown on `gateway.pid`), harvests token and cost
 accounting from the per-run `state.db`, and removes the temporary directory without touching any shared user gateway.
 Disable with `ab config set hermes_isolate false` (in non-isolated mode `ab kill` sends `SIGINT` before `SIGTERM` so
-`hermes chat` can interrupt its session without stopping the shared gateway).
+`hermes chat` can interrupt its session without stopping the shared gateway). The shared gateway's tools don't inherit the run's `AB_*` variables, so in that mode the runner also writes the
+values (`AB_HOME`, `AB_TASK`, `AB_ACTOR`, `AB_RUN`, `AB_BOARD`) into the brief. Before the isolated home is deleted its transcript
+(messages with timestamps and tool calls) is kept as `$AB_HOME/runs/<run>.hermes-session.jsonl`.
 
 Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Opencode only runs `-free` models
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:

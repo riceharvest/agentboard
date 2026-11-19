@@ -1,5 +1,6 @@
 """The runner: the only thing that starts agents. Plain subprocesses, no admission layer.
 Every setting is read from the board each tick, so agents steer it with `ab runner ...` / `ab config set ...` / `ab sched ...`."""
+import shlex
 import json
 import re
 import os
@@ -590,6 +591,11 @@ class Runner:
             brief = brief.replace("\n\n", f"\nWORKTREE: {orig_workdir} is in use by another card, so you run in your own git worktree on branch {wtinfo[1]}. "
                                   f"Commit there; when done merge it back (`git -C {wtinfo[2]} merge {wtinfo[1]}`, or rebase/PR) and "
                                   f"say in your result which branch holds the work.\n\n", 1)
+        if cand.harness == "hermes" and not cfg(c, "hermes_isolate"):
+            # A shared Hermes gateway runs the agent's tools with ITS environment, not this run's: spell the AB_* values out.
+            brief = (f"ENVIRONMENT NOTE: your shell tools do NOT inherit the run's AB_* variables here. Set them in every shell "
+                     f"command that calls `ab`: export AB_HOME={shlex.quote(str(store.HOME))} AB_TASK={task['id']} "
+                     f"AB_ACTOR={shlex.quote(owner)} AB_RUN={run_id} AB_BOARD={shlex.quote(cur['board'])}\n\n") + brief
         extra = (cfg(c, "extra_args") or {}).get(cand.harness, [])
         try:
             ep = H.get_endpoint(c, cand.endpoint) if cand.endpoint else None
@@ -792,6 +798,7 @@ class Runner:
             self.log(f"run {ch.run_id} ({ch.task_id}, {ch.harness}) -> {outcome}" + (f": {res.error[:160]}" if not res.ok else ""))
         finally:
             if hermes_home:
+                H.export_hermes_session(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-session.jsonl")
                 shutil.rmtree(hermes_home, ignore_errors=True)
 
 

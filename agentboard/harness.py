@@ -1104,6 +1104,26 @@ def hermes_session(sid, home=None):
     return None
 
 
+def export_hermes_session(home, dest):
+    """Write the transcript of every session in an isolated per-run *home* to *dest* (JSONL, one message per line,
+    with its timestamp) so the run can be audited after the home is deleted. Returns the message count, or None."""
+    n = 0
+    try:
+        with open(dest, "w") as fo:
+            for _, p in hermes_dbs(home):
+                c = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
+                c.row_factory = sqlite3.Row
+                try:
+                    for r in c.execute("SELECT * FROM messages ORDER BY timestamp, id"):
+                        fo.write(json.dumps(dict(r), default=str) + "\n")
+                        n += 1
+                finally:
+                    c.close()
+    except (OSError, sqlite3.Error):
+        return None
+    return n
+
+
 def hermes_default_provider():
     try:
         txt = (HERMES_HOME / "config.yaml").read_text()

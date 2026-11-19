@@ -122,9 +122,26 @@ The most specific channel scope wins, then a board-specific grant over `*`, then
     ab models [harness] --refresh  # what each harness offers now (agy wants the display name)
     ab config set tier_fallback any   # default any (higher tiers first, then lower); none|up|down
 
-A spec is `harness:model@effort`, `harness:@effort` (the harness's default model) or `harness@endpoint:model`.
+A spec is `harness:model@effort`, `harness:@effort` (the harness's default model), `harness@endpoint:model` or
+`hermes/provider:model`.
 The harnesses are claude, codex, agy, kimi, deepseek (dsh), opencode, cline, openhands, pi, cursor, gemini and
 hermes.
+Pin the provider of a multi-provider harness with `harness/provider:model`. Hermes takes any provider it knows
+(`nous`, `openrouter`, `anthropic`, `custom`, or a name from `providers:` in its config.yaml):
+
+    ab tiers add low "hermes/nous:qwen/qwen4-max:free" --pos 0
+    ab add "..." --harness hermes/nous --model qwen/qwen4-max:free     # ab edit ID --harness hermes/openrouter
+
+Everything before the first `:` is the head (`harness`, `/provider`, `@endpoint`) and everything after it is the model, so
+model ids with `/` and `:` are safe. The run is `hermes chat ... --provider nous -m qwen/qwen4-max:free`. Its quota bucket is
+`hermes-nous` (`hermes-openrouter`, ...; `custom` is `local`), the same bucket the usage harvester files Hermes sessions
+under, so limits, caps and cooldowns are per provider. A Hermes auth error ("No access token found for Nous Portal login")
+sets an auth cooldown on that provider bucket (`ab limits`, clear with `ab limits clear bucket:hermes-nous` after
+`hermes model` login). The task goes back to the queue with its attempts unchanged and other providers keep running.
+`hermes:model` without a provider uses Hermes' default provider. A provider pin can't be combined with `@endpoint`.
+opencode and pi already take the provider in the model id (`opencode:openrouter/MODEL`, `pi:PROVIDER/MODEL`) and bucket per
+provider; `opencode/openrouter:...` is rejected.
+
 Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Opencode only runs `-free` models
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:
 `ab edit ID --harness claude --model opus`.
@@ -188,7 +205,8 @@ A bucket is a quota pool. Usage counts everything run on this machine, both boar
 (Claude Code, Hermes, opencode and pi logs are read from disk). Examples:
 - `claude-sub` is Claude Code plus Hermes on the Claude subscription
 - `agy-claude-gpt`, `agy-gemini` and `agy-argon` are agy's pools
-- `opencode-free` is opencode's free models
+- `opencode-free` is opencode's free models, `opencode-PROVIDER` the rest
+- `hermes-nous`, `hermes-openrouter`, ... are Hermes per provider (`hermes/PROVIDER:MODEL` pins one)
 - `local` is the local models
 
 When a harness hits a limit, its bucket cools down until the reset time it reported, and the work moves to the

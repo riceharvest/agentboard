@@ -156,6 +156,21 @@ each harness got a real board task (write a file, then `ab done`) and finished i
 | Cursor (`cursor`) | `cursor-agent -p --output-format json` | logged-out detection tested | not supported |
 | Gemini CLI (`gemini`) | `gemini -o json` | auth-error detection tested | not supported |
 
+### Pin the provider of a multi-provider harness
+
+Hermes runs many providers (Nous Portal, OpenRouter, Anthropic, custom...). A spec can name one:
+`hermes/PROVIDER:MODEL`. Everything before the first `:` is the head, so model ids with `/` and `:` are fine.
+
+    ab tiers add low "hermes/nous:qwen/qwen4-max:free" --pos 0
+    ab add "..." --harness hermes/openrouter --model qwen/qwen4-max:free
+    ab tiers check
+
+The run is `hermes chat ... --provider PROVIDER -m MODEL` and its usage, caps and cooldowns use the bucket
+`hermes-PROVIDER` (`custom` counts as `local`). A Hermes login error such as "No access token found for Nous Portal
+login" puts that provider's bucket into an auth cooldown and requeues the task without using an attempt; other
+Hermes providers keep running. opencode and pi take the provider in the model id (`opencode:openrouter/MODEL`,
+`pi:PROVIDER/MODEL`) and already bucket per provider.
+
 ## Endpoints: run any harness on your own model server
 
     ab endpoints add rtx3060 --base-url http://127.0.0.1:8093/v1 --context 65536   # [--api-key-env VAR]

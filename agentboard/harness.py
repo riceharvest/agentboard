@@ -23,7 +23,8 @@ AUTH_RE = re.compile(
     r"not (?:logged|signed) in|please (?:log ?in|login|sign in|run .{0,30}login)|GOOGLE_CLOUD_PROJECT|"
     r"oauth token (?:has )?expired|invalid_grant|credentials? (?:missing|not found|expired)|api_key_expired|"
     r"MISSING_CREDENTIAL|no API key for provider|authentication required|requires re-?authentication|"
-    r"api_key client option must be set|no model configured|use /login|run [`'\"]?\w*\s*login", re.I)
+    r"api_key client option must be set|no model configured|use /login|run [`'\"]?\w*\s*login|"
+    r"no (?:access )?token found|re-?authenticate", re.I)
 LIMIT_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|RESOURCE_EXHAUSTED|\b429\b|limit reached|hit your (?:usage )?limit|"
     r"too many requests|insufficient_quota|credits? (?:exhausted|depleted|balance)|out of credits|"
@@ -208,6 +209,7 @@ class Adapter:
     bin = None
     harvested = False      # True when the usage harvester already counts this harness's sessions
     default_bucket = None
+    provider_pin = False   # True when a spec may name the provider: 'hermes/nous:MODEL'
 
     def available(self):
         return bool(self.bin and shutil.which(self.bin))
@@ -219,6 +221,8 @@ class Adapter:
         """-> (argv, env overrides). With an endpoint the harness is pointed at it through a per-run overlay;
         the user's own config files are never edited."""
         if ep is None:
+            if cand.provider:
+                return self.command(brief, cand.model, cand.effort, extra, provider=cand.provider), {}
             return self.command(brief, cand.model, cand.effort, extra), {}
         return self.endpoint_command(brief, cand.model, cand.effort, ep, extra)
 
@@ -515,9 +519,12 @@ class Pi(Adapter):
 
 class Hermes(Adapter):
     name, bin, harvested = "hermes", "hermes", True
+    provider_pin = True
 
-    def command(self, brief, model=None, effort=None, extra=()):
+    def command(self, brief, model=None, effort=None, extra=(), provider=None):
         cmd = ["hermes", "chat", "-q", brief, "--oneshot", "-Q", "--pass-session-id", "--yolo"]
+        if provider:
+            cmd += ["--provider", provider]
         if model:
             cmd += ["-m", model]
         return cmd + list(extra)
@@ -544,8 +551,8 @@ class Hermes(Adapter):
             r.error = _tail(err) or r.text or f"exit {rc}"
         return _finish(r, rc, out, err)
 
-    def bucket(self, model):
-        return hermes_bucket(hermes_default_provider() or "")
+    def bucket(self, model, provider=None):
+        return hermes_bucket(provider or hermes_default_provider() or "")
 
 
 class Codex(Adapter):
@@ -889,21 +896,25 @@ class Candidate:
     effort: str = None
     spec: str = ""
     endpoint: str = None
+    provider: str = None
 
     def label(self):
         if self.spec:
             return self.spec
-        h = self.harness + (f"@{self.endpoint}" if self.endpoint else "")
+        h = self.harness + (f"/{self.provider}" if self.provider else "") + (f"@{self.endpoint}" if self.endpoint else "")
         return f"{h}:{self.model or ''}{'@' + self.effort if self.effort else ''}"
 
 
 def parse_spec(spec):
     """'claude:sonnet@high' | 'agy:Claude Sonnet 5.5 (High)' | 'codex:@low' | 'hermes'
-    | 'pi@rtx3060:spark-1.7b' (harness on a registered endpoint)"""
+    | 'pi@rtx3060:spark-1.7b' (harness on a registered endpoint)
+    | 'hermes/nous:qwen/qwen4-max:free' (provider pin: everything before the FIRST ':' is the head, so model ids
+      may contain '/' and ':' freely)"""
     spec = spec.strip()
     head, _, rest = spec.partition(":")
     harness, _, endpoint = head.strip().partition("@")
-    harness, endpoint = harness.strip(), endpoint.strip() or None
+    harness, _, provider = harness.partition("/")
+    harness, endpoint, provider = harness.strip(), endpoint.strip() or None, provider.strip() or None
     model, effort = rest.strip() or None, None
     if model and "@" in model:
         model, effort = model.rsplit("@", 1)
@@ -912,10 +923,19 @@ def parse_spec(spec):
         raise ValueError(f"unknown harness {harness!r} in {spec!r}; known: {', '.join(ADAPTERS)}")
     if endpoint and not model:
         raise ValueError(f"{spec!r}: a harness on an endpoint needs a model, e.g. {harness}@{endpoint}:MODEL")
-    return Candidate(harness, model, effort, spec, endpoint)
+    if provider:
+        if not ADAPTERS[harness].provider_pin:
+            pinned = [n for n, a in ADAPTERS.items() if a.provider_pin]
+            raise ValueError(f"{spec!r}: {harness} has no provider pin (only {', '.join(pinned)}); "
+                             f"opencode and pi take the provider inside the model id: {harness}:PROVIDER/MODEL")
+        if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", provider):
+            raise ValueError(f"{spec!r}: bad provider name {provider!r}")
+        if endpoint:
+            raise ValueError(f"{spec!r}: a provider pin and an endpoint can't be combined (an endpoint is its own provider)")
+    return Candidate(harness, model, effort, spec, endpoint, provider)
 
 
-def bucket_for(conn, harness, model, endpoint=None):
+def bucket_for(conn, harness, model, endpoint=None, provider=None):
     if endpoint:
         ep = (store.cfg(conn, "endpoints") or {}).get(endpoint) or {}
         return ep.get("bucket") or f"ep:{endpoint}"
@@ -924,6 +944,8 @@ def bucket_for(conn, harness, model, endpoint=None):
     for pat, b in bmap.items():
         if fnmatch.fnmatch(key, pat) or fnmatch.fnmatch(harness, pat):
             return b
+    if provider:
+        return ADAPTERS[harness].bucket(model, provider=provider)
     return ADAPTERS[harness].bucket(model)
 
 

@@ -160,6 +160,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE events ADD COLUMN channel TEXT")
     if "endpoint" not in _cols(conn, "runs"):
         conn.execute("ALTER TABLE runs ADD COLUMN endpoint TEXT")
+    if "provider" not in _cols(conn, "runs"):
+        conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
@@ -472,7 +474,7 @@ def task_dict(conn, row, full=False):
         d["notes"] = thread_messages(conn, d["id"])
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]
         d["runs"] = [dict(r) for r in conn.execute(
-            "SELECT id,harness,endpoint,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
+            "SELECT id,harness,endpoint,provider,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
             "cache_write,reasoning,cost_usd,detail FROM runs WHERE task_id=? ORDER BY id", (d["id"],))]
     return d
 

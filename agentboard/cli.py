@@ -106,7 +106,7 @@ def show_text(d):
     if d.get("runs"):
         lines.append("")
         for r in d["runs"]:
-            lines.append(f"run {r['id']} {r['harness']}{'@' + r['endpoint'] if r.get('endpoint') else ''}:{r['model'] or ''} [{r['bucket']}] {fmt_ts(r['started_at'])} "
+            lines.append(f"run {r['id']} {r['harness']}{'/' + r['provider'] if r.get('provider') else ''}{'@' + r['endpoint'] if r.get('endpoint') else ''}:{r['model'] or ''} [{r['bucket']}] {fmt_ts(r['started_at'])} "
                          f"{fmt_dur((r['ended_at'] or now()) - r['started_at'])} -> {r['outcome'] or 'running'} "
                          f"in={r['input']} out={r['output']} cache_r={r['cache_read']}"
                          + (f" ${r['cost_usd']:.3f}" if r.get("cost_usd") else ""))
@@ -141,6 +141,7 @@ def cmd_add(c, a, out):
         workdir = os.getcwd()  # sub-tasks created inside a run inherit the run's workdir
     if workdir:
         workdir = str(Path(workdir).expanduser().resolve())
+    check_harness_pin(a.harness)
     labels = kv_list(a.label)
     if a.reply_to:
         store.resolve_thread(c, a.reply_to)
@@ -251,6 +252,14 @@ def cmd_retry(c, a, out):
     out({"id": tid, "status": "open"}, f"{tid} reopened")
 
 
+def check_harness_pin(harness):
+    """A card's --harness may carry a pin ('pi@endpoint', 'hermes/provider'): reject a bad one now, not when the runner gets to it."""
+    if harness:
+        if harness.split("@")[0].split("/")[0] not in H.ADAPTERS:
+            raise ValueError(f"unknown harness {harness!r}; known: {', '.join(H.ADAPTERS)}")
+        H.parse_spec(f"{harness}:x")
+
+
 def cmd_edit(c, a, out):
     f = {}
     for k in ("title", "channel", "priority", "tier", "harness", "model", "max_attempts", "move_to"):
@@ -275,8 +284,7 @@ def cmd_edit(c, a, out):
     for it in a.label or []:
         k, _, v = it.partition("=")
         labels[k] = v
-    if f.get("harness") and f["harness"].split("@")[0] not in H.ADAPTERS:
-        raise ValueError(f"unknown harness {f['harness']!r}; known: {', '.join(H.ADAPTERS)}")
+    check_harness_pin(f.get("harness"))
 
     def tid_of(x):
         r = store.get_task(c, x)
@@ -1177,7 +1185,7 @@ def build_parser():
     s.add_argument("--after", help="not before: +2h | 14:30 | 2026-11-20 03:00")
     s.add_argument("--workdir", "-w")
     s.add_argument("--tier", "-t", help="intelligence tier (see `ab tiers`)")
-    s.add_argument("--harness", help="pin a harness (skips tier routing)")
+    s.add_argument("--harness", help="pin a harness (skips tier routing); HARNESS@ENDPOINT or hermes/PROVIDER pins where it runs")
     s.add_argument("--model", help="pin a model (with --harness)")
     s.add_argument("--manual", action="store_true", help="runner won't start it; an agent claims it by hand")
     s.add_argument("--max-attempts", type=int, default=3)

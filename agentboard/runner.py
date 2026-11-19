@@ -289,6 +289,7 @@ class Runner:
                       r["pid_start"], None, timeout_s, None, r["out_path"], r["err_path"], r["started_at"])
             c.board = t["board"] if t else store.DEFAULT_BOARD
             c.endpoint = r["endpoint"]
+            c.provider = r["provider"]
             if alive(r["pid"], r["pid_start"]):
                 self.children[r["id"]] = c
                 self.log(f"adopted run {r['id']} ({r['task_id']}, pid {r['pid']})")
@@ -414,7 +415,7 @@ class Runner:
             if hl:
                 reasons.append(f"{cand.label()}: {hl['kind']} until {store.fmt_ts(hl['until'])}")
                 continue
-            b = H.bucket_for(self.conn, cand.harness, cand.model, cand.endpoint)
+            b = H.bucket_for(self.conn, cand.harness, cand.model, cand.endpoint, cand.provider)
             bl = limits.get(f"bucket:{b}")
             if bl:
                 reasons.append(f"{cand.label()}: {b} {bl['kind']} until {store.fmt_ts(bl['until'])}")
@@ -469,14 +470,15 @@ class Runner:
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
-            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint) VALUES(?,?,?,?,?,?,?,?)",
-                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now(), cand.endpoint))
+            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint,provider) VALUES(?,?,?,?,?,?,?,?,?)",
+                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now(), cand.endpoint, cand.provider))
             run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             owner = f"{cand.harness}#{run_id}"
             c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
                       (owner, now() + RUNNER_LEASE, run_id, now(), task["id"]))
             event(c, task["id"], "runner", "started", {"run": run_id, "harness": cand.harness, "model": cand.model,
-                                                       "effort": cand.effort, "bucket": bucket, "candidate": cand.label()})
+                                                       "effort": cand.effort, "bucket": bucket, "candidate": cand.label(),
+                                                       **({"provider": cand.provider} if cand.provider else {})})
         Path(workdir).mkdir(parents=True, exist_ok=True)
         runs_dir = store.HOME / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
@@ -517,6 +519,7 @@ class Runner:
                                       timeout_s, workdir, out_path, err_path, now())
         self.children[run_id].board = cur["board"]
         self.children[run_id].endpoint = cand.endpoint
+        self.children[run_id].provider = cand.provider
         self.log(f"run {run_id}: {task['id']} -> {cand.label()} [{bucket}] pid {proc.pid}")
         return True
 
@@ -597,7 +600,10 @@ class Runner:
             mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
             if res.error_kind in ("auth", "limit", "unavailable"):
                 kind = res.error_kind
-                scope = harness_scope(ch.harness, getattr(ch, "endpoint", None)) if kind == "auth" else f"bucket:{ch.bucket}"
+                if kind == "auth" and not getattr(ch, "provider", None):
+                    scope = harness_scope(ch.harness, getattr(ch, "endpoint", None))
+                else:  # a provider-pinned run lost one provider's login, not the whole harness
+                    scope = f"bucket:{ch.bucket}"
                 until = res.reset_at or (now() + parse_dur(cfg(c, f"cooldown.{kind}") or "30m"))
                 store.set_limit(c, scope, kind, until, res.error[:500])
                 if mine:

@@ -154,6 +154,8 @@ def harvest_opencode(conn, cutoff):
 def harvest_hermes(conn, cutoff):
     """Hermes keeps running totals per session; re-read sessions active in the window and replace."""
     n = 0
+    pinned = {r["session_id"]: r["bucket"] for r in conn.execute(
+        "SELECT session_id, bucket FROM runs WHERE harness='hermes' AND provider IS NOT NULL AND session_id IS NOT NULL")}
     for prof, p in H.hermes_dbs():
         try:
             hc = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
@@ -172,7 +174,7 @@ def harvest_hermes(conn, cutoff):
             if (r.get("started_at") or 0) < cutoff - 86400:
                 continue
             _put(conn, "hermes", f"{prof}:{r['id']}", r.get("started_at") or time.time(), "hermes",
-                 H.hermes_bucket(r.get("billing_provider")), r.get("model"), {
+                 pinned.get(r["id"]) or H.hermes_bucket(r.get("billing_provider")), r.get("model"), {
                      "input": r.get("input_tokens"), "output": r.get("output_tokens"),
                      "cache_read": r.get("cache_read_tokens"), "cache_write": r.get("cache_write_tokens"),
                      "reasoning": r.get("reasoning_tokens"),

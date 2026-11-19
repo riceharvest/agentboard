@@ -456,7 +456,7 @@ def cmd_caps(c, a, out):
     caps = store.cfg(c, "caps") or {}
     if a.action == "set":
         cap = {"window": a.window or "5h"}
-        for k in ("max_output", "max_cost", "max_runs", "max_calls", "max_5h_pct", "max_7d_pct", "pace_7d_lead_h"):
+        for k in ("max_output", "max_cost", "max_runs", "max_calls", "max_5h_pct", "max_7d_pct", "pace_7d_lead_h", "pace_lead_h"):
             v = getattr(a, k)
             if v is not None:
                 cap[k] = v
@@ -1332,6 +1332,8 @@ def build_parser():
     s.add_argument("--max-calls", type=float)
     s.add_argument("--max-5h-pct", type=float, help="pause the bucket at this %% of the provider's 5h window (claude-sub only)")
     s.add_argument("--max-7d-pct", type=float, help="pause the bucket at this %% of the provider's weekly limit (claude-sub only)")
+    s.add_argument("--pace-lead-h", type=float, help="pace every provider-reported quota window (codex: read from ~/.codex/sessions) "
+                   "so it is used up this many hours before its reset")
     s.add_argument("--pace-7d-lead-h", type=float, help="spread the weekly limit evenly per day so it is used up this many "
                    "hours before the weekly reset; unused days carry over (claude-sub only)")
 

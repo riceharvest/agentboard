@@ -241,6 +241,12 @@ be read for 30 minutes the guard fails open. Runs already started are not interr
 the share of the week that has passed, so the whole limit is used up the given number of hours before the weekly reset.
 Days that used less carry over.
 
+    ab caps set openai-codex --pace-lead-h 6
+
+`--pace-lead-h` paces every quota window the provider itself reports. For Codex (ChatGPT login) the windows are read
+from the CLI's own session logs (`~/.codex/sessions/**/*.jsonl`, `rate_limits` events: used %, window length, reset):
+the bucket may only use the share of each window that has passed, so a free 30-day quota is not burned in an afternoon.
+
 ## Snapshot and control verbs for UIs
 
     ab snapshot --json [-B BOARD] [--closed N] [--events-after ID] [--tail RUN_ID:BYTES]

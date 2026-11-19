@@ -1,5 +1,6 @@
 """Usage: harvest every harness's local logs (board runs AND your own sessions share the same quota),
 sum by bucket over windows, and enforce optional soft caps."""
+import glob
 import json
 import os
 import sqlite3
@@ -342,6 +343,58 @@ def weekly_pace_pct(cap, p, now=None):
     return max(0.0, min(100.0, 100.0 * elapsed / span))
 
 
+_CODEX = {"ts": 0.0, "data": None}
+
+
+def codex_rate_limits():
+    """Codex (ChatGPT login) quota as the CLI itself records it: the newest `rate_limits` event in ~/.codex/sessions.
+    -> [{"name", "used", "window_s", "resets_at"}] (primary/secondary windows) or None. Cached 60 s; file read only."""
+    now = time.time()
+    if _CODEX["data"] is not None and now - _CODEX["ts"] < 60:
+        return _CODEX["data"]
+    out = None
+    files = sorted(glob.glob(str(HOMEP / ".codex" / "sessions" / "*" / "*" / "*" / "*.jsonl")), key=os.path.getmtime, reverse=True)
+    for f in files[:5]:
+        try:
+            lines = Path(f).read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            rl = (j.get("payload") or {}).get("rate_limits") or j.get("rate_limits")
+            if not isinstance(rl, dict):
+                continue
+            out = [{"name": k, "used": float(w["used_percent"]), "window_s": float(w["window_minutes"]) * 60,
+                    "resets_at": float(w["resets_at"])}
+                   for k in ("primary", "secondary") if isinstance(w := rl.get(k), dict) and w.get("resets_at")]
+            break
+        if out:
+            break
+    _CODEX.update(ts=now, data=out)
+    return out
+
+
+def pace_reason(cap, windows, now=None):
+    """Generic quota pacing: for every provider window, the share used may not run ahead of the share of the window
+    that has passed (used up `pace_lead_h` hours before its reset; unused time carries over). Enabled by cap key
+    `pace_lead_h`. Reason string or None."""
+    if cap.get("pace_lead_h") is None or not windows:
+        return None
+    now = now if now is not None else time.time()
+    for w in windows:
+        span = max(1.0, w["window_s"] - float(cap["pace_lead_h"]) * 3600)
+        allowed = max(0.0, min(100.0, 100.0 * (now - (w["resets_at"] - w["window_s"])) / span))
+        if w["used"] >= allowed:
+            return (f"pace guard: {w['name']} window ({w['window_s'] / 86400:.1f} d) used {w['used']:.0f}% >= "
+                    f"pace {allowed:.1f}% (resets {datetime.fromtimestamp(w['resets_at']).isoformat(timespec='minutes')})")
+    return None
+
+
 _LIVE = object()   # cap_status(plan=_LIVE): read the provider now (runner); pass a dict/None to stay offline (snapshot)
 
 
@@ -396,6 +449,10 @@ def cap_status(conn, bucket, plan=_LIVE):
     r = plan_status(cap) if plan is _LIVE else plan_reason(cap, plan)
     if r:
         return r
+    if bucket == "openai-codex":
+        r = pace_reason(cap, codex_rate_limits())
+        if r:
+            return r
     w = store.parse_dur(cap.get("window") or "5h")
     t = window_totals(conn, bucket, w)
     for k, field in (("max_output", "output"), ("max_cost", "cost_usd"), ("max_runs", "runs"), ("max_calls", "calls")):

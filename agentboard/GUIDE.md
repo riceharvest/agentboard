@@ -218,6 +218,23 @@ A bucket is a quota pool. Usage counts everything run on this machine, both boar
 When a harness hits a limit, its bucket cools down until the reset time it reported, and the work moves to the
 next candidate. Board-run usage from agy and gemini is counted; their usage outside the board is not.
 
+## Launch pacing (no bursts)
+
+New runs are spread over each quota's window instead of started all at once. Two brakes, both on by default:
+- **Off switch:** `ab config set pacer false` disables the per-bucket budgets (slots, caps and `launch_per_tick` still apply).
+- **Per tick:** at most `launch_per_tick` (default 2) new runs start per runner tick overall, so a wave of ready cards ramps up.
+  `ab config set launch_per_tick 0` turns the limit off.
+- **Per bucket launch budget** per `pace_interval` (default 10m), shown by `ab usage` (column `budget`) and in
+  `ab snapshot` (`usage[].launch_budget`, `budget_why`, `pacer`):
+  - `pace`: the provider reports usage (Claude plan 5h/weekly %, Codex rate-limit windows from its session logs). The budget is
+    (percent left until the pace line) / (time to the pace target), divided by the bucket's recent cost per run from the `usage` table.
+    Below the pace line it rises, above it it falls (never under 1 unless `--pace-lead-h` / `--pace-7d-lead-h` is set, which holds
+    the bucket at 0 while it is over the line).
+  - `aimd`: nothing reported. Starts at 1 launch per interval, +1 per clean interval that launched something, halved
+    (min 1) when a run on that bucket hits a limit/quota error.
+  - `cap`: a `max_runs` (or `max_output`/`max_cost`/`max_calls`) soft cap is the hard ceiling over both.
+A card whose bucket has no budget left waits and the runner tries the next candidate in its tier.
+
 ## Controlling the runner (admin)
 
     ab runner start [--slots 3] | status | pause | resume | drain | stop [--now] | slots 4

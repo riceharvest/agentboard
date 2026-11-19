@@ -249,7 +249,7 @@ def window_totals(conn, bucket, window_s):
     return dict(r) | {"runs": runs}
 
 
-_PLAN = {"ts": 0.0, "data": None, "fetched": 0.0, "persisted": 0.0}
+_PLAN = {"ts": 0.0, "data": None, "fetched": 0.0, "persisted": 0.0, "tried": 0.0, "persisted_data": None}
 PLAN_TTL_S = 120        # re-read the provider's own numbers at most this often
 PLAN_STALE_S = 1800     # a failed read falls back to the last good one for this long, then fails open
 
@@ -261,9 +261,13 @@ def claude_plan_pct():
     now = time.time()
     if _PLAN["data"] is not None and now - _PLAN["ts"] < PLAN_TTL_S:
         return _PLAN["data"]
+    cred_path = Path(os.environ.get("HOME") or "~").expanduser() / ".claude" / ".credentials.json"
+    if not cred_path.exists() or (_PLAN["data"] is None and now - _PLAN.get("tried", 0.0) < 30):
+        return _PLAN["data"]
+    _PLAN["tried"] = now
     try:
         import urllib.request
-        cred = json.loads((HOMEP / ".claude" / ".credentials.json").read_text())
+        cred = json.loads(cred_path.read_text())
         tok = cred["claudeAiOauth"]["accessToken"]
         req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
             "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "agentboard"})
@@ -279,25 +283,40 @@ def claude_plan_pct():
     return _PLAN["data"]
 
 
+_DEFAULT_CLAUDE_PLAN_PCT = claude_plan_pct
+
+
 def uses_plan(cap):
-    return any(cap.get(k) is not None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h"))
+    return any(cap.get(k) is not None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h", "pace_lead_h"))
 
 
-def persist_plan(conn):
+def persist_plan(conn, p=None):
     """Runner side: keep the last good provider reading in `control` so read-only readers (`ab snapshot`) can show it
     without calling the provider. Raw upsert, no config event (this changes every few minutes)."""
-    if _PLAN["data"] is None or _PLAN["fetched"] <= _PLAN["persisted"]:
+    data = p if p is not None else _PLAN["data"]
+    if data is None:
+        return
+    t = _PLAN["fetched"] or time.time()
+    if data == _PLAN.get("persisted_data") and t - _PLAN["persisted"] < PLAN_TTL_S:
         return
     conn.execute("INSERT INTO control(key,value) VALUES('_plan',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                 (json.dumps({"data": _PLAN["data"], "ts": _PLAN["fetched"]}),))
-    _PLAN["persisted"] = _PLAN["fetched"]
+                 (json.dumps({"data": data, "ts": t}),))
+    _PLAN["persisted"] = t
+    _PLAN["persisted_data"] = dict(data)
 
 
 def refresh_plan(conn):
-    """Runner tick: read the provider's numbers (cached 2 min in-process) when a cap needs them, and persist them."""
-    if any(uses_plan(c) for c in (store.cfg(conn, "caps") or {}).values()):
-        claude_plan_pct()
-        persist_plan(conn)
+    """Runner tick: read the provider's numbers (cached 2 min in-process) when a cap or pacer needs them, and persist them."""
+    caps = store.cfg(conn, "caps") or {}
+    if claude_plan_pct is not _DEFAULT_CLAUDE_PLAN_PCT or any(uses_plan(c) for c in caps.values()):
+        p = claude_plan_pct()
+        if p is not None:
+            persist_plan(conn, p)
+    if codex_rate_limits is not _DEFAULT_CODEX_RATE_LIMITS or any(c.get("pace_lead_h") is not None for c in caps.values()):
+        cw = codex_rate_limits()
+        if cw is not None:
+            conn.execute("INSERT INTO control(key,value) VALUES('_codex',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (json.dumps({"data": cw, "ts": time.time()}),))
 
 
 def stored_plan(conn):
@@ -353,7 +372,8 @@ def codex_rate_limits():
     if _CODEX["data"] is not None and now - _CODEX["ts"] < 60:
         return _CODEX["data"]
     out = None
-    files = sorted(glob.glob(str(HOMEP / ".codex" / "sessions" / "*" / "*" / "*" / "*.jsonl")), key=os.path.getmtime, reverse=True)
+    home = Path(os.environ.get("HOME") or "~").expanduser()
+    files = sorted(glob.glob(str(home / ".codex" / "sessions" / "*" / "*" / "*" / "*.jsonl")), key=os.path.getmtime, reverse=True)
     for f in files[:5]:
         try:
             lines = Path(f).read_text(errors="replace").splitlines()
@@ -379,6 +399,17 @@ def codex_rate_limits():
     return out
 
 
+_DEFAULT_CODEX_RATE_LIMITS = codex_rate_limits
+
+
+def stored_codex(conn):
+    r = conn.execute("SELECT value FROM control WHERE key='_codex'").fetchone()
+    if not r:
+        return None, None
+    j = json.loads(r["value"])
+    return j.get("data"), max(0.0, time.time() - (j.get("ts") or 0))
+
+
 def pace_reason(cap, windows, now=None):
     """Generic quota pacing: for every provider window, the share used may not run ahead of the share of the window
     that has passed (used up `pace_lead_h` hours before its reset; unused time carries over). Enabled by cap key
@@ -396,6 +427,312 @@ def pace_reason(cap, windows, now=None):
 
 
 _LIVE = object()   # cap_status(plan=_LIVE): read the provider now (runner); pass a dict/None to stay offline (snapshot)
+
+# ---------------------------------------------------------------- launch pacer (pace / AIMD / cap)
+PRIOR_RUN_COST = 25000.0   # ~25k effective tokens or $1.00 for a standard run
+BASE_RUNS_PER_H = 18.0     # steady on-pace rate for standard runs (3 runs per 10m interval)
+
+
+def pace_interval(conn):
+    """-> (label, seconds). Scales with poll_s when poll_s is shortened for tests and pace_interval wasn't set explicitly."""
+    row = conn.execute("SELECT value FROM control WHERE key='pace_interval'").fetchone()
+    if row is not None:
+        raw = json.loads(row["value"])
+        s = max(0.5, float(store.parse_dur(raw) or 600.0))
+        return (str(raw) if isinstance(raw, str) else store.fmt_dur(s)), s
+    poll = float(store.cfg(conn, "poll_s") or 5)
+    if poll < float(store.DEFAULTS["poll_s"]):
+        s = max(1.0, poll * 3.0)
+        return store.fmt_dur(s), s
+    raw = store.DEFAULTS["pace_interval"]
+    return str(raw), float(store.parse_dur(raw))
+
+
+def recent_run_cost(conn, bucket, now=None):
+    """Recent cost per run on `bucket` from the `usage` table, in effective-token units (PRIOR_RUN_COST = 1 standard run)."""
+    since = (now or time.time()) - 7 * 86400
+    rows = conn.execute(
+        "SELECT SUM(output) o, SUM(input + cache_write) f, SUM(cost_usd) c "
+        "FROM usage WHERE bucket=? AND ts>=? AND (task_id IS NOT NULL OR source='run') "
+        "GROUP BY COALESCE(task_id, key) ORDER BY MAX(ts) DESC LIMIT 20",
+        (bucket, since),
+    ).fetchall()
+    if not rows:
+        tot = conn.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(output),0) o, COALESCE(SUM(input+cache_write),0) f, COALESCE(SUM(cost_usd),0) c "
+            "FROM usage WHERE bucket=? AND ts>=?",
+            (bucket, since),
+        ).fetchone()
+        if not tot or not tot["n"]:
+            return PRIOR_RUN_COST
+        n_runs = conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE bucket=? AND started_at>=? AND ended_at IS NOT NULL",
+            (bucket, since),
+        ).fetchone()[0]
+        div = max(1, n_runs) if n_runs > 0 else tot["n"]
+        cost = max(float(tot["c"] or 0) * PRIOR_RUN_COST, float(tot["o"] or 0) + 0.1 * float(tot["f"] or 0)) / div
+        return cost if cost > 0 else PRIOR_RUN_COST
+    costs = [max(float(r["c"] or 0) * PRIOR_RUN_COST, float(r["o"] or 0) + 0.1 * float(r["f"] or 0)) for r in rows]
+    pos = [c for c in costs if c > 0]
+    return (sum(pos) / len(pos)) if pos else PRIOR_RUN_COST
+
+
+def _parse_reset_ts(val, default):
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    return _iso(str(val)) or default
+
+
+def provider_windows(conn, bucket, cap=None, plan=_LIVE, now=None):
+    """Provider-reported quota windows for `bucket`: [{"name", "used", "window_s", "resets_at", "max_pct", "lead_h", "hard_pace"}].
+    Empty list when the provider reports nothing for this bucket."""
+    now = now if now is not None else time.time()
+    cap = cap if cap is not None else ((store.cfg(conn, "caps") or {}).get(bucket) or {})
+    if bucket == "claude-sub":
+        p = None
+        if plan is _LIVE:
+            if claude_plan_pct is not _DEFAULT_CLAUDE_PLAN_PCT or uses_plan(cap):
+                p = claude_plan_pct()
+            if p is None:
+                raw, age = stored_plan(conn)
+                if raw and (age is None or age <= PLAN_STALE_S):
+                    p = raw
+        else:
+            p = plan
+        if not p:
+            return []
+        out = []
+        if p.get("five_hour") is not None:
+            w_s = 5 * 3600.0
+            out.append({
+                "name": "5h",
+                "used": float(p["five_hour"]),
+                "window_s": w_s,
+                "resets_at": _parse_reset_ts(p.get("five_hour_resets"), now + w_s / 2.0),
+                "max_pct": float(cap["max_5h_pct"]) if cap.get("max_5h_pct") is not None else 100.0,
+                "lead_h": float(cap["pace_lead_h"]) if cap.get("pace_lead_h") is not None else 0.0,
+                "hard_pace": cap.get("pace_lead_h") is not None,
+            })
+        if p.get("seven_day") is not None:
+            w_s = 7 * 86400.0
+            lead_h = (float(cap["pace_7d_lead_h"]) if cap.get("pace_7d_lead_h") is not None
+                      else float(cap["pace_lead_h"]) if cap.get("pace_lead_h") is not None else 0.0)
+            out.append({
+                "name": "7d",
+                "used": float(p["seven_day"]),
+                "window_s": w_s,
+                "resets_at": _parse_reset_ts(p.get("seven_day_resets"), now + w_s / 2.0),
+                "max_pct": float(cap["max_7d_pct"]) if cap.get("max_7d_pct") is not None else 100.0,
+                "lead_h": lead_h,
+                "hard_pace": cap.get("pace_7d_lead_h") is not None or cap.get("pace_lead_h") is not None,
+            })
+        return out
+    if bucket == "openai-codex":
+        wins = None
+        if plan is _LIVE and (codex_rate_limits is not _DEFAULT_CODEX_RATE_LIMITS or cap.get("pace_lead_h") is not None):
+            wins = codex_rate_limits()
+        if wins is None:
+            raw, age = stored_codex(conn)
+            if raw and (age is None or age <= PLAN_STALE_S):
+                wins = raw
+        if not wins:
+            return []
+        lead_h = float(cap["pace_lead_h"]) if cap.get("pace_lead_h") is not None else 0.0
+        return [{
+            "name": w["name"],
+            "used": float(w["used"]),
+            "window_s": float(w["window_s"]),
+            "resets_at": _parse_reset_ts(w.get("resets_at"), now + float(w["window_s"]) / 2.0),
+            "max_pct": 100.0,
+            "lead_h": lead_h,
+            "hard_pace": cap.get("pace_lead_h") is not None,
+        } for w in wins]
+    return []
+
+
+def pace_budget_for_windows(conn, bucket, windows, interval_s, now=None):
+    """Derive allowed launches per interval from (remaining % until the pace line) / (time to the pace target)
+    and the bucket's recent cost per run (from the usage table)."""
+    now = now if now is not None else time.time()
+    run_cost = recent_run_cost(conn, bucket, now)
+    cost_ratio = max(0.05, run_cost / PRIOR_RUN_COST)
+    evals = []
+    for w in windows:
+        used = float(w["used"])
+        window_s = max(1.0, float(w["window_s"]))
+        max_pct = float(w.get("max_pct") or 100.0)
+        lead_s = float(w.get("lead_h") or 0.0) * 3600.0
+        span = max(1.0, window_s - lead_s)
+        resets_at = float(w.get("resets_at") or (now + window_s / 2.0))
+        start = resets_at - window_s
+        end_at = start + span
+        if resets_at <= now:
+            elapsed, rem_time = span, max(60.0, float(interval_s))
+        else:
+            elapsed = max(0.0, min(span, now - start))
+            rem_time = max(60.0, end_at - now)
+        pace_now = max_pct * (elapsed / span)
+        if used >= max_pct or (w.get("hard_pace") and used >= pace_now):
+            det = f"pace {w['name']}: {used:.0f}% >= {pace_now:.0f}% pace" if used < max_pct else f"pace {w['name']}: {used:.0f}% >= {max_pct:.0f}%"
+            return 0, det
+        eff_int_s = max(float(interval_s), 600.0) if window_s >= 3600.0 else float(interval_s)
+        target_dt = min(rem_time, max(eff_int_s, span / 14.0))
+        pace_target = min(max_pct, pace_now + max_pct * (target_dt / span))
+        rem_pct = pace_target - used
+        if rem_pct > 0:
+            pct_per_s = rem_pct / target_dt
+        else:
+            pct_per_s = (max(0.0, max_pct - used) / rem_time) * (pace_now / max(used, 1.0))
+        allowed_pct = pct_per_s * eff_int_s
+        window_std_runs = max(1.0, (window_s / 3600.0) * BASE_RUNS_PER_H)
+        pct_per_run = (100.0 / window_std_runs) * cost_ratio
+        raw_runs = allowed_pct / max(1e-6, pct_per_run)
+        weight = 0.7 if window_s >= 7 * 86400 else 0.3
+        evals.append({"raw": raw_runs, "above": used > pace_now + 1e-6, "weight": weight,
+                      "det": f"pace {w['name']}: {used:.0f}% vs {pace_now:.0f}% pace"})
+    if not evals:
+        return 1, "pace"
+    if any(e["above"] for e in evals):
+        chosen = min(evals, key=lambda e: e["raw"])
+        return max(1, int(round(chosen["raw"]))), chosen["det"]
+    tot_w = sum(e["weight"] for e in evals)
+    combined = sum(e["raw"] * e["weight"] for e in evals) / (tot_w or 1.0)
+    chosen = max(evals, key=lambda e: e["weight"])
+    return max(1, int(round(combined))), chosen["det"]
+
+
+def _load_pacer(conn):
+    r = conn.execute("SELECT value FROM control WHERE key='_pacer'").fetchone()
+    return json.loads(r["value"]) if r else {}
+
+
+def _save_pacer(conn, state):
+    conn.execute("INSERT INTO control(key,value) VALUES('_pacer',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (json.dumps(state),))
+
+
+def pacer_tick(conn, now=None):
+    """Runner tick: advance completed AIMD intervals (+1 budget per clean interval with activity)."""
+    now = now if now is not None else time.time()
+    _, interval_s = pace_interval(conn)
+    state = _load_pacer(conn)
+    if not state:
+        return
+    lim = store.active_limits(conn)
+    caps = store.cfg(conn, "caps") or {}
+    changed = False
+    for bucket, st in list(state.items()):
+        ws = float(st.get("window_start") or 0.0)
+        if ws <= 0 or now - ws < interval_s:
+            continue
+        runs_in_win = conn.execute("SELECT COUNT(*) FROM runs WHERE bucket=? AND started_at>=?", (bucket, ws)).fetchone()[0]
+        had_limit = float(st.get("halved_at") or 0.0) >= ws or (lim.get(f"bucket:{bucket}") or {}).get("kind") == "limit"
+        if runs_in_win > 0 and not had_limit:
+            b = max(1, int(st.get("budget") or 1)) + 1
+            max_r = (caps.get(bucket) or {}).get("max_runs")
+            if max_r is not None:
+                b = min(b, max(1, int(float(max_r))))
+            st["budget"] = b
+        st["window_start"] = now
+        changed = True
+    if changed:
+        with store.tx(conn):
+            _save_pacer(conn, state)
+
+
+def pacer_on_spawn(conn, bucket, now=None):
+    """Called inside Runner.spawn's transaction when a run starts on `bucket`."""
+    now = now if now is not None else time.time()
+    state = _load_pacer(conn)
+    st = state.setdefault(bucket, {"budget": 1, "window_start": now})
+    if not st.get("window_start"):
+        st["window_start"] = now
+    _save_pacer(conn, state)
+
+
+def pacer_on_limit(conn, bucket, now=None):
+    """Called inside Runner.finalize's transaction when a run on `bucket` hits a limit/quota error: halve its budget."""
+    now = now if now is not None else time.time()
+    state = _load_pacer(conn)
+    st = state.setdefault(bucket, {"budget": 1, "window_start": now})
+    old = max(1, int(st.get("budget") or 1))
+    st["budget"] = max(1, old // 2)
+    st["window_start"] = now
+    st["halved_at"] = now
+    _save_pacer(conn, state)
+    return st["budget"]
+
+
+def launch_budget(conn, bucket, plan=_LIVE, now=None, pacer_state=None):
+    """Current launch budget for `bucket` over `pace_interval` and why ('pace' | 'aimd' | 'cap'). Never writes to the db."""
+    now = now if now is not None else time.time()
+    interval_str, interval_s = pace_interval(conn)
+    cap = (store.cfg(conn, "caps") or {}).get(bucket) or {}
+    pstate = pacer_state if pacer_state is not None else _load_pacer(conn)
+    st = pstate.get(bucket) or {}
+    windows = provider_windows(conn, bucket, cap, plan=plan, now=now)
+    if windows:
+        budget, detail = pace_budget_for_windows(conn, bucket, windows, interval_s, now=now)
+        why = "pace"
+    else:
+        b = max(1, int(st.get("budget") or 1))
+        ws = float(st.get("window_start") or 0.0)
+        if ws > 0 and now - ws >= interval_s:
+            runs_prev = conn.execute("SELECT COUNT(*) FROM runs WHERE bucket=? AND started_at>=? AND started_at<?",
+                                     (bucket, ws, ws + interval_s)).fetchone()[0]
+            had_limit = float(st.get("halved_at") or 0.0) >= ws
+            if runs_prev > 0 and not had_limit:
+                b += 1
+        budget = b
+        why = "aimd"
+        detail = f"AIMD {budget}/{interval_str}"
+    if cap.get("max_runs") is not None:
+        max_r = max(0, int(float(cap["max_runs"])))
+        cap_win_s = store.parse_dur(cap.get("window") or "5h") or 18000.0
+        runs_cap = conn.execute("SELECT COUNT(*) FROM runs WHERE bucket=? AND started_at>=?", (bucket, now - cap_win_s)).fetchone()[0]
+        if budget >= max_r or runs_cap >= max_r:
+            budget = min(budget, max_r)
+            why = "cap"
+            detail = f"cap max_runs={max_r}/{cap.get('window', '5h')} ({runs_cap}/{max_r})"
+    else:
+        for k, field in (("max_output", "output"), ("max_cost", "cost_usd"), ("max_calls", "calls")):
+            if cap.get(k) is not None:
+                cap_win_s = store.parse_dur(cap.get("window") or "5h") or 18000.0
+                t = window_totals(conn, bucket, cap_win_s)
+                if t[field] >= float(cap[k]):
+                    budget = 0
+                    why = "cap"
+                    detail = f"cap {k}={cap[k]} reached"
+                    break
+    ws = float(st.get("window_start") or 0.0)
+    if ws <= 0:
+        since_ts = now - interval_s
+    elif now - ws < interval_s:
+        since_ts = ws
+    else:
+        since_ts = ws + int((now - ws) // interval_s) * interval_s
+    used_in_interval = conn.execute("SELECT COUNT(*) FROM runs WHERE bucket=? AND started_at>=?", (bucket, since_ts)).fetchone()[0]
+    return {
+        "budget": budget,
+        "why": why,
+        "interval": interval_str,
+        "interval_s": interval_s,
+        "used_in_interval": used_in_interval,
+        "remaining": max(0, budget - used_in_interval),
+        "detail": detail,
+    }
+
+
+def pacer_status(conn, bucket, plan=_LIVE, now=None):
+    """None if `bucket` has remaining launch budget in the current interval, else a reason string."""
+    if store.cfg(conn, "pacer") is False:
+        return None
+    info = launch_budget(conn, bucket, plan=plan, now=now)
+    if info["used_in_interval"] >= info["budget"]:
+        return f"pacer: {info['used_in_interval']}/{info['budget']} runs in {info['interval']} ({info['why']})"
+    return None
 
 
 def all_window_totals(conn, now=None):
@@ -449,8 +786,9 @@ def cap_status(conn, bucket, plan=_LIVE):
     r = plan_status(cap) if plan is _LIVE else plan_reason(cap, plan)
     if r:
         return r
-    if bucket == "openai-codex":
-        r = pace_reason(cap, codex_rate_limits())
+    if bucket == "openai-codex" and cap.get("pace_lead_h") is not None:
+        cw = codex_rate_limits() if plan is _LIVE else stored_codex(conn)[0]
+        r = pace_reason(cap, cw)
         if r:
             return r
     w = store.parse_dur(cap.get("window") or "5h")
@@ -462,11 +800,16 @@ def cap_status(conn, bucket, plan=_LIVE):
 
 
 def buckets_report(conn):
-    """Per bucket: usage in 5h / 24h / 7d, active limit, cap state."""
+    """Per bucket: usage in 5h / 24h / 7d, active limit, cap state, and launch budget."""
     lim = store.active_limits(conn)
     caps = store.cfg(conn, "caps") or {}
-    names = {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM usage WHERE ts >= ?", (time.time() - 7 * 86400,))}
-    names |= set(caps) | {s.split(":", 1)[1] for s in lim if s.startswith("bucket:")}
+    pstate = _load_pacer(conn)
+    since = time.time() - 7 * 86400
+    names = {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM usage WHERE ts >= ?", (since,))}
+    names |= {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM runs WHERE started_at >= ?", (since,))}
+    names |= set(caps) | set(pstate) | {s.split(":", 1)[1] for s in lim if s.startswith("bucket:")}
+    if claude_plan_pct is not _DEFAULT_CLAUDE_PLAN_PCT or stored_plan(conn)[0]:
+        names.add("claude-sub")
     out = []
     for b in sorted(n for n in names if n):
         row = {"bucket": b}
@@ -476,5 +819,9 @@ def buckets_report(conn):
         row["limit"] = {"kind": l["kind"], "until": l["until"], "reason": l["reason"]} if l else None
         row["cap"] = caps.get(b)
         row["cap_hit"] = cap_status(conn, b)
+        pinfo = launch_budget(conn, b, pacer_state=pstate)
+        row["launch_budget"] = pinfo["budget"]
+        row["budget_why"] = pinfo["why"]
+        row["pacer"] = pinfo
         out.append(row)
     return out

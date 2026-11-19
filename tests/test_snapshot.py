@@ -193,6 +193,7 @@ def test_kill_one_run_with_a_live_runner(abx, tmp_path):
     env = {"PATH": f"{fake}:{os.environ['PATH']}", "HOME": str(home)}  # HOME: no real session logs get harvested
     j(abx, "config", "set", "min_free_gib", "0")
     j(abx, "config", "set", "poll_s", "1")
+    j(abx, "config", "set", "pacer", "false")
     j(abx, "config", "set", "harvest_every_s", "99999")
     j(abx, "tiers", "set", "low", "claude:haiku")
     j(abx, "tiers", "set", "medium", "claude:haiku")

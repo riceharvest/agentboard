@@ -125,6 +125,7 @@ def test_auth_cooldown_on_provider_bucket_and_usage_per_provider(abx, tmp_path):
         return json.loads(out) if out.strip() else None
     j("config", "set", "min_free_gib", "0")
     j("config", "set", "poll_s", "1")
+    j("config", "set", "pacer", "false")
     j("config", "set", "harvest_every_s", "1")
     bad = j("add", "nous card", "--harness", "hermes/nous", "--model", MODEL, "--workdir", str(tmp_path / "w1"))["id"]
     good = j("add", "openrouter card", "--harness", "hermes/openrouter", "--model", MODEL, "--workdir", str(tmp_path / "w2"))["id"]

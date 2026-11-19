@@ -367,6 +367,7 @@ class Runner:
             usage.harvest(c)
         try:
             usage.refresh_plan(c)
+            usage.pacer_tick(c)
         except Exception as e:
             self.log(f"plan refresh error: {e!r}")
         try:
@@ -429,6 +430,10 @@ class Runner:
             if cap:
                 reasons.append(f"{cand.label()}: {b} {cap}")
                 continue
+            pace = usage.pacer_status(self.conn, b)
+            if pace:
+                reasons.append(f"{cand.label()}: {b} {pace}")
+                continue
             return cand, b, None
         return None, None, "; ".join(reasons) or "tier has no candidates"
 
@@ -483,9 +488,11 @@ class Runner:
         busy_dirs = self.busy_dirs()
         limits = store.active_limits(c)
         caps = {r["name"]: r["max_slots"] for r in c.execute("SELECT name, max_slots FROM boards")}
+        max_per_tick = int(cfg(c, "launch_per_tick") or 0)
+        launched = 0
         note = None
         for t in store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True):
-            if len(self.children) >= slots:
+            if len(self.children) >= slots or (max_per_tick > 0 and launched >= max_per_tick):
                 break
             cap = caps.get(t["board"])
             if cap is not None and sum(1 for ch in self.children.values() if ch.board == t["board"]) >= cap:
@@ -514,8 +521,10 @@ class Runner:
                 note = f"{t['id']} waiting: {why}"
                 continue
             self.waiting.pop(t["id"], None)
-            if self.spawn(t, cand, bucket, workdir, worktree=bool(wt), lockfree=free) and not wt and not free:
-                busy_dirs.add(norm_dir(workdir))
+            if self.spawn(t, cand, bucket, workdir, worktree=bool(wt), lockfree=free):
+                launched += 1
+                if not wt and not free:
+                    busy_dirs.add(norm_dir(workdir))
         return note
 
     def spawn(self, task, cand, bucket, workdir, worktree=False, lockfree=False):
@@ -530,8 +539,9 @@ class Runner:
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
+            t_start = now()
             c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint,provider) VALUES(?,?,?,?,?,?,?,?,?)",
-                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now(), cand.endpoint, cand.provider))
+                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, t_start, cand.endpoint, cand.provider))
             run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             owner = f"{cand.harness}#{run_id}"
             # label role=NAME runs the agent as NAME#<run> (so a grant on 'NAME#*' can give it more rights, e.g. an
@@ -540,7 +550,8 @@ class Runner:
             if role and re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", role) and store.can(c, cur["created_by"], "admin", store.DEFAULT_BOARD):
                 owner = f"{role}#{run_id}"
             c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
-                      (owner, now() + RUNNER_LEASE, run_id, now(), task["id"]))
+                      (owner, t_start + RUNNER_LEASE, run_id, t_start, task["id"]))
+            usage.pacer_on_spawn(c, bucket, now=t_start)
             event(c, task["id"], "runner", "started", {"run": run_id, "harness": cand.harness, "model": cand.model,
                                                        "effort": cand.effort, "bucket": bucket, "candidate": cand.label(),
                                                        **({"provider": cand.provider} if cand.provider else {})})
@@ -691,6 +702,8 @@ class Runner:
                     scope = f"bucket:{ch.bucket}"
                 until = res.reset_at or (now() + parse_dur(cfg(c, f"cooldown.{kind}") or "30m"))
                 store.set_limit(c, scope, kind, until, res.error[:500])
+                if kind == "limit" and ch.bucket:
+                    usage.pacer_on_limit(c, ch.bucket)
                 if mine:
                     c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                     event(c, ch.task_id, "runner", "rerouted", {"run": ch.run_id, "kind": kind, "scope": scope, "until": until})

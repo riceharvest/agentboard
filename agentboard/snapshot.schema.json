@@ -142,6 +142,8 @@
         "free_gib": {"type": "number"},
         "min_free_gib": {"type": "number"},
         "ready": {"type": "integer", "minimum": 0, "description": "ready, runnable tasks on boards that are not paused"},
+        "launch_per_tick": {"type": "integer", "minimum": 0, "description": "max new runs started per runner tick overall"},
+        "pace_interval": {"type": "string", "description": "interval for per-bucket launch budgets"},
         "windowed": {"type": "boolean", "description": "slots come from an open schedule window"},
         "children": {"type": "array", "items": {"$ref": "#/definitions/child"}}
       }
@@ -198,7 +200,22 @@
                                                "properties": {"kind": {"type": ["string", "null"]}, "until": {"type": "number"},
                                                               "reason": {"type": ["string", "null"]}}}]},
         "cap": {"type": ["object", "null"]},
-        "cap_hit": {"type": ["string", "null"], "description": "why the bucket is held back by its soft cap or plan guard, if it is"}
+        "cap_hit": {"type": ["string", "null"], "description": "why the bucket is held back by its soft cap or plan guard, if it is"},
+        "launch_budget": {"type": "integer", "minimum": 0, "description": "allowed new runs per pacer interval"},
+        "budget_why": {"enum": ["pace", "aimd", "cap"], "description": "how launch_budget was derived: provider pace, AIMD or cap"},
+        "pacer": {
+          "type": "object",
+          "required": ["budget", "why", "interval", "interval_s", "used_in_interval", "remaining", "detail"],
+          "properties": {
+            "budget": {"type": "integer", "minimum": 0},
+            "why": {"enum": ["pace", "aimd", "cap"]},
+            "interval": {"type": "string"},
+            "interval_s": {"type": "number", "minimum": 0},
+            "used_in_interval": {"type": "integer", "minimum": 0},
+            "remaining": {"type": "integer", "minimum": 0},
+            "detail": {"type": "string"}
+          }
+        }
       }
     },
     "watcher": {

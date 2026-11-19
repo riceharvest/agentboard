@@ -27,7 +27,7 @@ def rig(abx, tmp_path):
         code, out, err = abx("--json", *args, env=env)
         assert code == rc, (args, code, out, err)
         return json.loads(out) if out.strip() else None
-    for k, v in (("min_free_gib", "0"), ("poll_s", "1"), ("harvest_every_s", "99999")):
+    for k, v in (("pacer", "false"), ("min_free_gib", "0"), ("poll_s", "1"), ("harvest_every_s", "99999")):
         j("config", "set", k, v)
     j("tiers", "set", "medium", "claude:haiku")
     j("runner", "pause")

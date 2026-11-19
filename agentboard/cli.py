@@ -410,15 +410,17 @@ def cmd_usage(c, a, out):
         rows = usage.buckets_report(c)
 
         def txt(xs):
-            lines = ["bucket            5h out / calls      24h out / calls     7d out / calls      state"]
+            lines = ["bucket            5h out / calls      24h out / calls     7d out / calls      budget          state"]
             for r in xs:
                 st = "ok"
                 if r["limit"]:
                     st = f"{r['limit']['kind']} until {fmt_ts(r['limit']['until'])}"
                 elif r["cap_hit"]:
                     st = "capped: " + r["cap_hit"]
+                p = r.get("pacer") or {}
+                bcell = f"{r.get('launch_budget', '-')}/{p.get('interval', '-')} ({r.get('budget_why', '-')})"
                 cells = "".join(f"{_num(r[w]['output']):>8} / {r[w]['calls']:<8}  " for w in ("5h", "24h", "7d"))
-                lines.append(f"{r['bucket']:<16} {cells}{st}" + (f"  cap={json.dumps(r['cap'])}" if r["cap"] else ""))
+                lines.append(f"{r['bucket']:<16} {cells}{bcell:<16}{st}" + (f"  cap={json.dumps(r['cap'])}" if r["cap"] else ""))
             return "\n".join(lines)
         out(rows, txt)
         return

@@ -196,6 +196,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
               "paused": bool(ctl["paused"]), "draining": bool(ctl["draining"]), "stop": ctl["stop"] or "",
               "heartbeat": hb, "heartbeat_age_s": (t - hb) if hb else None, "note": st.get("note"),
               "free_gib": round(R.free_gib(), 2), "min_free_gib": float(ctl["min_free_gib"] or 0), "ready": ready_runnable,
+              "launch_per_tick": int(ctl.get("launch_per_tick") or 0), "pace_interval": usage.pace_interval(conn)[0],
               "windowed": override is not None, "children": children}
 
     # ---- limits, caps, plan, usage
@@ -220,15 +221,20 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
         if reason:
             plan["guards"].append({"bucket": b, "reason": reason})
     win = usage.all_window_totals(conn, t)
+    pstate = ctl.get("_pacer") or {}
     zero = {"calls": 0, "output": 0, "fresh_in": 0, "cost_usd": 0, "runs": 0}
-    names = set(win) | set(caps) | {s.split(":", 1)[1] for s in lim if s.startswith("bucket:")}
+    names = set(win) | set(caps) | set(pstate) | {s.split(":", 1)[1] for s in lim if s.startswith("bucket:")}
+    if live_plan:
+        names.add("claude-sub")
     buckets = []
     for b in sorted(names):
         w = win.get(b) or {k: dict(zero) for k in ("5h", "24h", "7d")}
         l = lim.get(f"bucket:{b}")
+        pinfo = usage.launch_budget(conn, b, plan=live_plan, now=t, pacer_state=pstate)
         buckets.append({"bucket": b, "5h": w["5h"], "24h": w["24h"], "7d": w["7d"],
                         "limit": {"kind": l["kind"], "until": l["until"], "reason": l["reason"]} if l else None,
-                        "cap": caps.get(b), "cap_hit": usage.cap_status(conn, b, live_plan)})
+                        "cap": caps.get(b), "cap_hit": usage.cap_status(conn, b, live_plan),
+                        "launch_budget": pinfo["budget"], "budget_why": pinfo["why"], "pacer": pinfo})
 
     # ---- usage history for sparklines (optional keys: schema v1 clients may ignore them)
     usage_hourly, usage_split = usage.history(conn, t)
@@ -294,7 +300,9 @@ def render_text(s):
         lines.append(f"plan 5h={p['five_hour']:.0f}% 7d={p['seven_day']:.0f}% pace={s['plan']['weekly_pace_pct']} (read {store.fmt_dur(p['age_s'])} ago)"
                      + "".join(f"  GUARD {g['bucket']}: {g['reason']}" for g in s["plan"]["guards"]))
     for u in s["usage"]:
+        p = u.get("pacer") or {}
         lines.append(f"bucket {u['bucket']:<16} 5h={u['5h']['output']} 24h={u['24h']['output']} 7d={u['7d']['output']} output tokens"
+                     + f"  budget={u.get('launch_budget', '-')}/{p.get('interval', '-')} ({u.get('budget_why', '-')})"
                      + (f"  LIMITED until {_ts(u['limit']['until'])}" if u["limit"] else "")
                      + (f"  CAP {u['cap_hit']}" if u["cap_hit"] else ""))
     lines.append(f"{s['tasks_open']} open/claimed + {s['tasks_closed_shown']} recent closed tasks, events cursor {s['events_cursor']}, "

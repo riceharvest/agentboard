@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS models(harness TEXT, model TEXT, label TEXT, seen_at 
 # Every runtime setting lives in `control`, so any agent with admin rights can change it with `ab config set`.
 DEFAULTS = {
     "slots": 2,                 # parallel agents when no schedule window says otherwise
+    "launch_per_tick": 2,       # smooth starts: at most K new runs started per runner tick overall
+    "pacer": True,              # per-bucket launch budgets (pace / AIMD / cap); false = only slots, caps and launch_per_tick
+    "pace_interval": "10m",     # interval for per-bucket launch budgets (pace / AIMD)
     "paused": False,
     "draining": False,
     "stop": "",                 # "", "graceful", "now"

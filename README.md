@@ -247,6 +247,19 @@ Days that used less carry over.
 from the CLI's own session logs (`~/.codex/sessions/**/*.jsonl`, `rate_limits` events: used %, window length, reset):
 the bucket may only use the share of each window that has passed, so a free 30-day quota is not burned in an afternoon.
 
+## Launch pacing (spread runs over the quota window, no bursts)
+
+The runner never starts a wave of cards at once. `launch_per_tick` (default 2) caps new runs per tick overall, and every
+quota bucket has a launch budget per `pace_interval` (default 10m), shown in `ab usage` and `ab snapshot`
+(`launch_budget`, `budget_why`, `pacer`):
+
+- `pace`: the provider reports usage (Claude plan %, Codex rate-limit windows): budget = (percent left until the pace line) /
+  (time to the pace target) / recent cost per run (from the usage table).
+- `aimd`: nothing reported: 1 launch per interval, +1 per clean interval, halved on a limit/quota error on that bucket.
+- `cap`: `ab caps set B --window 1h --max-runs N` stays a hard ceiling.
+
+Other buckets keep launching while one is held back. See `ab guide` ("Launch pacing").
+
 ## Snapshot and control verbs for UIs
 
     ab snapshot --json [-B BOARD] [--closed N] [--events-after ID] [--tail RUN_ID:BYTES]

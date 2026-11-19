@@ -146,3 +146,9 @@ Stops the runner from starting work on the Claude subscription once the provider
 utilisation (what `/usage` shows, read via the local Claude Code login; token never printed) reaches the given
 percent. Other candidates in the tier are used instead. Reads are cached for 2 minutes; if the provider can't
 be read for 30 minutes the guard fails open. Runs already started are not interrupted.
+
+    ab caps set claude-sub --max-5h-pct 80 --pace-7d-lead-h 1
+
+`--pace-7d-lead-h` spreads the weekly limit evenly over the week instead of a flat cap: at any moment the bucket may use
+the share of the week that has passed, so the whole limit is used up the given number of hours before the weekly reset.
+Days that used less carry over.

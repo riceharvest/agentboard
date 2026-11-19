@@ -276,7 +276,7 @@ def claude_plan_pct():
 
 def plan_status(cap):
     """Reason string if the provider-reported plan usage is at/over the cap's max_5h_pct / max_7d_pct."""
-    if cap.get("max_5h_pct") is None and cap.get("max_7d_pct") is None:
+    if all(cap.get(k) is None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h")):
         return None
     p = claude_plan_pct()
     if not p:
@@ -284,7 +284,24 @@ def plan_status(cap):
     for k, field, label in (("max_5h_pct", "five_hour", "5h"), ("max_7d_pct", "seven_day", "weekly")):
         if cap.get(k) is not None and p[field] >= float(cap[k]):
             return f"plan guard: {label} usage {p[field]:.0f}% >= {float(cap[k]):.0f}% (resets {p[field + '_resets']})"
+    allowed = weekly_pace_pct(cap, p)
+    if allowed is not None and p["seven_day"] >= allowed:
+        return f"plan guard: weekly usage {p['seven_day']:.0f}% >= today's pace {allowed:.0f}% (resets {p['seven_day_resets']})"
     return None
+
+
+def weekly_pace_pct(cap, p, now=None):
+    """Weekly % allowed by now when the week is spread evenly so it is used up `pace_7d_lead_h` hours before the
+    reset (a daily allowance; unused days carry over). None when not configured or the reset time is unknown."""
+    if cap.get("pace_7d_lead_h") is None or not p.get("seven_day_resets"):
+        return None
+    try:
+        reset = datetime.fromisoformat(p["seven_day_resets"].replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    span = 7 * 86400 - float(cap["pace_7d_lead_h"]) * 3600
+    elapsed = (now if now is not None else time.time()) - (reset - 7 * 86400)
+    return max(0.0, min(100.0, 100.0 * elapsed / span))
 
 
 def cap_status(conn, bucket):

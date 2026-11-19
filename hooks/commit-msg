@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# commit-msg hook: strip AI attribution from commit messages before the commit is created.
+#
+# Removes "Co-Authored-By:" trailers (and "Generated with/by ..." lines) that name an AI
+# model or tool. Human co-authors are kept. Generic and configurable:
+#   git config hygiene.aiPattern '<extended regex>'   # or env GIT_HYGIENE_AI_PATTERN
+# The pattern is matched case-insensitively against the trailer value; it REPLACES the
+# built-in default list (claude, anthropic, openai, chatgpt, codex, gemini, copilot, ...).
+#
+# Install: copy/symlink into .git/hooks/commit-msg (chmod +x), or set
+#   git config core.hooksPath hooks   (note: hooksPath replaces ALL hooks in .git/hooks).
+set -euo pipefail
+f="$1"
+pattern="${GIT_HYGIENE_AI_PATTERN:-$(git config --get hygiene.aiPattern || true)}"
+python3 - "$f" "$pattern" <<'EOF'
+import re
+import sys
+
+path = sys.argv[1]
+override = sys.argv[2] if len(sys.argv) > 2 else ""
+DEFAULT = (r"claude|anthropic|openai|chatgpt|gpt-[0-9]|codex|gemini|copilot|cursor|"
+           r"aider|devin|qwen|deepseek|llama|mistral|\U0001F916")
+pat = override or DEFAULT
+try:
+    ai = re.compile(pat, re.I)
+except re.error as e:
+    sys.exit(f"commit-msg: invalid hygiene.aiPattern regex {pat!r}: {e}")
+
+trailer = re.compile(r"^\s*co-authored-by:\s*(.+)$", re.I)
+generated = re.compile(r"^\s*(?:\U0001F916\s*)?generated (?:with|by)\b", re.I)
+
+with open(path, encoding="utf-8", errors="replace") as fh:
+    lines = fh.read().split("\n")
+out = []
+for line in lines:
+    m = trailer.match(line)
+    if m and ai.search(m.group(1)):
+        continue
+    if generated.match(line) and ai.search(line):
+        continue
+    out.append(line)
+# Collapse blank lines left behind at the end, keep a single trailing newline.
+while len(out) > 1 and out[-1].strip() == "" and out[-2].strip() == "":
+    out.pop()
+while out and out[-1].strip() == "":
+    out.pop()
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out) + "\n")
+EOF

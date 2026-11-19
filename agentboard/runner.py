@@ -64,6 +64,11 @@ Do the work, verify it for real, then call exactly ONE of done / fail / defer / 
 """
 
 
+def harness_scope(harness, endpoint=None):
+    """Limits on a harness's own account don't block it on an endpoint, and vice versa."""
+    return f"harness:{harness}@{endpoint}" if endpoint else f"harness:{harness}"
+
+
 def free_gib():
     try:
         for line in open("/proc/meminfo"):
@@ -280,6 +285,7 @@ class Runner:
             c = Child(r["id"], r["task_id"], f"{r['harness']}#{r['id']}", r["harness"], r["model"], r["bucket"], r["pid"],
                       r["pid_start"], None, timeout_s, None, r["out_path"], r["err_path"], r["started_at"])
             c.board = t["board"] if t else store.DEFAULT_BOARD
+            c.endpoint = r["endpoint"]
             if alive(r["pid"], r["pid_start"]):
                 self.children[r["id"]] = c
                 self.log(f"adopted run {r['id']} ({r['task_id']}, pid {r['pid']})")
@@ -360,15 +366,22 @@ class Runner:
             if a is None or not a.available():
                 reasons.append(f"{cand.label()}: not installed")
                 continue
-            if cand.harness == "opencode" and cfg(self.conn, "require_free.opencode") and not (
+            if cand.endpoint:
+                if cand.endpoint not in (cfg(self.conn, "endpoints") or {}):
+                    reasons.append(f"{cand.label()}: no endpoint {cand.endpoint!r} (ab endpoints add)")
+                    continue
+                if type(a).endpoint_command is H.Adapter.endpoint_command:
+                    reasons.append(f"{cand.label()}: {cand.harness} can't run on endpoints")
+                    continue
+            elif cand.harness == "opencode" and cfg(self.conn, "require_free.opencode") and not (
                     (cand.model or "").endswith("-free") or (cand.model or "").endswith(":free")):
                 reasons.append(f"{cand.label()}: opencode is limited to free models")
                 continue
-            hl = limits.get(f"harness:{cand.harness}")
+            hl = limits.get(harness_scope(cand.harness, cand.endpoint))
             if hl:
                 reasons.append(f"{cand.label()}: {hl['kind']} until {store.fmt_ts(hl['until'])}")
                 continue
-            b = H.bucket_for(self.conn, cand.harness, cand.model)
+            b = H.bucket_for(self.conn, cand.harness, cand.model, cand.endpoint)
             bl = limits.get(f"bucket:{b}")
             if bl:
                 reasons.append(f"{cand.label()}: {b} {bl['kind']} until {store.fmt_ts(bl['until'])}")
@@ -423,8 +436,8 @@ class Runner:
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
-            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at) VALUES(?,?,?,?,?,?,?)",
-                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now()))
+            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint) VALUES(?,?,?,?,?,?,?,?)",
+                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, now(), cand.endpoint))
             run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             owner = f"{cand.harness}#{run_id}"
             c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
@@ -437,8 +450,18 @@ class Runner:
         out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
         brief = build_brief(c, cur, workdir, (cur["attempts"] or 0) + 1, owner)
         extra = (cfg(c, "extra_args") or {}).get(cand.harness, [])
-        cmd = a.command(brief, cand.model, cand.effort, extra)
+        try:
+            ep = H.get_endpoint(c, cand.endpoint) if cand.endpoint else None
+            cmd, xenv = a.build(brief, cand, ep, extra)
+        except Exception as e:  # bad endpoint, harness setup step failed: park this route, not the task
+            with tx(c):
+                c.execute("UPDATE runs SET ended_at=?, outcome='spawn_failed', detail=? WHERE id=?", (now(), str(e)[:1000], run_id))
+                c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL WHERE id=? AND owner=?", (task["id"], owner))
+                store.set_limit(c, harness_scope(cand.harness, cand.endpoint), "setup", now() + 1800, f"setup failed: {e}")
+            self.log(f"setup failed for {cand.label()}: {e}")
+            return False
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
+        env.update(xenv)
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": str(store.HOME),
                     "AB_BOARD": cur["board"],
                     "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
@@ -450,7 +473,7 @@ class Runner:
             with tx(c):
                 c.execute("UPDATE runs SET ended_at=?, outcome='spawn_failed', detail=? WHERE id=?", (now(), str(e), run_id))
                 c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL WHERE id=? AND owner=?", (task["id"], owner))
-                store.set_limit(c, f"harness:{cand.harness}", "missing", now() + 3600, f"spawn failed: {e}")
+                store.set_limit(c, harness_scope(cand.harness, cand.endpoint), "missing", now() + 3600, f"spawn failed: {e}")
             self.log(f"spawn failed for {cand.label()}: {e}")
             return False
         start = pid_start(proc.pid)
@@ -460,6 +483,7 @@ class Runner:
         self.children[run_id] = Child(run_id, task["id"], owner, cand.harness, cand.model, bucket, proc.pid, start, proc,
                                       timeout_s, workdir, out_path, err_path, now())
         self.children[run_id].board = cur["board"]
+        self.children[run_id].endpoint = cand.endpoint
         self.log(f"run {run_id}: {task['id']} -> {cand.label()} [{bucket}] pid {proc.pid}")
         return True
 
@@ -517,7 +541,7 @@ class Runner:
             mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
             if res.error_kind in ("auth", "limit", "unavailable"):
                 kind = res.error_kind
-                scope = f"harness:{ch.harness}" if kind == "auth" else f"bucket:{ch.bucket}"
+                scope = harness_scope(ch.harness, getattr(ch, "endpoint", None)) if kind == "auth" else f"bucket:{ch.bucket}"
                 until = res.reset_at or (now() + parse_dur(cfg(c, f"cooldown.{kind}") or "30m"))
                 store.set_limit(c, scope, kind, until, res.error[:500])
                 if mine:

@@ -98,7 +98,7 @@ def show_text(d):
     if d.get("runs"):
         lines.append("")
         for r in d["runs"]:
-            lines.append(f"run {r['id']} {r['harness']}:{r['model'] or ''} [{r['bucket']}] {fmt_ts(r['started_at'])} "
+            lines.append(f"run {r['id']} {r['harness']}{'@' + r['endpoint'] if r.get('endpoint') else ''}:{r['model'] or ''} [{r['bucket']}] {fmt_ts(r['started_at'])} "
                          f"{fmt_dur((r['ended_at'] or now()) - r['started_at'])} -> {r['outcome'] or 'running'} "
                          f"in={r['input']} out={r['output']} cache_r={r['cache_read']}"
                          + (f" ${r['cost_usd']:.3f}" if r.get("cost_usd") else ""))
@@ -376,9 +376,11 @@ def cmd_harness(c, a, out):
     lim = store.active_limits(c)
     rows = []
     for name, ad in H.ADAPTERS.items():
-        rows.append({"harness": name, "installed": ad.available(), "limit": lim.get(f"harness:{name}"),
-                     "harvested_usage": ad.harvested})
+        rows.append({"harness": name, "bin": ad.bin, "installed": ad.available(), "limit": lim.get(f"harness:{name}"),
+                     "harvested_usage": ad.harvested,
+                     "endpoints": type(ad).endpoint_command is not H.Adapter.endpoint_command})
     out(rows, lambda xs: "\n".join(f"{r['harness']:<9} {'installed' if r['installed'] else 'missing':<10} "
+                                   + f"{'endpoints' if r['endpoints'] else '-':<10} "
                                    + (f"{r['limit']['kind']} until {fmt_ts(r['limit']['until'])}: {(r['limit']['reason'] or '')[:100]}" if r['limit'] else "ok")
                                    for r in xs))
 
@@ -930,6 +932,54 @@ def cmd_boards(c, a, out):
         + (f"  {d['description']}" if d["description"] else "") for d in xs))
 
 
+# ---- endpoints (OpenAI-compatible servers any endpoint-capable harness can run on)
+def _ep_models(base_url, key):
+    import urllib.request
+    req = urllib.request.Request(base_url.rstrip("/") + "/models", headers={"Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        d = json.loads(r.read())
+    return [m.get("id") for m in d.get("data", []) if m.get("id")]
+
+
+def cmd_endpoints(c, a, out):
+    act = a.action or "ls"
+    eps = store.cfg(c, "endpoints") or {}
+    if act in ("add", "rm"):
+        admin(c, a)
+        if not a.name:
+            raise ValueError(f"endpoints {act} NAME ...")
+        if act == "add":
+            if not a.base_url:
+                raise ValueError("endpoints add NAME --base-url http://host:port/v1 [--api-key-env VAR] [--context N]")
+            eps[a.name] = {"base_url": a.base_url.rstrip("/"), "api_key_env": a.api_key_env, "context": a.context,
+                           "bucket": a.bucket}
+        else:
+            if eps.pop(a.name, None) is None:
+                raise LookupError(f"no endpoint {a.name}")
+        with store.tx(c):
+            store.cfg_set(c, "endpoints", eps, actor_of(a))
+    if act == "check":
+        res = {}
+        for name, e in eps.items():
+            if a.name and name != a.name:
+                continue
+            ep = H.get_endpoint(c, name)
+            try:
+                res[name] = {"ok": True, "models": _ep_models(ep.base_url, ep.key)}
+            except Exception as ex:
+                res[name] = {"ok": False, "error": str(ex)[:200]}
+        out(res, lambda d: "\n".join(f"{k}: " + ("up, serves " + ", ".join(v["models"]) if v["ok"] else "DOWN " + v["error"])
+                                     for k, v in d.items()) or "(no endpoints)")
+        return 0 if all(v["ok"] for v in res.values()) else 1
+    capable = [n for n, ad in H.ADAPTERS.items() if type(ad).endpoint_command is not H.Adapter.endpoint_command]
+    res = {"endpoints": eps, "harnesses": capable}
+    out(res, lambda d: "\n".join(f"{n}: {e['base_url']} context={e.get('context')}"
+                                 + (f" key=${e['api_key_env']}" if e.get("api_key_env") else "")
+                                 + f" bucket={e.get('bucket') or 'ep:' + n}" for n, e in d["endpoints"].items())
+        + ("\n" if d["endpoints"] else "(no endpoints)\n") + "harnesses that can run on endpoints: " + ", ".join(d["harnesses"])
+        + "\nuse in tiers / pins as  HARNESS@ENDPOINT:MODEL  e.g. pi@rtx3060:spark-1.7b")
+
+
 def cmd_mcp(c, a, out):
     from . import mcp
     mcp.serve()
@@ -1230,6 +1280,14 @@ def build_parser():
     s.add_argument("--pause", action="store_true")
     s.add_argument("--resume", action="store_true")
     s.add_argument("--force", action="store_true")
+
+    s = sub("endpoints", cmd_endpoints, "OpenAI-compatible servers: ls | add NAME --base-url URL [--api-key-env VAR] [--context N] | rm NAME | check [NAME]")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "check"])
+    s.add_argument("name", nargs="?")
+    s.add_argument("--base-url", help="e.g. http://127.0.0.1:8093/v1")
+    s.add_argument("--api-key-env", help="name of the env var holding the key (the key itself is never stored)")
+    s.add_argument("--context", type=int, default=65536, help="context window to tell the harness")
+    s.add_argument("--bucket", help="quota bucket name (default ep:NAME)")
 
     sub("mcp", cmd_mcp, "serve the board as an MCP server on stdio")
     return p

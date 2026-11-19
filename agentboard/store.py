@@ -87,16 +87,17 @@ DEFAULTS = {
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
     "tiers": {
-        "max": ["claude:opus@high", "agy:Claude Opus 5.5 (High)", "agy:Gemini 4 Argon (High)"],
-        "high": ["claude:sonnet@high", "agy:Claude Sonnet 5.5 (High)", "agy:Gemini 4 Neon (High)"],
-        "medium": ["claude:sonnet@medium", "agy:Claude Sonnet 5.5 (Medium)", "agy:Gemini 4 Neon (Medium)",
+        "max": ["claude:opus@high", "codex:@xhigh", "agy:Claude Opus 5.5 (High)", "agy:Gemini 4 Argon (High)"],
+        "high": ["claude:sonnet@high", "codex:@high", "agy:Claude Sonnet 5.5 (High)", "agy:Gemini 4 Neon (High)"],
+        "medium": ["claude:sonnet@medium", "codex:@medium", "agy:Claude Sonnet 5.5 (Medium)", "agy:Gemini 4 Neon (Medium)",
                    "opencode:opencode/deepseek-v4.1-flash-free"],
-        "low": ["opencode:opencode/deepseek-v4.1-flash-free", "agy:Gemini 3.8 Flash (Medium)", "claude:haiku"],
+        "low": ["opencode:opencode/deepseek-v4.1-flash-free", "agy:Gemini 3.8 Flash (Medium)", "codex:@low", "claude:haiku"],
     },
     "tier_order": ["low", "medium", "high", "max"],
     "caps": {},                 # bucket -> {"window": "5h", "max_output": N, "max_cost": USD, "max_runs": N}
     "bucket_map": {},           # "harness/model-glob" -> bucket, overrides the built-in mapping
     "extra_args": {},           # harness -> [args] appended to every launch
+    "endpoints": {},            # name -> {"base_url", "api_key_env", "context", "bucket"}: OpenAI-compatible servers
 }
 
 PERMS = ("read", "post", "create", "claim", "manage", "admin")
@@ -134,6 +135,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE events ADD COLUMN board TEXT")
     if "channel" not in ev:
         conn.execute("ALTER TABLE events ADD COLUMN channel TEXT")
+    if "endpoint" not in _cols(conn, "runs"):
+        conn.execute("ALTER TABLE runs ADD COLUMN endpoint TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     if conn.execute("SELECT value FROM control WHERE key='_schema'").fetchone() is not None:
@@ -441,7 +444,7 @@ def task_dict(conn, row, full=False):
         d["notes"] = thread_messages(conn, d["id"])
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]
         d["runs"] = [dict(r) for r in conn.execute(
-            "SELECT id,harness,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
+            "SELECT id,harness,endpoint,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
             "cache_write,reasoning,cost_usd,detail FROM runs WHERE task_id=? ORDER BY id", (d["id"],))]
     return d
 

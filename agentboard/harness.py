@@ -1,5 +1,7 @@
-"""Harness adapters: how to launch each agent CLI headless, read its result and usage, and classify failures."""
+"""Harness adapters: how to launch each agent CLI headless (on its own account or on an OpenAI-compatible endpoint),
+read its result and usage, and classify failures."""
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -7,7 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -17,16 +19,19 @@ from . import store
 # Order matters: auth beats limit beats unavailable. These run on harness error text only,
 # never on a successful result, so a task *about* rate limiting doesn't trip them.
 AUTH_RE = re.compile(
-    r"api[ _-]?key (?:has )?expired|invalid[ _-]api[ _-]key|authentication_error|unauthori[sz]ed|\b401\b|"
+    r"api[ _-]?key (?:has )?expired|invalid[ _-]api[ _-]key|authentication_?error|unauthori[sz]ed|\b401\b|"
     r"not (?:logged|signed) in|please (?:log ?in|login|sign in|run .{0,30}login)|GOOGLE_CLOUD_PROJECT|"
-    r"oauth token (?:has )?expired|invalid_grant|credentials? (?:missing|not found|expired)|api_key_expired", re.I)
+    r"oauth token (?:has )?expired|invalid_grant|credentials? (?:missing|not found|expired)|api_key_expired|"
+    r"MISSING_CREDENTIAL|no API key for provider|authentication required|requires re-?authentication|"
+    r"api_key client option must be set|no model configured|use /login|run [`'\"]?\w*\s*login", re.I)
 LIMIT_RE = re.compile(
     r"usage limit|rate[ _-]?limit|quota|RESOURCE_EXHAUSTED|\b429\b|limit reached|hit your (?:usage )?limit|"
     r"too many requests|insufficient_quota|credits? (?:exhausted|depleted|balance)|out of credits|"
     r"weekly limit|5[- ]hour limit|session limit", re.I)
 UNAVAIL_RE = re.compile(
     r"\b50[234]\b|\b529\b|overloaded|service unavailable|ECONNREFUSED|connection refused|in use by another job|"
-    r"server_error|bad gateway|gateway timeout|ETIMEDOUT|ENOTFOUND|network error|socket hang up", re.I)
+    r"server_error|bad gateway|gateway timeout|ETIMEDOUT|ENOTFOUND|network error|socket hang up|APIConnectionError|"
+    r"connection error|TRANSPORT:|ECONNRESET|fetch failed", re.I)
 
 
 def classify(text):
@@ -93,7 +98,7 @@ class Result:
     cache_write: int = 0
     reasoning: int = 0
     cost_usd: float = None
-    error_kind: str = None     # auth | limit | unavailable | failed | None
+    error_kind: str = None     # auth | limit | unavailable | failed | timeout | None
     error: str = ""
     reset_at: float = None
 
@@ -121,8 +126,7 @@ def _json_objects(text):
 
 
 def _tail(s, n=1500):
-    s = (s or "").strip()
-    return s[-n:]
+    return (s or "").strip()[-n:]
 
 
 def _matched_lines(blob, kind):
@@ -152,6 +156,52 @@ def _finish(r, rc, out, err):
     return r
 
 
+def _int(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# ---------------------------------------------------------------- endpoints
+@dataclass
+class Endpoint:
+    """An OpenAI-compatible server (llama.cpp, vLLM, a gateway). Some harnesses also need /v1/responses
+    (codex) or /v1/messages (claude); llama-server serves all three."""
+    name: str
+    base_url: str
+    api_key_env: str = None
+    context: int = 65536
+    bucket: str = None
+
+    @property
+    def key(self):
+        return (os.environ.get(self.api_key_env) if self.api_key_env else None) or "local"
+
+    @property
+    def root(self):
+        return re.sub(r"/v1/?$", "", self.base_url.rstrip("/"))
+
+
+def get_endpoint(conn, name):
+    eps = store.cfg(conn, "endpoints") or {}
+    if name not in eps:
+        raise LookupError(f"no endpoint {name!r}; add it with `ab endpoints add {name} --base-url URL`")
+    e = eps[name]
+    return Endpoint(name, e["base_url"], e.get("api_key_env"), int(e.get("context") or 65536), e.get("bucket"))
+
+
+def _cache_dir(ep, harness, model):
+    h = hashlib.sha1(f"{ep.base_url}|{model}|{ep.context}".encode()).hexdigest()[:10]
+    d = store.HOME / "endpoints" / ep.name / harness / h
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+class EndpointUnsupported(ValueError):
+    pass
+
+
 # ---------------------------------------------------------------- adapters
 class Adapter:
     name = "?"
@@ -164,6 +214,16 @@ class Adapter:
 
     def command(self, brief, model=None, effort=None, extra=()):
         raise NotImplementedError
+
+    def build(self, brief, cand, ep=None, extra=()):
+        """-> (argv, env overrides). With an endpoint the harness is pointed at it through a per-run overlay;
+        the user's own config files are never edited."""
+        if ep is None:
+            return self.command(brief, cand.model, cand.effort, extra), {}
+        return self.endpoint_command(brief, cand.model, cand.effort, ep, extra)
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        raise EndpointUnsupported(f"{self.name} can't run on a custom endpoint")
 
     def parse(self, rc, out, err):
         raise NotImplementedError
@@ -186,6 +246,14 @@ class Claude(Adapter):
             cmd += ["--effort", effort]
         return cmd + list(extra)
 
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        # Needs Anthropic Messages at <root>/v1/messages (llama-server and most gateways serve it).
+        env = {"ANTHROPIC_BASE_URL": ep.root, "ANTHROPIC_AUTH_TOKEN": ep.key, "ANTHROPIC_MODEL": model,
+               "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+               "ANTHROPIC_DEFAULT_HAIKU_MODEL": model, "ANTHROPIC_SMALL_FAST_MODEL": model,
+               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+        return self.command(brief, model, None, extra), env
+
     def parse(self, rc, out, err):
         r = Result()
         doc = None
@@ -196,11 +264,9 @@ class Claude(Adapter):
             r.error = _tail(out) or _tail(err)
             return _finish(r, rc, out, err)
         u = doc.get("usage") or {}
-        r.input = int(u.get("input_tokens") or 0)
-        r.output = int(u.get("output_tokens") or 0)
-        r.cache_read = int(u.get("cache_read_input_tokens") or 0)
-        r.cache_write = int(u.get("cache_creation_input_tokens") or 0)
-        r.reasoning = int((u.get("output_tokens_details") or {}).get("thinking_tokens") or 0)
+        r.input, r.output = _int(u.get("input_tokens")), _int(u.get("output_tokens"))
+        r.cache_read, r.cache_write = _int(u.get("cache_read_input_tokens")), _int(u.get("cache_creation_input_tokens"))
+        r.reasoning = _int((u.get("output_tokens_details") or {}).get("thinking_tokens"))
         r.cost_usd = doc.get("total_cost_usd")
         r.session_id = doc.get("session_id")
         mu = doc.get("modelUsage") or {}
@@ -240,15 +306,14 @@ class Agy(Adapter):
             r.error = _tail(out) or _tail(err)
             return _finish(r, rc, out, err)
         u = doc.get("usage") or {}
-        r.input = int(u.get("input_tokens") or 0)
-        r.output = int(u.get("output_tokens") or 0)
-        r.reasoning = int(u.get("thinking_tokens") or 0)
-        r.cache_read = int(u.get("cache_read_tokens") or 0)
+        r.input, r.output = _int(u.get("input_tokens")), _int(u.get("output_tokens"))
+        r.reasoning, r.cache_read = _int(u.get("thinking_tokens")), _int(u.get("cache_read_tokens"))
         r.session_id = doc.get("conversation_id")
         r.text = doc.get("response") or ""
         r.ok = rc == 0 and str(doc.get("status", "")).upper() == "SUCCESS"
         if not r.ok:
-            r.error = json.dumps(doc.get("error")) if doc.get("error") else (r.text or str(doc.get("status")))
+            e = doc.get("error")
+            r.error = (e if isinstance(e, str) else json.dumps(e)) if e else (r.text or str(doc.get("status")))
         return _finish(r, rc, out, err)
 
     def bucket(self, model):
@@ -286,6 +351,18 @@ class OpenCode(Adapter):
             cmd += ["--variant", effort]
         return cmd + list(extra) + [brief]
 
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        # Isolated config home: the user's global plugins/MCP servers/title model are not loaded.
+        d = _cache_dir(ep, self.name, model)
+        pid = f"ab-{ep.name}"
+        cfg = {"$schema": "https://opencode.ai/config.json", "model": f"{pid}/{model}", "small_model": f"{pid}/{model}",
+               "provider": {pid: {"npm": "@ai-sdk/openai-compatible", "name": f"agentboard {ep.name}",
+                                  "options": {"baseURL": ep.base_url, "apiKey": "{env:AB_EP_KEY}"},
+                                  "models": {model: {"name": model, "limit": {"context": ep.context, "output": 8192}}}}}}
+        (d / "opencode").mkdir(exist_ok=True)
+        (d / "opencode" / "opencode.json").write_text(json.dumps(cfg, indent=1))
+        return self.command(brief, f"{pid}/{model}", effort, extra), {"XDG_CONFIG_HOME": str(d), "AB_EP_KEY": ep.key}
+
     def parse(self, rc, out, err):
         r = Result()
         texts, errors, saw = [], [], False
@@ -297,16 +374,16 @@ class OpenCode(Adapter):
             if typ == "error" or o.get("error"):
                 e = o.get("error") or {}
                 errors.append(((e.get("data") or {}).get("message") or e.get("name") or json.dumps(e))[:800])
-            if typ in ("text",) and part.get("text"):
+            if typ == "text" and part.get("text"):
                 texts.append(part["text"])
             if typ in ("step_finish", "step-finish") or part.get("type") == "step-finish":
                 tk = part.get("tokens") or {}
-                r.input += int(tk.get("input") or 0)
-                r.output += int(tk.get("output") or 0)
-                r.reasoning += int(tk.get("reasoning") or 0)
+                r.input += _int(tk.get("input"))
+                r.output += _int(tk.get("output"))
+                r.reasoning += _int(tk.get("reasoning"))
                 c = tk.get("cache") or {}
-                r.cache_read += int(c.get("read") or 0)
-                r.cache_write += int(c.get("write") or 0)
+                r.cache_read += _int(c.get("read"))
+                r.cache_write += _int(c.get("write"))
                 if part.get("cost") is not None:
                     r.cost_usd = (r.cost_usd or 0) + float(part["cost"])
         r.text = "\n".join(texts).strip()
@@ -319,6 +396,8 @@ class OpenCode(Adapter):
 
     def bucket(self, model):
         m = model or ""
+        if m.startswith("ab-"):
+            return "local"  # an agentboard endpoint overlay
         if m.endswith("-free") or m.endswith(":free"):
             return "opencode-free"
         return "opencode-" + (m.split("/")[0] if "/" in m else "default")
@@ -345,13 +424,12 @@ class Gemini(Adapter):
         if doc is None:
             r.error = _tail(err) or _tail(out)
             return _finish(r, rc, out, err)
-        models = ((doc.get("stats") or {}).get("models") or {})
-        for name, m in models.items():
+        for name, m in ((doc.get("stats") or {}).get("models") or {}).items():
             tk = (m or {}).get("tokens") or {}
-            r.input += int(tk.get("prompt") or tk.get("input") or 0)
-            r.output += int(tk.get("candidates") or tk.get("output") or 0)
-            r.cache_read += int(tk.get("cached") or 0)
-            r.reasoning += int(tk.get("thoughts") or 0)
+            r.input += _int(tk.get("prompt") or tk.get("input"))
+            r.output += _int(tk.get("candidates") or tk.get("output"))
+            r.cache_read += _int(tk.get("cached"))
+            r.reasoning += _int(tk.get("thoughts"))
             r.model = name
         r.text = doc.get("response") or ""
         if doc.get("error"):
@@ -370,6 +448,16 @@ class Pi(Adapter):
             cmd += ["--model", model + (f":{effort}" if effort else "")]
         return cmd + list(extra) + [brief]
 
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        d = _cache_dir(ep, self.name, model)
+        pid = f"ab-{ep.name}"
+        (d / "models.json").write_text(json.dumps({"providers": {pid: {
+            "name": f"agentboard {ep.name}", "baseUrl": ep.base_url, "api": "openai-completions", "apiKey": ep.key,
+            "models": [{"id": model, "name": model, "contextWindow": ep.context}]}}}, indent=1))
+        (d / "settings.json").write_text(json.dumps({"defaultProvider": pid, "defaultModel": model,
+                                                     "defaultThinkingLevel": effort or "off"}))
+        return self.command(brief, f"{pid}/{model}", effort, extra), {"PI_CODING_AGENT_DIR": str(d)}
+
     def parse(self, rc, out, err):
         r = Result()
         last_err, final_text, saw = None, "", False
@@ -380,10 +468,10 @@ class Pi(Adapter):
                 if m.get("role") != "assistant":
                     continue
                 u = m.get("usage") or {}
-                r.input += int(u.get("input") or 0)
-                r.output += int(u.get("output") or 0)
-                r.cache_read += int(u.get("cacheRead") or 0)
-                r.cache_write += int(u.get("cacheWrite") or 0)
+                r.input += _int(u.get("input"))
+                r.output += _int(u.get("output"))
+                r.cache_read += _int(u.get("cacheRead"))
+                r.cache_write += _int(u.get("cacheWrite"))
                 cost = (u.get("cost") or {}).get("total")
                 if cost:
                     r.cost_usd = (r.cost_usd or 0) + float(cost)
@@ -434,6 +522,11 @@ class Hermes(Adapter):
             cmd += ["-m", model]
         return cmd + list(extra)
 
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        # Hermes refuses models whose served context is under 64K.
+        cmd = self.command(brief, model, effort, extra) + ["--provider", "custom", "--base-url", ep.base_url, "--api-key", ep.key]
+        return cmd, {}
+
     def parse(self, rc, out, err):
         r = Result()
         m = re.search(r"session_id:\s*(\S+)", (err or "") + "\n" + (out or ""))
@@ -452,8 +545,7 @@ class Hermes(Adapter):
         return _finish(r, rc, out, err)
 
     def bucket(self, model):
-        prov = hermes_default_provider() or ""
-        return hermes_bucket(prov)
+        return hermes_bucket(hermes_default_provider() or "")
 
 
 class Codex(Adapter):
@@ -464,8 +556,16 @@ class Codex(Adapter):
         if model:
             cmd += ["-m", model]
         if effort:
-            cmd += ["-c", f"model_reasoning_effort={effort}"]
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
         return cmd + list(extra) + [brief]
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        # Needs the Responses API at <base_url>/responses.
+        pid = "ab_" + re.sub(r"\W", "_", ep.name)
+        ov = ["-c", f'model_provider="{pid}"', "-c", f'model_providers.{pid}.name="{ep.name}"',
+              "-c", f'model_providers.{pid}.base_url="{ep.base_url}"', "-c", f'model_providers.{pid}.wire_api="responses"',
+              "-c", f'model_providers.{pid}.env_key="AB_EP_KEY"']
+        return self.command(brief, model, effort, list(ov) + list(extra)), {"AB_EP_KEY": ep.key}
 
     def parse(self, rc, out, err):
         r = Result()
@@ -482,12 +582,12 @@ class Codex(Adapter):
                 texts.append(item.get("text") or "")
             if typ == "turn.completed":
                 u = o.get("usage") or {}
-                r.input += int(u.get("input_tokens") or 0)
-                r.cache_read += int(u.get("cached_input_tokens") or 0)
-                r.output += int(u.get("output_tokens") or 0)
-                r.reasoning += int(u.get("reasoning_output_tokens") or 0)
+                r.input += _int(u.get("input_tokens"))
+                r.cache_read += _int(u.get("cached_input_tokens"))
+                r.output += _int(u.get("output_tokens"))
+                r.reasoning += _int(u.get("reasoning_output_tokens"))
         r.text = "\n".join(texts).strip()
-        r.ok = rc == 0 and saw and not errors
+        r.ok = rc == 0 and saw and not errors and bool(texts)
         if errors:
             r.error = " | ".join(errors)
         elif not saw:
@@ -495,7 +595,245 @@ class Codex(Adapter):
         return _finish(r, rc, out, err)
 
 
-ADAPTERS = {a.name: a for a in (Claude(), Agy(), OpenCode(), Gemini(), Pi(), Hermes(), Codex())}
+class Kimi(Adapter):
+    """Kimi Code CLI (npm @moonshot-ai/kimi-code)."""
+    name, bin, default_bucket = "kimi", "kimi", "kimi-code"
+
+    def command(self, brief, model=None, effort=None, extra=()):
+        cmd = ["kimi", "-p", brief, "--output-format", "stream-json"]
+        if model:
+            cmd += ["-m", model]
+        return cmd + list(extra)
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        d = _cache_dir(ep, self.name, model)
+        (d / "config.toml").write_text(
+            'default_model = "ab"\n\n[models.ab]\nprovider = "ab"\n'
+            f'model = {json.dumps(model)}\nmax_context_size = {ep.context}\n\n'
+            f'[providers.ab]\ntype = "openai"\nbase_url = {json.dumps(ep.base_url)}\napi_key = {json.dumps(ep.key)}\n')
+        return self.command(brief, None, effort, extra), {"KIMI_CODE_HOME": str(d)}
+
+    def parse(self, rc, out, err):
+        r = Result()
+        texts, errors = [], []
+        for o in _json_objects(out):
+            if o.get("role") == "assistant":
+                c = o.get("content")
+                if isinstance(c, list):
+                    c = "".join(x.get("text", "") for x in c if isinstance(x, dict))
+                if c:
+                    texts.append(c)
+            if o.get("type") in ("error", "system.error") or (o.get("role") == "meta" and "error" in str(o.get("type"))):
+                errors.append(str(o.get("content") or o.get("message") or o)[:800])
+            if o.get("session_id"):
+                r.session_id = o["session_id"]
+            u = o.get("usage")
+            if isinstance(u, dict):
+                r.input += _int(u.get("input_tokens") or u.get("prompt_tokens"))
+                r.output += _int(u.get("output_tokens") or u.get("completion_tokens"))
+        r.text = (texts[-1] if texts else "").strip()
+        r.ok = rc == 0 and not errors and bool(texts)
+        if not r.ok:
+            r.error = " | ".join(errors) or _tail(err) or _tail(out)
+        return _finish(r, rc, out, err)
+
+
+class Cursor(Adapter):
+    """Cursor CLI (cursor-agent)."""
+    name, bin, default_bucket = "cursor", "cursor-agent", "cursor"
+
+    def command(self, brief, model=None, effort=None, extra=()):
+        cmd = ["cursor-agent", "-p", "--output-format", "json", "--force", "--trust"]
+        if model:
+            cmd += ["--model", model]
+        return cmd + list(extra) + [brief]
+
+    def parse(self, rc, out, err):
+        r = Result()
+        doc = None
+        for o in _json_objects(out):
+            if o.get("type") == "result" or "result" in o:
+                doc = o
+        if doc is None:
+            r.error = _tail(err) or _tail(out)
+            return _finish(r, rc, out, err)
+        u = doc.get("usage") or {}
+        r.input = _int(u.get("inputTokens") or u.get("input_tokens"))
+        r.output = _int(u.get("outputTokens") or u.get("output_tokens"))
+        r.cache_read = _int(u.get("cacheReadTokens") or u.get("cache_read_input_tokens"))
+        r.cache_write = _int(u.get("cacheWriteTokens") or u.get("cache_creation_input_tokens"))
+        r.session_id = doc.get("session_id") or doc.get("sessionId")
+        r.text = doc.get("result") or ""
+        r.ok = rc == 0 and not doc.get("is_error") and doc.get("subtype", "success") == "success"
+        if not r.ok:
+            r.error = r.text or str(doc.get("subtype") or "")
+        return _finish(r, rc, out, err)
+
+    def list_models(self):
+        p = subprocess.run(["cursor-agent", "--list-models"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        return [(l.split()[0], " ".join(l.split()[1:])) for l in p.stdout.splitlines() if l.strip() and not l.startswith(("Available", "-"))]
+
+
+class Cline(Adapter):
+    """Cline CLI."""
+    name, bin, default_bucket = "cline", "cline", "cline"
+
+    def command(self, brief, model=None, effort=None, extra=()):
+        cmd = ["cline", "--json"]
+        if model:
+            cmd += ["-m", model]
+        if effort:
+            cmd += ["--thinking", effort]
+        return cmd + list(extra) + [brief]
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        d = _cache_dir(ep, self.name, model)
+        if not (d / ".ab-configured").exists():
+            p = subprocess.run(["cline", "auth", "--config", str(d), "-p", "openai", "-k", ep.key, "-m", model, "-b", ep.base_url],
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            if p.returncode != 0:
+                raise RuntimeError(f"cline auth for endpoint failed: {(p.stderr or p.stdout).strip()[:300]}")
+            (d / ".ab-configured").write_text("ok")
+        return self.command(brief, None, effort, ["--config", str(d)] + list(extra)), {}
+
+    def parse(self, rc, out, err):
+        r = Result()
+        res, errors = None, []
+        for o in _json_objects(out):
+            if o.get("type") == "run_result":
+                res = o
+            if o.get("type") == "error":
+                errors.append(str(o.get("message"))[:800])
+            if o.get("sessionId") and not r.session_id:
+                r.session_id = o["sessionId"]
+        for o in _json_objects(err):  # cline prints errors as JSON on stderr
+            if o.get("type") == "error":
+                errors.append(str(o.get("message"))[:800])
+        if res:
+            u = res.get("aggregateUsage") or res.get("usage") or {}
+            r.input, r.output = _int(u.get("inputTokens")), _int(u.get("outputTokens"))
+            r.cache_read, r.cache_write = _int(u.get("cacheReadTokens")), _int(u.get("cacheWriteTokens"))
+            r.cost_usd = u.get("totalCost") or None
+            r.text = res.get("text") or ""
+            r.model = (res.get("model") or {}).get("id")
+        r.ok = rc == 0 and res is not None and res.get("finishReason") == "completed"
+        if not r.ok:
+            r.error = " | ".join(errors) or (f"finished: {res.get('finishReason')}" if res else "") or _tail(err) or _tail(out)
+        return _finish(r, rc, out, err)
+
+
+class OpenHands(Adapter):
+    """OpenHands CLI (headless)."""
+    name, bin, default_bucket = "openhands", "openhands", "openhands"
+
+    def command(self, brief, model=None, effort=None, extra=()):
+        return ["openhands", "--headless", "--json", "-t", brief] + list(extra)
+
+    def build(self, brief, cand, ep=None, extra=()):
+        cmd, env = super().build(brief, cand, ep, extra)
+        env.setdefault("COLUMNS", "100000")  # its JSON events go through a renderer that wraps at terminal width
+        return cmd, env
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        d = _cache_dir(ep, self.name, model)
+        settings = d / ".openhands" / "agent_settings.json"
+        if not settings.exists():
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            py = Path(os.path.realpath(shutil.which("openhands"))).read_text(errors="replace").splitlines()[0][2:].strip()
+            code = ("import sys\nfrom openhands.sdk import LLM\nfrom openhands_cli.utils import get_default_cli_agent\n"
+                    f"a = get_default_cli_agent(LLM(model={json.dumps('openai/' + model)}, base_url={json.dumps(ep.base_url)}, "
+                    "api_key='x', usage_id='agent'))\nopen(sys.argv[1], 'w').write(a.model_dump_json())\n")
+            p = subprocess.run([py, "-c", code, str(settings)], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+            if p.returncode != 0:
+                raise RuntimeError(f"openhands settings for endpoint failed: {p.stderr.strip()[-300:]}")
+        # The saved settings mask the key, so it travels in the environment.
+        return self.command(brief, model, effort, extra), {"HOME": str(d), "OPENAI_API_KEY": ep.key}
+
+    def parse(self, rc, out, err):
+        r = Result()
+        t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out or "")
+        t = re.sub(r"(?m)^.?\s*Agent is working\r?\n?", "", t)
+        dec = json.JSONDecoder(strict=False)
+        texts, errors = [], []
+        for blk in t.split("--JSON Event--")[1:]:
+            s = blk.lstrip()
+            try:
+                o, _ = dec.raw_decode(s)
+            except ValueError:
+                continue
+            kind = o.get("kind")
+            if kind == "MessageEvent" and o.get("source") == "agent":
+                txt = "".join(c.get("text", "") for c in ((o.get("llm_message") or {}).get("content") or []) if isinstance(c, dict))
+                if txt.strip():
+                    texts.append(txt)
+            elif kind == "ActionEvent":
+                a = o.get("action") or {}
+                if a.get("kind") == "FinishAction" and a.get("message"):
+                    texts.append(a["message"])
+            elif kind in ("ConversationErrorEvent", "AgentErrorEvent"):
+                errors.append(str(o.get("detail") or o.get("error") or o)[:800])
+        m = re.search(r"Conversation ID:\s*(\S+)", t)
+        r.session_id = m[1] if m else None
+        r.text = (texts[-1] if texts else "").strip()
+        r.ok = rc == 0 and not errors and bool(texts)
+        if not r.ok:
+            r.error = " | ".join(errors) or _tail(err) or "no agent message in the output"
+        return _finish(r, rc, out, err)
+
+
+class DeepSeek(Adapter):
+    """DeepSeek Harness (dsh), headless profile."""
+    name, bin, default_bucket = "deepseek", "dsh", "deepseek-api"
+
+    def command(self, brief, model=None, effort=None, extra=(), pre=()):
+        return ["dsh"] + list(pre) + ["--profile", "headless", "--json"] + list(extra) + [brief]
+
+    def build(self, brief, cand, ep=None, extra=()):
+        cmd, env = super().build(brief, cand, ep, extra)
+        # Like every other harness here: no sandbox, no approval prompts. Its default workspace-write sandbox
+        # also makes the board database read-only, so `ab done` would fail.
+        env.setdefault("DSH_PERMISSION_MODE", "danger-full-access")
+        return cmd, env
+
+    def endpoint_command(self, brief, model, effort, ep, extra):
+        d = _cache_dir(ep, self.name, model)
+        pid = f"ab-{re.sub(r'[^a-z0-9-]', '-', ep.name.lower())}"
+        (d / "patch.yml").write_text(
+            "- id: llm-pi-ai\n  config:\n    providers:\n"
+            f"      {pid}:\n        apiKeyEnv: AB_EP_KEY\n        api: openai-completions\n        baseURL: {json.dumps(ep.base_url)}\n"
+            "        compat:\n          supportsDeveloperRole: false\n          maxTokensField: max_tokens\n"
+            f"        models:\n          - id: {json.dumps(model)}\n            contextWindow: {ep.context}\n            maxTokens: 8192\n"
+            f"- id: agent-default-model\n  config:\n    provider: {pid}\n    model: {json.dumps(model)}\n")
+        return self.command(brief, None, effort, extra, pre=["--patch", str(d / "patch.yml")]), {"AB_EP_KEY": ep.key}
+
+    def parse(self, rc, out, err):
+        r = Result()
+        final, errors = None, []
+        for o in _json_objects(out):
+            typ = o.get("type")
+            if not r.session_id:
+                r.session_id = o.get("sessionId") or o.get("session_id")
+            if typ == "final":
+                final = o.get("text") or ""
+            if typ == "status" and o.get("phase") == "step_end":
+                u = o.get("usage") or {}
+                r.input += _int(u.get("inputTokens"))
+                r.output += _int(u.get("outputTokens"))
+                r.cache_read += _int(u.get("cacheReadTokens"))
+            if typ == "status" and o.get("phase") == "turn_end":
+                reason = o.get("reason") or {}
+                if reason.get("kind") == "error":
+                    e = reason.get("error") or {}
+                    errors.append(f"{e.get('code', '')}: {e.get('message', '')}"[:800])
+        r.text = (final or "").strip()
+        r.ok = rc == 0 and not errors and bool(r.text)
+        if not r.ok:
+            r.error = " | ".join(errors) or _tail(err) or _tail(out)
+        return _finish(r, rc, out, err)
+
+
+ADAPTERS = {a.name: a for a in (Claude(), Agy(), OpenCode(), Gemini(), Pi(), Hermes(), Codex(),
+                                Kimi(), Cursor(), Cline(), OpenHands(), DeepSeek())}
 
 
 # ---------------------------------------------------------------- hermes helpers
@@ -550,26 +888,37 @@ class Candidate:
     model: str = None
     effort: str = None
     spec: str = ""
+    endpoint: str = None
 
     def label(self):
-        return self.spec or f"{self.harness}:{self.model or ''}{'@' + self.effort if self.effort else ''}"
+        if self.spec:
+            return self.spec
+        h = self.harness + (f"@{self.endpoint}" if self.endpoint else "")
+        return f"{h}:{self.model or ''}{'@' + self.effort if self.effort else ''}"
 
 
 def parse_spec(spec):
-    """'claude:sonnet@high' | 'agy:Claude Sonnet 5.5 (High)' | 'opencode:opencode/x-free' | 'hermes'"""
+    """'claude:sonnet@high' | 'agy:Claude Sonnet 5.5 (High)' | 'codex:@low' | 'hermes'
+    | 'pi@rtx3060:spark-1.7b' (harness on a registered endpoint)"""
     spec = spec.strip()
-    harness, _, rest = spec.partition(":")
-    harness = harness.strip()
+    head, _, rest = spec.partition(":")
+    harness, _, endpoint = head.strip().partition("@")
+    harness, endpoint = harness.strip(), endpoint.strip() or None
     model, effort = rest.strip() or None, None
     if model and "@" in model:
         model, effort = model.rsplit("@", 1)
         model, effort = model.strip() or None, effort.strip() or None
     if harness not in ADAPTERS:
         raise ValueError(f"unknown harness {harness!r} in {spec!r}; known: {', '.join(ADAPTERS)}")
-    return Candidate(harness, model, effort, spec)
+    if endpoint and not model:
+        raise ValueError(f"{spec!r}: a harness on an endpoint needs a model, e.g. {harness}@{endpoint}:MODEL")
+    return Candidate(harness, model, effort, spec, endpoint)
 
 
-def bucket_for(conn, harness, model):
+def bucket_for(conn, harness, model, endpoint=None):
+    if endpoint:
+        ep = (store.cfg(conn, "endpoints") or {}).get(endpoint) or {}
+        return ep.get("bucket") or f"ep:{endpoint}"
     bmap = store.cfg(conn, "bucket_map") or {}
     key = f"{harness}/{model or ''}"
     for pat, b in bmap.items():
@@ -581,7 +930,9 @@ def bucket_for(conn, harness, model):
 def candidates_for(conn, task):
     """Ordered candidates for a task: its pin if any, else its tier, then fallback tiers per tier_fallback."""
     if task["harness"]:
-        return [Candidate(task["harness"], task["model"], None, f"{task['harness']}:{task['model'] or ''} (pinned)")], []
+        c = parse_spec(f"{task['harness']}:{task['model'] or ''}")
+        c.spec = f"{c.label()} (pinned)"
+        return [c], []
     tiers = store.cfg(conn, "tiers")
     order = store.cfg(conn, "tier_order") or list(tiers)
     tier = task["tier"] or store.cfg(conn, "default_tier")

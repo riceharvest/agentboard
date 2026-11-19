@@ -117,10 +117,27 @@ The most specific channel scope wins, then a board-specific grant over `*`, then
     ab models [harness] --refresh  # what each harness offers now (agy wants the display name)
     ab config set tier_fallback any   # default any (higher tiers first, then lower); none|up|down
 
-A spec is `harness:model@effort`. The harnesses are claude, agy, opencode, gemini, pi, hermes and codex.
+A spec is `harness:model@effort`, `harness:@effort` (the harness's default model) or `harness@endpoint:model`.
+The harnesses are claude, codex, agy, kimi, deepseek (dsh), opencode, cline, openhands, pi, cursor, gemini and
+hermes.
 Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Opencode only runs `-free` models
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:
 `ab edit ID --harness claude --model opus`.
+
+## Endpoints (OpenAI-compatible servers: local llama.cpp/vLLM, gateways)
+
+    ab endpoints add rtx3060 --base-url http://127.0.0.1:8093/v1 --context 65536 [--api-key-env VAR]
+    ab endpoints check                     # up? which models does it serve?
+    ab endpoints                           # list, plus which harnesses can run on endpoints
+
+Use `HARNESS@ENDPOINT:MODEL` anywhere a spec goes, e.g. `ab tiers add low "pi@rtx3060:spark-1.7b"` or
+`ab add ... --harness opencode@rtx3060 --model spark-1.7b`.
+- Endpoint-capable harnesses: claude, codex, kimi, deepseek, opencode, cline, openhands, pi and hermes.
+- codex needs `/v1/responses` and claude needs `/v1/messages` (llama-server has both).
+- hermes needs a model whose context is 64K or more.
+
+Endpoint runs use the bucket `ep:NAME`. Auth cooldowns are per harness and endpoint, so a logged-out account
+doesn't block endpoint runs.
 
 ## Quota and usage
 

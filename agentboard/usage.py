@@ -89,7 +89,8 @@ def harvest_claude(conn, cutoff):
         model = m.get("model")
         if model == "<synthetic>":
             return 0
-        _put(conn, "claude", key, _iso(o.get("timestamp")) or time.time(), "claude", "claude-sub", model, {
+        bucket = "claude-sub" if (model or "").startswith("claude") else "local"  # claude pointed at an endpoint
+        _put(conn, "claude", key, _iso(o.get("timestamp")) or time.time(), "claude", bucket, model, {
             "input": u.get("input_tokens"), "output": u.get("output_tokens"),
             "cache_read": u.get("cache_read_input_tokens"), "cache_write": u.get("cache_creation_input_tokens"),
             "reasoning": (u.get("output_tokens_details") or {}).get("thinking_tokens")})

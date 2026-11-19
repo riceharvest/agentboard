@@ -2,17 +2,18 @@
 import argparse
 import json
 import os
-import subprocess
+import sqlite3
 import sys
 import time
 from pathlib import Path
 
-from . import automation as A
-from . import harness as H
 from . import runner as R
+from . import snapshot as S
 from . import store, usage
+from ._lazy import Lazy
 from .store import fmt_dur, fmt_ts, now, parse_dur, parse_time
 
+A, H, subprocess = Lazy("automation"), Lazy("harness"), Lazy("subprocess", absolute=True)   # imported when a command needs them
 GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
 
 
@@ -238,6 +239,9 @@ def cmd_defer(c, a, out):
 
 
 def cmd_cancel(c, a, out):
+    row = store.must_task(c, a.id)
+    if row["status"] in ("done", "cancelled"):
+        raise ValueError(f"task {row['id']} is already {row['status']}")
     tid = store.cancel(c, a.id, actor_of(a), a.why or "")
     out({"id": tid, "status": "cancelled"}, f"{tid} cancelled")
 
@@ -271,7 +275,15 @@ def cmd_edit(c, a, out):
     for it in a.label or []:
         k, _, v = it.partition("=")
         labels[k] = v
-    tid = store.edit(c, a.id, actor_of(a), f, labels, a.dep or [], a.rm_dep or [])
+    if f.get("harness") and f["harness"].split("@")[0] not in H.ADAPTERS:
+        raise ValueError(f"unknown harness {f['harness']!r}; known: {', '.join(H.ADAPTERS)}")
+
+    def tid_of(x):
+        r = store.get_task(c, x)
+        if r is None:
+            raise LookupError(f"no task {x}")
+        return r["id"]
+    tid = store.edit(c, a.id, actor_of(a), f, labels, [tid_of(d) for d in a.dep or []], [tid_of(d) for d in a.rm_dep or []])
     out({"id": tid, "edited": list(f) + (["labels"] if labels else [])}, f"{tid} edited")
 
 
@@ -285,6 +297,69 @@ def cmd_log(c, a, out):
     rows = [r for r in rows if A.readable(c, actor_of(a), r)]
     out(rows, lambda xs: "\n".join(f"{r['id']:>6} {fmt_ts(r['ts'])} {r['task_id'] or '-':<11} {r['actor']:<16} {r['kind']:<14} "
                                    f"{json.dumps(r['payload']) if r['payload'] else ''}"[:220] for r in xs))
+
+
+def cmd_kill(c, a, out):
+    """Stop one run without cancelling its task: the runner terminates the process, the task goes back to the queue
+    (no attempt counted) and may be started again. Use `ab cancel` to stop the work for good."""
+    try:
+        rid = int(a.run)
+    except ValueError:
+        raise ValueError(f"bad run id {a.run!r} (a number, see `ab runner status`)")
+    r = c.execute("SELECT r.id, r.task_id, r.harness, r.ended_at, r.outcome, t.board FROM runs r LEFT JOIN tasks t ON t.id=r.task_id "
+                  "WHERE r.id=?", (rid,)).fetchone()
+    if r is None:
+        raise LookupError(f"no run {rid}")
+    admin(c, a, r["board"] or None)
+    if r["ended_at"] is not None:
+        raise ValueError(f"run {rid} already ended ({r['outcome']})")
+    with store.tx(c):
+        ids = [int(i) for i in (store.cfg(c, "kill_runs") or [])]
+        if rid not in ids:
+            ids.append(rid)
+        store.cfg_set(c, "kill_runs", ids, actor_of(a))
+        store.event(c, r["task_id"], actor_of(a), "kill_requested", {"run": rid, "harness": r["harness"]})
+    running = bool(R.runner_status(c).get("running"))
+    out({"run": rid, "task_id": r["task_id"], "requested": True, "runner_running": running},
+        f"kill requested for run {rid} ({r['task_id']})" + ("" if running else "; the runner is not running, it stops the run once it starts"))
+
+
+def cmd_decision(c, a, out):
+    """Decision cards are manual cards (`ab add --manual`, usually labelled owner=NAME) that wait for an answer."""
+    act = a.action or "ls"
+    if act == "answer":
+        if not a.id or not (a.text or a.file):
+            raise ValueError("usage: ab decision answer ID TEXT   (or --file F, or '-' for stdin)")
+        tid = store.answer(c, a.id, actor_of(a), text_arg(a.text, a.file))
+        out({"id": tid, "status": "done", "answered": True}, f"{tid} answered and closed")
+        return
+    sql, args = "SELECT * FROM tasks WHERE runnable=0 AND status IN ('open','claimed')", []
+    if not a.all_boards:
+        sql += " AND board=?"
+        args.append(board_of(a))
+    if a.owner:
+        sql += " AND json_extract(labels, '$.owner')=?"
+        args.append(a.owner)
+    rows = c.execute(sql + " ORDER BY priority DESC, created_at LIMIT ?", args + [a.limit]).fetchall()
+    items = [store.task_dict(c, r) for r in visible(c, a, rows)]
+    out(items, lambda xs: "\n".join(tline(x) for x in xs) or "(no decisions waiting)")
+
+
+def cmd_snapshot(c, a, out):
+    if a.schema:
+        print(S.SCHEMA_FILE.read_text(), end="")
+        return
+    tail = S.parse_tail_spec(a.tail) if a.tail else None
+    import gc
+    gc.disable()  # one burst of allocations that all live until the output is written
+    try:
+        snap = S.build(c, actor_of(a), a.board, a.closed, a.events_after, a.events_limit, tail)
+        if out.as_json:
+            print(json.dumps(snap, default=str, ensure_ascii=False, separators=(",", ":")))
+        else:
+            print(S.render_text(snap))
+    finally:
+        gc.enable()
 
 
 def cmd_whoami(c, a, out):
@@ -536,13 +611,21 @@ def cmd_runner(c, a, out):
         with store.tx(c):
             for k, v in sets[act].items():
                 store.cfg_set(c, k, v, actor)
-        out({"ok": True, "action": act}, f"runner: {act}" + (" (now)" if act == "stop" and a.now else "")
-            + (" (re-execs with the current code; running cards keep going)" if act == "reload" else ""))
+        running = bool(R.runner_status(c).get("running"))
+        out({"ok": True, "action": act, "runner_running": running}, f"runner: {act}" + (" (now)" if act == "stop" and a.now else "")
+            + (" (re-execs with the current code; running cards keep going)" if act == "reload" else "")
+            + ("" if running else " (the runner is not running: the setting applies when it starts)"))
         return
     if act == "slots":
+        try:
+            n = int(a.value)
+        except (TypeError, ValueError):
+            n = -1
+        if n < 0:
+            raise ValueError("usage: ab runner slots N  (N is a whole number >= 0)")
         with store.tx(c):
-            store.cfg_set(c, "slots", int(a.value), actor)
-        out({"slots": int(a.value)}, f"slots = {a.value}")
+            store.cfg_set(c, "slots", n, actor)
+        out({"slots": n}, f"slots = {n}")
         return
     if act == "service":
         unit = Path.home() / ".config/systemd/user/agentboard-runner.service"
@@ -747,7 +830,38 @@ def cmd_wait(c, a, out):
     return 0 if evs else 3
 
 
+def cmd_run_tail(c, a, out):
+    """`ab tail --run RUN_ID [--bytes N] [--follow DUR]`: the last bytes of a run's output, ANSI stripped."""
+    rid = int(a.run)
+    res = S.run_tail(c, rid, min(a.bytes, S.MAX_TAIL))
+    if "task_id" not in res:
+        raise LookupError(res["error"])
+    if out.as_json:
+        print(json.dumps(res, default=str, ensure_ascii=False))
+    else:
+        print(res["out"], end="" if res["out"].endswith("\n") or not res["out"] else "\n")
+        if res["err"].strip():
+            print("--- stderr ---\n" + res["err"], end="" if res["err"].endswith("\n") else "\n")
+    if a.follow:
+        row = c.execute("SELECT out_path FROM runs WHERE id=?", (rid,)).fetchone()
+        pos, deadline = res["out_size"], now() + (parse_dur(a.follow) or 0)
+        while row and row["out_path"] and now() < deadline:
+            time.sleep(1)
+            try:
+                with open(row["out_path"], "rb") as f:
+                    f.seek(pos)
+                    data = f.read()
+            except OSError:
+                break
+            if data:
+                pos += len(data)
+                txt = S.strip_ansi(data.decode("utf-8", errors="replace"))
+                print(json.dumps({"run": rid, "out": txt}, ensure_ascii=False) if out.as_json else txt, end="", flush=True)
+
+
 def cmd_tail(c, a, out):
+    if a.run is not None:
+        return cmd_run_tail(c, a, out)
     me = actor_of(a)
     flt = _wait_filters(c, a)
     cursor = a.after if a.after is not None else max(0, A.max_event_id(c) - a.limit)
@@ -994,6 +1108,49 @@ def cmd_mcp(c, a, out):
 
 
 # ---------------------------------------------------------------- parser
+def snapshot_args(s):
+    s.set_defaults(ro=True)
+    s.add_argument("--closed", type=int, default=50, help="how many recently closed tasks to include (default 50)")
+    s.add_argument("--events-after", type=int, help="include events with id > this (0 = the newest ones); omit for none")
+    s.add_argument("--events-limit", type=int, default=200)
+    s.add_argument("--tail", help="RUN_ID:BYTES, the last BYTES of that run's stdout/stderr, ANSI stripped")
+    s.add_argument("--schema", action="store_true", help="print the JSON Schema of the output and exit")
+
+
+def fast_snapshot_args(argv):
+    """`ab snapshot` runs on every UI refresh, and just setting up argparse costs more than the query. This parses
+    `ab [--json] [--as X] [-B X] snapshot [options]` by hand and returns a Namespace; anything unusual (other command, -h,
+    a bad value) returns None so the normal parser handles it and reports the error."""
+    ns = argparse.Namespace(fn=cmd_snapshot, cmd="snapshot", ro=True, json=os.environ.get("AB_JSON") == "1", actor=None, board=None,
+                            closed=50, events_after=None, events_limit=200, tail=None, schema=False)
+    valued = {"--as": "actor", "--board": "board", "-B": "board", "--closed": "closed", "--events-after": "events_after",
+              "--events-limit": "events_limit", "--tail": "tail"}
+    seen, i = False, 0
+    while i < len(argv):
+        t = argv[i]
+        i += 1
+        key, eq, val = t.partition("=") if t.startswith("--") else (t, "", None)
+        if t == "snapshot" and not seen:
+            seen = True
+        elif key == "--json":
+            ns.json = True
+        elif key == "--schema" and seen:
+            ns.schema = True
+        elif key in valued and (key in ("--as", "--board", "-B") or seen):
+            if not eq:
+                if i >= len(argv):
+                    return None
+                val, i = argv[i], i + 1
+            dest = valued[key]
+            try:
+                setattr(ns, dest, int(val) if dest in ("closed", "events_after", "events_limit") else val)
+            except ValueError:
+                return None
+        else:
+            return None
+    return ns if seen else None
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="ab", description="agentboard: a task board for AI agents (no humans in the loop).")
     p.add_argument("--json", action="store_true", default=os.environ.get("AB_JSON") == "1", help="machine-readable output")
@@ -1081,6 +1238,21 @@ def build_parser():
     s.add_argument("--after", dest="after_task", action="append", help="task id (repeatable)")
     s.add_argument("--why")
     s.add_argument("--force", action="store_true")
+
+    s = sub("kill", cmd_kill, "stop one run (the task goes back to the queue, no attempt counted); `cancel` stops the work for good")
+    s.add_argument("run", help="run id (see `ab runner status`)")
+
+    s = sub("decision", cmd_decision, "decision cards (manual tasks waiting for an answer): ls [--owner X] | answer ID TEXT")
+    s.add_argument("action", nargs="?", choices=["ls", "answer"])
+    s.add_argument("id", nargs="?")
+    s.add_argument("text", nargs="?", help="the answer ('-' reads stdin)")
+    s.add_argument("--file", help="read the answer from this file")
+    s.add_argument("--owner", help="only cards labelled owner=NAME")
+    s.add_argument("--limit", "-n", type=int, default=100)
+    s.add_argument("--all-boards", action="store_true")
+
+    s = sub("snapshot", cmd_snapshot, "everything a UI needs in one read-only call (use --json; schema: --schema)")
+    snapshot_args(s)
 
     s = sub("cancel", cmd_cancel, "cancel a task (kills its run if one is active)")
     s.add_argument("id")
@@ -1223,6 +1395,8 @@ def build_parser():
     waitflags(s)
     s.add_argument("--follow", help="keep streaming for this long, e.g. 30m")
     s.add_argument("--limit", "-n", type=int, default=30)
+    s.add_argument("--run", type=int, help="print the output of this run id instead of events (with --bytes)")
+    s.add_argument("--bytes", type=int, default=4000, help="with --run: how much of the end of the output")
 
     s = sub("inbox", cmd_inbox, "messages that mention you or answer your threads/tasks (advances your cursor)")
     s.add_argument("--peek", action="store_true")
@@ -1310,19 +1484,21 @@ def build_parser():
 
 
 def main(argv=None):
-    p = build_parser()
-    a = p.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    a = fast_snapshot_args(argv)
+    if a is None:
+        a = build_parser().parse_args(argv)
     for k in ("actor", "board"):
         if not hasattr(a, k):
             setattr(a, k, None)
     if getattr(a, "who_flag", None):
         a.who = a.who_flag
     out = Out(getattr(a, "json", False))
-    conn = store.connect()
+    conn = (store.connect_ro() if getattr(a, "ro", False) else None) or store.connect()
     try:
         rc = a.fn(conn, a, out)
         return rc or 0
-    except (LookupError, PermissionError, ValueError, KeyError) as e:
+    except (LookupError, PermissionError, ValueError, KeyError, sqlite3.Error) as e:
         msg = str(e).strip("'\"")
         if out.as_json:
             print(json.dumps({"error": msg, "type": type(e).__name__}))

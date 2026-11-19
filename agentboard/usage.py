@@ -1,6 +1,5 @@
 """Usage: harvest every harness's local logs (board runs AND your own sessions share the same quota),
 sum by bucket over windows, and enforce optional soft caps."""
-import glob
 import json
 import os
 import sqlite3
@@ -8,8 +7,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import harness as H
 from . import store
+from ._lazy import Lazy
+
+H = Lazy("harness")
 
 BACKFILL_S = 8 * 86400   # first harvest looks back 8 days (covers weekly windows)
 HOMEP = Path.home()
@@ -43,6 +44,7 @@ def _iso(ts):
 # ---------------------------------------------------------------- per-source harvesters
 def harvest_jsonl(conn, source, pattern, handle_line, cutoff):
     """Incremental reader for append-only JSONL logs. Cursor = byte offset per file."""
+    import glob
     n = 0
     for path in glob.glob(pattern, recursive=True):
         try:
@@ -244,7 +246,7 @@ def window_totals(conn, bucket, window_s):
     return dict(r) | {"runs": runs}
 
 
-_PLAN = {"ts": 0.0, "data": None}
+_PLAN = {"ts": 0.0, "data": None, "fetched": 0.0, "persisted": 0.0}
 PLAN_TTL_S = 120        # re-read the provider's own numbers at most this often
 PLAN_STALE_S = 1800     # a failed read falls back to the last good one for this long, then fails open
 
@@ -265,7 +267,7 @@ def claude_plan_pct():
         j = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
         _PLAN["data"] = {"five_hour": float(j["five_hour"]["utilization"]), "seven_day": float(j["seven_day"]["utilization"]),
                          "five_hour_resets": j["five_hour"].get("resets_at"), "seven_day_resets": j["seven_day"].get("resets_at")}
-        _PLAN["ts"] = now
+        _PLAN["ts"] = _PLAN["fetched"] = now
     except Exception:
         if _PLAN["data"] is not None and now - _PLAN["ts"] > PLAN_STALE_S:
             _PLAN["data"] = None
@@ -274,12 +276,46 @@ def claude_plan_pct():
     return _PLAN["data"]
 
 
+def uses_plan(cap):
+    return any(cap.get(k) is not None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h"))
+
+
+def persist_plan(conn):
+    """Runner side: keep the last good provider reading in `control` so read-only readers (`ab snapshot`) can show it
+    without calling the provider. Raw upsert, no config event (this changes every few minutes)."""
+    if _PLAN["data"] is None or _PLAN["fetched"] <= _PLAN["persisted"]:
+        return
+    conn.execute("INSERT INTO control(key,value) VALUES('_plan',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (json.dumps({"data": _PLAN["data"], "ts": _PLAN["fetched"]}),))
+    _PLAN["persisted"] = _PLAN["fetched"]
+
+
+def refresh_plan(conn):
+    """Runner tick: read the provider's numbers (cached 2 min in-process) when a cap needs them, and persist them."""
+    if any(uses_plan(c) for c in (store.cfg(conn, "caps") or {}).values()):
+        claude_plan_pct()
+        persist_plan(conn)
+
+
+def stored_plan(conn):
+    """-> (plan dict or None, age in seconds) from the last runner reading. Never touches the network."""
+    r = conn.execute("SELECT value FROM control WHERE key='_plan'").fetchone()
+    if not r:
+        return None, None
+    j = json.loads(r["value"])
+    return j.get("data"), max(0.0, time.time() - (j.get("ts") or 0))
+
+
 def plan_status(cap):
     """Reason string if the provider-reported plan usage is at/over the cap's max_5h_pct / max_7d_pct."""
-    if all(cap.get(k) is None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h")):
+    if not uses_plan(cap):
         return None
-    p = claude_plan_pct()
-    if not p:
+    return plan_reason(cap, claude_plan_pct())
+
+
+def plan_reason(cap, p):
+    """plan_status() for an already-read plan dict `p` (no network)."""
+    if not uses_plan(cap) or not p:
         return None
     for k, field, label in (("max_5h_pct", "five_hour", "5h"), ("max_7d_pct", "seven_day", "weekly")):
         if cap.get(k) is not None and p[field] >= float(cap[k]):
@@ -304,12 +340,34 @@ def weekly_pace_pct(cap, p, now=None):
     return max(0.0, min(100.0, 100.0 * elapsed / span))
 
 
-def cap_status(conn, bucket):
+_LIVE = object()   # cap_status(plan=_LIVE): read the provider now (runner); pass a dict/None to stay offline (snapshot)
+
+
+def all_window_totals(conn, now=None):
+    """{bucket: {"5h"|"24h"|"7d": window_totals-shaped dict}} in two queries (for UIs)."""
+    now = now or time.time()
+    wins = (("5h", 5 * 3600), ("24h", 86400), ("7d", 7 * 86400))
+    cols = ", ".join(f"SUM(ts>={now - w}) c{i}, COALESCE(SUM(CASE WHEN ts>={now - w} THEN output END),0) o{i}, "
+                     f"COALESCE(SUM(CASE WHEN ts>={now - w} THEN input+cache_write END),0) f{i}, "
+                     f"COALESCE(SUM(CASE WHEN ts>={now - w} THEN cost_usd END),0) d{i}" for i, (_, w) in enumerate(wins))
+    out = {}
+    for r in conn.execute(f"SELECT bucket, {cols} FROM usage WHERE ts>=? AND bucket IS NOT NULL GROUP BY bucket", (now - 7 * 86400,)):
+        out[r["bucket"]] = {lab: {"calls": r[f"c{i}"] or 0, "output": r[f"o{i}"], "fresh_in": r[f"f{i}"], "cost_usd": r[f"d{i}"], "runs": 0}
+                            for i, (lab, _) in enumerate(wins)}
+    runs_cols = ", ".join(f"SUM(started_at>={now - w}) r{i}" for i, (_, w) in enumerate(wins))
+    for r in conn.execute(f"SELECT bucket, {runs_cols} FROM runs WHERE started_at>=? AND bucket IS NOT NULL GROUP BY bucket", (now - 7 * 86400,)):
+        b = out.setdefault(r["bucket"], {lab: {"calls": 0, "output": 0, "fresh_in": 0, "cost_usd": 0, "runs": 0} for lab, _ in wins})
+        for i, (lab, _) in enumerate(wins):
+            b[lab]["runs"] = r[f"r{i}"] or 0
+    return out
+
+
+def cap_status(conn, bucket, plan=_LIVE):
     """None if the bucket is under its soft cap (or has none), else a reason string."""
     cap = (store.cfg(conn, "caps") or {}).get(bucket)
     if not cap:
         return None
-    r = plan_status(cap)
+    r = plan_status(cap) if plan is _LIVE else plan_reason(cap, plan)
     if r:
         return r
     w = store.parse_dur(cap.get("window") or "5h")

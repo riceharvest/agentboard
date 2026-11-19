@@ -144,6 +144,38 @@ Use `HARNESS@ENDPOINT:MODEL` anywhere a spec goes, e.g. `ab tiers add low "pi@rt
 Endpoint runs use the bucket `ep:NAME`. Auth cooldowns are per harness and endpoint, so a logged-out account
 doesn't block endpoint runs.
 
+## Control verbs for UIs (all take `--json`)
+
+    ab runner pause | resume | drain | reload | stop [--now] | slots N      # settings the runner reads every tick
+    ab boards set NAME --pause | --resume | --max-slots N
+    ab retry ID ; ab cancel ID [why] ; ab defer ID --until +1h|--after ID
+    ab edit ID --priority N --tier T --harness H --model M --dep ID --rm-dep ID
+    ab note ID "text" ; ab done ID "result" --force                   # --force: finish a manual card you don't hold
+    ab decision ls [--owner X] ; ab decision answer ID "text"        # manual cards: records the answer as a note, then closes
+    ab kill RUN_ID        # stop one run; its task goes back to the queue (no attempt counted). `cancel` stops the work for good
+    ab watch enable|disable NAME ; ab sched enable|disable NAME
+
+Exit codes: `0` ok, `1` error (with `--json`, `{"error": "...", "type": "LookupError|PermissionError|ValueError|KeyError"}` on
+stdout), `2` usage error (argparse), `3` nothing to do / timed out (`claim`, `ask`, `wait`). `tiers check` and `endpoints check`
+return `1` when they find problems.
+
+## Snapshot (one call for a UI)
+
+    ab snapshot --json [-B BOARD] [--closed N] [--events-after ID [--events-limit N]] [--tail RUN_ID:BYTES]
+    ab snapshot --schema        # prints the JSON Schema (agentboard/snapshot.schema.json)
+    ab tail --run RUN_ID [--bytes N] [--follow 30s]     # a run's output, ANSI stripped (--json: same object as snapshot's "tail")
+
+One read-only SQLite connection, no network, no harness probes; about 2,000 tasks cost tens of milliseconds. It returns
+`boards` (counts, caps, paused), `tasks` (every open/claimed task plus the last `--closed` closed ones, with deps, labels,
+tier, pin, priority, `state` ready|waiting|stuck|claimed|done|dead|cancelled, `runnable`, workdir, attempts, not_before,
+`result_head`), `runner` (state, pid, slots, setting, paused, draining, stop flag, heartbeat age, `children` with run id, task,
+harness, model, bucket, pid, started_at, timeout_s), `limits`, `caps`, `plan` (`claude_plan_pct`, `weekly_pace_pct`, active
+guard reasons), `usage` per bucket (5h/24h/7d), `watchers`, `schedules` (+ `active_windows`), `tiers` (order, candidates,
+fallback), `events` newer than `--events-after` (oldest first; omit the flag for none, `0` for the newest ones) with
+`events_cursor` to pass next time, and `tail` of one run. `plan` is the runner's last reading of the provider (the snapshot
+never calls it), so it is `null` until a runner with a plan-guard cap has run. A live feed: call once, then repeat with
+`--events-after <events_cursor>`.
+
 ## Quota and usage
 
     ab usage                       # per quota bucket: output tokens and calls over 5h / 24h / 7d, plus limit state

@@ -23,4 +23,4 @@ Homepage = "https://github.com/riceharvest/agentboard"
 packages = ["agentboard"]
 
 [tool.setuptools.package-data]
-agentboard = ["GUIDE.md"]
+agentboard = ["GUIDE.md", "snapshot.schema.json"]

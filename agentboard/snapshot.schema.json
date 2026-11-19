@@ -1,0 +1,249 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/riceharvest/agentboard/agentboard/snapshot.schema.json",
+  "title": "agentboard snapshot",
+  "description": "Output of `ab snapshot --json`: the whole board state a UI needs, from one read-only call. Times are epoch seconds (floats). Unknown extra keys may appear in later versions; clients must ignore them.",
+  "type": "object",
+  "required": ["schema", "generated_at", "board", "actor", "db", "boards", "tasks", "tasks_open", "tasks_closed_shown", "runner",
+               "limits", "caps", "plan", "usage", "watchers", "schedules", "active_windows", "tiers", "events", "events_cursor",
+               "events_truncated", "tail", "took_ms"],
+  "properties": {
+    "schema": {"type": "integer", "const": 1, "description": "bumped on incompatible changes"},
+    "generated_at": {"type": "number"},
+    "board": {"type": ["string", "null"], "description": "the --board filter, null = every board"},
+    "actor": {"type": "string"},
+    "db": {"type": "string"},
+    "boards": {"type": "array", "items": {"$ref": "#/definitions/board"}},
+    "tasks": {"type": "array", "description": "every open/claimed task, then the most recent closed ones (--closed N)",
+              "items": {"$ref": "#/definitions/task"}},
+    "tasks_open": {"type": "integer", "minimum": 0, "description": "open+claimed tasks matching the board filter (before read permission filtering)"},
+    "tasks_closed_shown": {"type": "integer", "minimum": 0},
+    "runner": {"$ref": "#/definitions/runner"},
+    "limits": {"type": "array", "description": "active cooldowns", "items": {"$ref": "#/definitions/limit"}},
+    "caps": {"type": "object", "description": "bucket -> soft cap / plan guard settings", "additionalProperties": {"type": "object"}},
+    "plan": {"$ref": "#/definitions/plan"},
+    "usage": {"type": "array", "items": {"$ref": "#/definitions/bucket"}},
+    "watchers": {"type": "array", "items": {"$ref": "#/definitions/watcher"}},
+    "schedules": {"type": "array", "items": {"$ref": "#/definitions/schedule"}},
+    "active_windows": {"type": "array", "items": {"type": "string"}, "description": "names of schedule windows open right now"},
+    "tiers": {"$ref": "#/definitions/tiers"},
+    "events": {"type": "array", "description": "events with id > --events-after, oldest first (empty when the flag is absent)",
+               "items": {"$ref": "#/definitions/event"}},
+    "events_cursor": {"type": "integer", "minimum": 0, "description": "highest event id at snapshot time: pass it as --events-after next time"},
+    "events_truncated": {"type": "boolean", "description": "more than --events-limit events were newer than the cursor; the oldest were dropped"},
+    "tail": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/tail"}], "description": "set when --tail RUN_ID:BYTES was given"},
+    "took_ms": {"type": "number", "minimum": 0}
+  },
+  "definitions": {
+    "nullable_number": {"type": ["number", "null"]},
+    "nullable_string": {"type": ["string", "null"]},
+    "board": {
+      "type": "object",
+      "required": ["name", "description", "paused", "max_slots", "default_tier", "default_workdir", "counts", "states", "running"],
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "paused": {"type": "boolean"},
+        "max_slots": {"type": ["integer", "null"], "description": "null = no per-board cap"},
+        "default_tier": {"type": ["string", "null"]},
+        "default_workdir": {"type": ["string", "null"]},
+        "counts": {"type": "object", "description": "status -> number of tasks (all of them, not only the ones listed)",
+                   "additionalProperties": {"type": "integer"}},
+        "states": {"type": "object", "description": "ready|waiting|stuck|claimed -> number of open/claimed tasks",
+                   "additionalProperties": {"type": "integer"}},
+        "running": {"type": "integer", "minimum": 0, "description": "live runs on this board"}
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "board", "title", "channel", "status", "state", "runnable", "priority", "tier", "harness", "model", "labels",
+                   "deps", "deps_open", "workdir", "attempts", "max_attempts", "timeout_s", "owner", "lease_until", "not_before",
+                   "run_id", "created_by", "created_at", "updated_at", "result_head"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^t_"},
+        "board": {"type": "string"},
+        "title": {"type": "string"},
+        "channel": {"type": "string"},
+        "status": {"enum": ["open", "claimed", "done", "dead", "cancelled"]},
+        "state": {"enum": ["ready", "waiting", "stuck", "claimed", "done", "dead", "cancelled"],
+                  "description": "open tasks are ready (claimable now), waiting (deps or not_before) or stuck (a dep is dead/cancelled)"},
+        "runnable": {"type": "boolean", "description": "false = manual card: the runner never starts it"},
+        "priority": {"type": "integer"},
+        "tier": {"type": "string"},
+        "harness": {"type": ["string", "null"], "description": "pinned harness, null = routed by tier"},
+        "model": {"type": ["string", "null"]},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "deps": {"type": "array", "items": {"type": "string"}},
+        "deps_open": {"type": "array", "items": {"type": "string"}, "description": "deps that are not done yet"},
+        "workdir": {"type": ["string", "null"]},
+        "attempts": {"type": "integer", "minimum": 0},
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "timeout_s": {"type": ["integer", "number", "null"]},
+        "owner": {"type": ["string", "null"]},
+        "lease_until": {"type": ["number", "null"]},
+        "not_before": {"type": ["number", "null"]},
+        "run_id": {"type": ["integer", "null"]},
+        "created_by": {"type": ["string", "null"]},
+        "created_at": {"type": ["number", "null"]},
+        "updated_at": {"type": ["number", "null"]},
+        "result_head": {"type": ["string", "null"], "description": "first 300 characters of the result"}
+      }
+    },
+    "child": {
+      "type": "object",
+      "required": ["run", "task_id", "harness", "endpoint", "model", "effort", "bucket", "pid", "started_at", "elapsed_s", "timeout_s",
+                   "title", "board", "out_path", "err_path"],
+      "properties": {
+        "run": {"type": "integer"},
+        "task_id": {"type": "string"},
+        "harness": {"type": "string"},
+        "endpoint": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "effort": {"type": ["string", "null"]},
+        "bucket": {"type": ["string", "null"]},
+        "pid": {"type": ["integer", "null"]},
+        "started_at": {"type": "number"},
+        "elapsed_s": {"type": "number"},
+        "timeout_s": {"type": ["number", "null"]},
+        "title": {"type": ["string", "null"]},
+        "board": {"type": ["string", "null"]},
+        "out_path": {"type": ["string", "null"]},
+        "err_path": {"type": ["string", "null"]}
+      }
+    },
+    "runner": {
+      "type": "object",
+      "required": ["running", "pid", "state", "active", "slots", "slots_setting", "slots_effective", "paused", "draining", "stop",
+                   "heartbeat", "heartbeat_age_s", "note", "free_gib", "min_free_gib", "ready", "windowed", "children"],
+      "properties": {
+        "running": {"type": "boolean", "description": "a live process with a fresh heartbeat"},
+        "pid": {"type": ["integer", "null"]},
+        "host": {"type": ["string", "null"]},
+        "started_at": {"type": ["number", "null"]},
+        "state": {"type": ["string", "null"], "description": "running|paused|draining|stopping|stopped"},
+        "active": {"type": "integer", "minimum": 0},
+        "slots": {"type": ["integer", "null"], "description": "slots the runner last reported using"},
+        "slots_setting": {"type": "integer"},
+        "slots_effective": {"type": "integer", "description": "the setting, or the slots of an open schedule window"},
+        "paused": {"type": "boolean"},
+        "draining": {"type": "boolean"},
+        "stop": {"enum": ["", "graceful", "now", "reload"], "description": "a pending stop/reload request"},
+        "heartbeat": {"type": ["number", "null"]},
+        "heartbeat_age_s": {"type": ["number", "null"]},
+        "note": {"type": ["string", "null"]},
+        "free_gib": {"type": "number"},
+        "min_free_gib": {"type": "number"},
+        "ready": {"type": "integer", "minimum": 0, "description": "ready, runnable tasks on boards that are not paused"},
+        "windowed": {"type": "boolean", "description": "slots come from an open schedule window"},
+        "children": {"type": "array", "items": {"$ref": "#/definitions/child"}}
+      }
+    },
+    "limit": {
+      "type": "object",
+      "required": ["scope", "kind", "until", "remaining_s"],
+      "properties": {
+        "scope": {"type": "string", "description": "bucket:NAME or harness:NAME"},
+        "kind": {"type": ["string", "null"]},
+        "until": {"type": "number"},
+        "reason": {"type": ["string", "null"]},
+        "set_at": {"type": ["number", "null"]},
+        "remaining_s": {"type": "number", "minimum": 0}
+      }
+    },
+    "plan": {
+      "type": "object",
+      "required": ["claude_plan_pct", "weekly_pace_pct", "guards"],
+      "properties": {
+        "claude_plan_pct": {
+          "description": "the provider's own utilisation as last read by the runner (never fetched by snapshot); null if never read",
+          "oneOf": [{"type": "null"}, {
+            "type": "object",
+            "required": ["five_hour", "seven_day", "age_s", "stale"],
+            "properties": {
+              "five_hour": {"type": "number"}, "seven_day": {"type": "number"},
+              "five_hour_resets": {"type": ["string", "null"]}, "seven_day_resets": {"type": ["string", "null"]},
+              "age_s": {"type": "number", "minimum": 0},
+              "stale": {"type": "boolean", "description": "older than 30 min: the guard ignores it"}
+            }}]
+        },
+        "weekly_pace_pct": {"type": ["number", "null"], "description": "weekly percent allowed by now under pace_7d_lead_h, null if not configured"},
+        "guards": {"type": "array", "description": "plan guards that are blocking a bucket right now",
+                   "items": {"type": "object", "required": ["bucket", "reason"],
+                             "properties": {"bucket": {"type": "string"}, "reason": {"type": "string"}}}}
+      }
+    },
+    "window_totals": {
+      "type": "object",
+      "required": ["calls", "output", "fresh_in", "cost_usd", "runs"],
+      "properties": {"calls": {"type": "integer"}, "output": {"type": "integer"}, "fresh_in": {"type": "integer"},
+                     "cost_usd": {"type": "number"}, "runs": {"type": "integer"}}
+    },
+    "bucket": {
+      "type": "object",
+      "required": ["bucket", "5h", "24h", "7d", "limit", "cap", "cap_hit"],
+      "properties": {
+        "bucket": {"type": "string"},
+        "5h": {"$ref": "#/definitions/window_totals"},
+        "24h": {"$ref": "#/definitions/window_totals"},
+        "7d": {"$ref": "#/definitions/window_totals"},
+        "limit": {"oneOf": [{"type": "null"}, {"type": "object", "required": ["kind", "until"],
+                                               "properties": {"kind": {"type": ["string", "null"]}, "until": {"type": "number"},
+                                                              "reason": {"type": ["string", "null"]}}}]},
+        "cap": {"type": ["object", "null"]},
+        "cap_hit": {"type": ["string", "null"], "description": "why the bucket is held back by its soft cap or plan guard, if it is"}
+      }
+    },
+    "watcher": {
+      "type": "object",
+      "required": ["id", "board", "name", "enabled", "kinds", "all_boards", "fired", "last_fired", "cooldown", "tier", "spec", "action"],
+      "properties": {
+        "id": {"type": "integer"}, "board": {"type": "string"}, "name": {"type": "string"}, "enabled": {"type": "boolean"},
+        "kinds": {"type": "array", "items": {"type": "string"}}, "all_boards": {"type": "boolean"},
+        "fired": {"type": ["integer", "null"]}, "last_fired": {"type": ["number", "null"]},
+        "cooldown": {"type": ["string", "null"]}, "tier": {"type": ["string", "null"]},
+        "spec": {"type": "object"}, "action": {"type": "object"}
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "required": ["name", "kind", "spec", "action", "enabled", "last_fired", "active_now"],
+      "properties": {
+        "name": {"type": "string"}, "kind": {"enum": ["window", "at", "daily"]}, "spec": {"type": "object"}, "action": {"type": "object"},
+        "enabled": {"type": "boolean"}, "last_fired": {"type": ["number", "null"]},
+        "active_now": {"type": "boolean", "description": "window schedules only: open right now"}
+      }
+    },
+    "tiers": {
+      "type": "object",
+      "required": ["order", "tiers", "fallback", "default"],
+      "properties": {
+        "order": {"type": "array", "items": {"type": "string"}, "description": "weakest to strongest"},
+        "tiers": {"type": "object", "description": "tier -> ordered candidate specs (harness:model@effort)",
+                  "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+        "fallback": {"enum": ["none", "up", "down", "any"]},
+        "default": {"type": "string"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["id", "ts", "board", "channel", "task_id", "actor", "kind", "payload"],
+      "properties": {
+        "id": {"type": "integer"}, "ts": {"type": "number"}, "board": {"type": ["string", "null"]},
+        "channel": {"type": ["string", "null"]}, "task_id": {"type": ["string", "null"]}, "actor": {"type": ["string", "null"]},
+        "kind": {"type": "string"}, "payload": {}
+      }
+    },
+    "tail": {
+      "type": "object",
+      "required": ["run", "bytes", "error"],
+      "properties": {
+        "run": {"type": "integer"}, "task_id": {"type": ["string", "null"]}, "harness": {"type": ["string", "null"]},
+        "running": {"type": "boolean"}, "bytes": {"type": "integer"},
+        "out": {"type": "string", "description": "the last `bytes` bytes of stdout, ANSI escapes removed"},
+        "out_size": {"type": "integer"}, "out_truncated": {"type": "boolean"},
+        "err": {"type": "string"}, "err_size": {"type": "integer"}, "err_truncated": {"type": "boolean"},
+        "error": {"type": ["string", "null"], "description": "e.g. no such run; the rest of the snapshot is still valid"}
+      }
+    }
+  }
+}

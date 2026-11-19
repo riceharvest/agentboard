@@ -3,7 +3,6 @@ import fnmatch
 import json
 import os
 import re
-import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -98,6 +97,7 @@ DEFAULTS = {
     "bucket_map": {},           # "harness/model-glob" -> bucket, overrides the built-in mapping
     "extra_args": {},           # harness -> [args] appended to every launch
     "endpoints": {},            # name -> {"base_url", "api_key_env", "context", "bucket"}: OpenAI-compatible servers
+    "kill_runs": [],            # run ids `ab kill` asked the runner to stop (the runner clears them)
 }
 
 PERMS = ("read", "post", "create", "claim", "manage", "admin")
@@ -123,6 +123,29 @@ def connect(path=None):
     return conn
 
 
+def connect_ro(path=None):
+    """Read-only connection for UIs (`ab snapshot`): no schema script, no migration, no writes.
+    None when the db is missing or still needs a migration (the caller falls back to connect())."""
+    p = Path(path or DB_PATH)
+    if not p.exists():
+        return None
+    try:
+        # (Path.as_uri() costs ~40 ms: escape by hand what a SQLite URI needs escaped)
+        path = os.path.abspath(p).replace("%", "%25").replace("?", "%3f").replace("#", "%23")
+        conn = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        ok = ("board" in _cols(conn, "tasks") and {"board", "channel"} <= _cols(conn, "events")
+              and "endpoint" in _cols(conn, "runs")
+              and conn.execute("SELECT 1 FROM control WHERE key='_schema'").fetchone() is not None)
+    except sqlite3.Error:
+        return None
+    if not ok:
+        conn.close()
+        return None
+    return conn
+
+
 def _cols(conn, table):
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -139,6 +162,7 @@ def migrate(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN endpoint TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
     if conn.execute("SELECT value FROM control WHERE key='_schema'").fetchone() is not None:
         return
     conn.execute("BEGIN IMMEDIATE")
@@ -366,12 +390,16 @@ def _who_rank(who):
     return 1 if any(ch in who for ch in "*?[") else 2
 
 
-def explain(conn, actor, perm, board, channel=None):
-    """-> (allowed, deciding grants). Most specific channel scope wins, then board-specific, then exact actor."""
+def explain(conn, actor, perm, board, channel=None, grants=None):
+    """-> (allowed, deciding grants). Most specific channel scope wins, then board-specific, then exact actor.
+    `grants` = the whole grants table, pre-loaded by callers that check many tasks (snapshot)."""
     if is_system(actor):
         return True, []
     best, chosen = None, []
-    for g in conn.execute("SELECT * FROM grants WHERE board IN (?, '*')", (board,)).fetchall():
+    rows = grants if grants is not None else conn.execute("SELECT * FROM grants WHERE board IN (?, '*')", (board,)).fetchall()
+    for g in rows:
+        if g["board"] not in (board, "*"):
+            continue
         if not fnmatch.fnmatchcase(actor, g["who"]):
             continue
         scope = (g["channel"] or "*").strip()
@@ -413,7 +441,7 @@ def _task_actor_ok(conn, row, actor, perm="manage"):
 # ---------------------------------------------------------------- tasks
 def new_id(conn):
     while True:
-        tid = "t_" + secrets.token_hex(4)
+        tid = "t_" + os.urandom(4).hex()
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
             return tid
 
@@ -707,13 +735,34 @@ def _report_back(conn, row, actor, text):
         pass
 
 
+def _complete(conn, row, actor, result, data=None):
+    conn.execute("UPDATE tasks SET status='done', result=?, data=COALESCE(?,data), owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+                 (result, json.dumps(data) if data is not None else None, now(), row["id"]))
+    event(conn, row["id"], actor, "done", {"result": (result or "")[:500]})
+    _report_back(conn, row, actor, result or "done")
+
+
 def complete(conn, tid, actor, result="", data=None, force=False):
     with tx(conn):
         row = _owned(conn, tid, actor, force)
-        conn.execute("UPDATE tasks SET status='done', result=?, data=COALESCE(?,data), owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
-                     (result, json.dumps(data) if data is not None else None, now(), row["id"]))
-        event(conn, row["id"], actor, "done", {"result": (result or "")[:500]})
-        _report_back(conn, row, actor, result or "done")
+        _complete(conn, row, actor, result, data)
+    return row["id"]
+
+
+def answer(conn, tid, actor, text):
+    """A decision card (manual: the runner never starts it) gets its answer: a note in its thread, then done.
+    Refuses cards that are not manual, are already closed, or are held by a run."""
+    with tx(conn):
+        row = must_task(conn, tid)
+        _task_actor_ok(conn, row, actor)
+        if row["runnable"]:
+            raise ValueError(f"task {row['id']} is not a manual card (the runner works it); use `ab done --force` if you really mean it")
+        if row["status"] not in ("open", "claimed"):
+            raise ValueError(f"task {row['id']} is already {row['status']}")
+        if row["run_id"] and conn.execute("SELECT 1 FROM runs WHERE id=? AND ended_at IS NULL", (row["run_id"],)).fetchone():
+            raise PermissionError(f"task {row['id']} is held by a live run")
+        post_message(conn, actor, text, thread=row["id"], check=False, _in_tx=True, data={"answer": True})
+        _complete(conn, row, actor, text, {"answered_by": actor})
     return row["id"]
 
 
@@ -814,6 +863,8 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
                     cur[k] = v
             conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(cur), row["id"]))
         for d in add_deps:
+            if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
+                raise ValueError(f"dependency {d} does not exist")
             if would_cycle(conn, row["id"], d):
                 raise ValueError(f"{d} would create a dependency cycle")
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (row["id"], d))

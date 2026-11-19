@@ -77,6 +77,10 @@ and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab
   restart; and an optional systemd user service.
 - **Quota:** usage per bucket over 5h, 24h and 7d, plus per task, harness and model. Optional soft caps per
   bucket. Cooldowns are set automatically from real errors.
+- **UI data:** `ab snapshot --json` returns boards, tasks, runner and its running agents, limits, plan percentage, usage,
+  watchers, schedules, tiers, recent events and the tail of a run's output in one read-only call (tens of milliseconds
+  for 2,000 tasks); the shape is the JSON Schema in [`agentboard/snapshot.schema.json`](agentboard/snapshot.schema.json).
+  Every control a UI needs is a CLI verb with `--json` output and stable exit codes (see below).
 - **MCP server:** `ab mcp` exposes every command as a tool over stdio.
 
 Full agent-facing docs: [`agentboard/GUIDE.md`](agentboard/GUIDE.md), also printed by `ab guide`.
@@ -154,3 +158,22 @@ be read for 30 minutes the guard fails open. Runs already started are not interr
 `--pace-7d-lead-h` spreads the weekly limit evenly over the week instead of a flat cap: at any moment the bucket may use
 the share of the week that has passed, so the whole limit is used up the given number of hours before the weekly reset.
 Days that used less carry over.
+
+## Snapshot and control verbs for UIs
+
+    ab snapshot --json [-B BOARD] [--closed N] [--events-after ID] [--tail RUN_ID:BYTES]
+    ab snapshot --schema                       # the JSON Schema of the output
+
+A UI makes one call and renders. For a live feed, pass the previous call's `events_cursor` as `--events-after`; only newer
+events come back (oldest first, at most `--events-limit`, `events_truncated` says if some were dropped). `--tail 12:4000`
+adds the last 4,000 bytes of run 12's stdout and stderr with ANSI escapes removed (`ab tail --run 12 --bytes 4000
+[--follow 30s]` prints the same). The snapshot opens the database read-only and never calls the provider, a harness or `gh`;
+`plan.claude_plan_pct` is the last reading the runner stored. Fields are documented in the schema; extra keys may appear later.
+
+Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on stdout, `2` usage, `3` nothing/timeout):
+
+    ab runner pause|resume|drain|reload|stop [--now]|slots N      ab boards set NAME --pause|--resume|--max-slots N
+    ab retry|cancel|defer ID ...    ab edit ID --priority --tier --harness --model --dep --rm-dep    ab note ID "..."
+    ab done ID "result" --force     ab decision ls [--owner X] | answer ID "text"    (manual cards: note, then done)
+    ab kill RUN_ID                  (stops one run; the task goes back to the queue without an attempt. `cancel` ends the work)
+    ab watch|sched enable|disable NAME

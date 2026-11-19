@@ -1,20 +1,19 @@
 """The runner: the only thing that starts agents. Plain subprocesses, no admission layer.
 Every setting is read from the board each tick, so agents steer it with `ab runner ...` / `ab config set ...` / `ab sched ...`."""
-import fcntl
 import json
 import os
-import signal
-import socket
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import automation
-from . import harness as H
-from . import store, usage
+from . import store
+from ._lazy import Lazy
 from .store import cfg, event, now, parse_dur, tx
+
+automation, H, usage = Lazy("automation"), Lazy("harness"), Lazy("usage")
+# stdlib modules only the runner process itself needs: not worth their import time for `ab snapshot`
+fcntl, signal, socket, subprocess = (Lazy(n, absolute=True) for n in ("fcntl", "signal", "socket", "subprocess"))
 
 PKG_ROOT = Path(__file__).resolve().parent.parent     # dir that contains the agentboard package
 
@@ -104,14 +103,16 @@ def alive(pid, start):
 
 def runner_status(conn):
     r = conn.execute("SELECT * FROM runner WHERE id=1").fetchone()
-    if not r:
-        return {"running": False}
-    d = dict(r)
-    poll = float(cfg(conn, "poll_s") or 5)
-    d["running"] = bool(d["pid"] and alive(d["pid"], None) and d["heartbeat"] and now() - d["heartbeat"] < poll * 3 + 30)
+    d = dict(r) if r else {"running": False}
+    if r:
+        poll = float(cfg(conn, "poll_s") or 5)
+        d["running"] = bool(d["pid"] and alive(d["pid"], None) and d["heartbeat"] and now() - d["heartbeat"] < poll * 3 + 30)
     d["children"] = [dict(x) for x in conn.execute(
-        "SELECT r.id run, r.task_id, r.harness, r.model, r.bucket, r.pid, r.started_at, t.title FROM runs r "
-        "LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
+        "SELECT r.id run, r.task_id, r.harness, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
+        "t.title, t.board, t.timeout_s FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
+    default_to = parse_dur(cfg(conn, "timeout"))
+    for ch in d["children"]:
+        ch["timeout_s"] = ch["timeout_s"] or default_to
     return d
 
 
@@ -359,6 +360,10 @@ class Runner:
             self.last_harvest = now()
             usage.harvest(c)
         try:
+            usage.refresh_plan(c)
+        except Exception as e:
+            self.log(f"plan refresh error: {e!r}")
+        try:
             for name, tid, n in automation.run_watchers(c):
                 self.log(f"watcher {name} fired on {n} event(s) -> {tid}")
         except Exception as e:
@@ -529,8 +534,25 @@ class Runner:
             except (ProcessLookupError, PermissionError):
                 pass
 
+    def take_kill_requests(self):
+        """`ab kill RUN` leaves run ids in the `kill_runs` setting; stop those runs and drop the handled ids."""
+        ids = cfg(self.conn, "kill_runs") or []
+        if not ids:
+            return set()
+        mine = {int(i) for i in ids} & set(self.children)
+        with tx(self.conn):
+            rest = [i for i in (cfg(self.conn, "kill_runs") or []) if int(i) not in mine and int(i) in self.children]
+            self.conn.execute("INSERT INTO control(key,value) VALUES('kill_runs',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                              (json.dumps(rest),))
+        return mine
+
     def poll_children(self):
         c = self.conn
+        killed = self.take_kill_requests()
+        for rid in killed:
+            ch = self.children[rid]
+            self.log(f"run {rid} ({ch.task_id}): kill requested")
+            self.kill(ch, "killed")
         for rid, ch in list(self.children.items()):
             if ch.proc is not None:
                 rc = ch.proc.poll()
@@ -582,10 +604,10 @@ class Runner:
                     c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                     event(c, ch.task_id, "runner", "rerouted", {"run": ch.run_id, "kind": kind, "scope": scope, "until": until})
                 outcome = kind
-            elif ch.kill_reason in ("stopped", "cancelled"):
+            elif ch.kill_reason in ("stopped", "cancelled", "killed"):
                 if mine:
                     c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
-                    event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "runner stopped"})
+                    event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "run killed" if ch.kill_reason == "killed" else "runner stopped"})
                 outcome = ch.kill_reason
             elif mine:
                 if res.ok:

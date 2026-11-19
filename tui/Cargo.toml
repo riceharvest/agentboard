@@ -20,6 +20,8 @@ toml = "0.9"
 libc = "0.2"
 unicode-width = "0.2"
 
+[workspace]
+
 [profile.release]
 opt-level = 2
 lto = "thin"

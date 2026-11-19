@@ -221,6 +221,23 @@ fn every_control_works_against_a_throwaway_board() {
     e.code(KeyCode::Esc);
     assert!(!e.snap().runner.draining);
 
+    // pacer (P) and auto_worktree (w) toggles via `ab config set`
+    assert_eq!(e.snap().runner.pacer, Some(true));
+    e.key('P');
+    e.finish();
+    assert_eq!(e.snap().runner.pacer, Some(false));
+    e.key('P');
+    e.finish();
+    assert_eq!(e.snap().runner.pacer, Some(true));
+
+    assert_eq!(e.snap().runner.auto_worktree, Some(true));
+    e.key('w');
+    e.finish();
+    assert_eq!(e.snap().runner.auto_worktree, Some(false));
+    e.key('w');
+    e.finish();
+    assert_eq!(e.snap().runner.auto_worktree, Some(true));
+
     // board pause / resume (Ops > Boards)
     e.app.sel.ops = 1;
     e.app.sel.ops_idx[1] = e.snap().boards.iter().position(|b| b.name == "web").unwrap();

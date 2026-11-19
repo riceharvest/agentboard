@@ -94,7 +94,8 @@
         "created_by": {"type": ["string", "null"]},
         "created_at": {"type": ["number", "null"]},
         "updated_at": {"type": ["number", "null"]},
-        "result_head": {"type": ["string", "null"], "description": "first 300 characters of the result"}
+        "result_head": {"type": ["string", "null"], "description": "first 300 characters of the result"},
+        "wait_reason": {"type": ["string", "null"], "description": "why a ready task is waiting before launch, e.g. workdir busy (auto worktree off)"}
       }
     },
     "child": {
@@ -144,6 +145,8 @@
         "ready": {"type": "integer", "minimum": 0, "description": "ready, runnable tasks on boards that are not paused"},
         "launch_per_tick": {"type": "integer", "minimum": 0, "description": "max new runs started per runner tick overall"},
         "pace_interval": {"type": "string", "description": "interval for per-bucket launch budgets"},
+        "pacer": {"type": "boolean", "description": "per-bucket launch budgets enabled"},
+        "auto_worktree": {"type": "boolean", "description": "auto-create per-task git worktree when a git workdir is busy"},
         "windowed": {"type": "boolean", "description": "slots come from an open schedule window"},
         "children": {"type": "array", "items": {"$ref": "#/definitions/child"}}
       }

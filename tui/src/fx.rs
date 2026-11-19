@@ -11,6 +11,7 @@ pub struct Fx {
     mgr: EffectManager<String>,
     pub enabled: bool,
     pulse_area: Option<Rect>,
+    dead_glitches: Vec<String>,
 }
 
 fn ms(n: u32, i: Interpolation) -> EffectTimer {
@@ -19,7 +20,11 @@ fn ms(n: u32, i: Interpolation) -> EffectTimer {
 
 impl Fx {
     pub fn new(enabled: bool) -> Fx {
-        Fx { mgr: EffectManager::default(), enabled, pulse_area: None }
+        Fx { mgr: EffectManager::default(), enabled, pulse_area: None, dead_glitches: vec![] }
+    }
+
+    pub fn dead_glitches(&self) -> &[String] {
+        &self.dead_glitches
     }
 
     pub fn running(&self) -> bool {
@@ -60,6 +65,9 @@ impl Fx {
 
     /// A card died: red flash while the text coalesces back out of noise.
     pub fn glitch_dead(&mut self, id: &str, area: Rect) {
+        if self.enabled {
+            self.dead_glitches.push(id.to_string());
+        }
         let e = fx::parallel(&[
             fx::fade_from(Color::Rgb(255, 70, 70), Color::Rgb(100, 12, 12), ms(1100, Interpolation::QuadOut)),
             fx::coalesce(ms(700, Interpolation::QuadOut)),

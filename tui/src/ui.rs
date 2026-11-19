@@ -234,7 +234,7 @@ fn hints(app: &App) -> &'static str {
         Screen::Decisions => "↑↓ select · a answer · Enter open · n note · m all manual cards · ? help",
         Screen::Usage => "↑↓ scroll · b board · ? help",
         Screen::Feed => "↑↓ select · Enter open card · / filter · ? help",
-        Screen::Ops => "←→ section · ↑↓ select · Enter toggle · p pause/resume · d drain · R reload · S stop · g start · +/- slots · J/K reorder tiers",
+        Screen::Ops => "←→ section · ↑↓ select · Enter toggle · p pause/resume · d drain · R reload · S stop · g start · +/- slots · P pacer · w worktree · J/K tiers",
         Screen::Panels => "panels come from tui.toml in the board home · ? help",
     }
 }
@@ -265,15 +265,27 @@ fn footer(app: &App, f: &mut Frame, area: Rect) {
 fn task_line(t: &Task, w: usize, selected: bool, focused: bool) -> Line<'static> {
     let kc = theme::kind_color(t.kind());
     let id: String = t.id.chars().skip(2).take(4).collect();
-    let used = 1 + 4 + 1 + 1 + 1;
-    let mut spans = vec![
-        sp("▌", fg(kc)),
-        sp(id, dim()),
-        sp(" ", base()),
-        sp(theme::tier_tag(&t.tier), fg(theme::tier_color(&t.tier)).add_modifier(Modifier::BOLD)),
-        sp(" ", base()),
-        sp(pad(&t.title, w.saturating_sub(used)), if t.kind().is_empty() { base() } else { fg(kc) }),
-    ];
+    let mut spans = if t.is_negative() {
+        let used = 1 + 4 + 1 + 3 + 1;
+        vec![
+            sp("▌", dim()),
+            sp(id, dim()),
+            sp(" ", base()),
+            sp("NEG", dim().add_modifier(Modifier::BOLD)),
+            sp(" ", base()),
+            sp(pad(&t.title, w.saturating_sub(used)), dim()),
+        ]
+    } else {
+        let used = 1 + 4 + 1 + 1 + 1;
+        vec![
+            sp("▌", fg(kc)),
+            sp(id, dim()),
+            sp(" ", base()),
+            sp(theme::tier_tag(&t.tier), fg(theme::tier_color(&t.tier)).add_modifier(Modifier::BOLD)),
+            sp(" ", base()),
+            sp(pad(&t.title, w.saturating_sub(used)), if t.kind().is_empty() { base() } else { fg(kc) }),
+        ]
+    };
     if selected {
         let bg = if focused { theme::SEL_BG } else { Color::Rgb(30, 38, 56) };
         for s in spans.iter_mut() {
@@ -287,6 +299,11 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
     if t.state == "stuck" {
         return Some("  ✖ a dependency is dead".into());
     }
+    if t.state == "ready" {
+        if let Some(why) = t.wait_reason.as_deref().filter(|s| !s.is_empty()) {
+            return Some(format!("  ↳ {why}"));
+        }
+    }
     if t.state == "waiting" {
         if !t.deps_open.is_empty() {
             return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| d.chars().skip(2).take(4).collect::<String>()).collect::<Vec<_>>().join(", ")));
@@ -299,6 +316,9 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
         if let Some(c) = app.snap.runner.children.iter().find(|c| c.task_id == t.id) {
             return Some(format!("  ▶ {}:{} {}", c.harness, c.model.clone().unwrap_or_default(), fmt_dur(c.elapsed_s + app.age())));
         }
+    }
+    if t.is_negative() {
+        return Some("  – negative outcome".into());
     }
     if t.state == "dead" && t.attempts > 0 {
         return Some(format!("  ✖ after {} attempt(s)", t.attempts));
@@ -321,7 +341,10 @@ fn board(app: &mut App, f: &mut Frame, area: Rect) {
         }
         s1.push(sp(format!(" run {}/{}", b.running, b.max_slots.map(|m| m.to_string()).unwrap_or_else(|| "∞".into())), base()));
         let c = |k: &str| b.counts.get(k).copied().unwrap_or(0);
-        s1.push(sp(format!(" · open {} done {} dead {}", c("open") + c("claimed"), c("done"), c("dead")), dim()));
+        let neg = snap.tasks.iter().filter(|t| t.board == b.name && t.is_negative()).count() as i64;
+        let dead_err = (c("dead") - neg).max(0);
+        let neg_txt = if neg > 0 { format!(" neg {neg}") } else { String::new() };
+        s1.push(sp(format!(" · open {} done {} dead {dead_err}{neg_txt}", c("open") + c("claimed"), c("done")), dim()));
         if let Some(t) = &b.default_tier {
             s1.push(sp(format!(" · tier {t}"), dim()));
         }
@@ -354,7 +377,15 @@ fn board(app: &mut App, f: &mut Frame, area: Rect) {
         let li = first + ci;
         let tasks = &lanes[li];
         let focused = li == app.sel.lane && app.screen == Screen::Board;
-        let count = if li == 1 { format!("{}/{}", tasks.len(), app.snap.runner.slots_effective) } else { tasks.len().to_string() };
+        let count = if li == 1 {
+            format!("{}/{}", tasks.len(), app.snap.runner.slots_effective)
+        } else if li == 5 {
+            let neg = tasks.iter().filter(|t| t.is_negative()).count();
+            let err = tasks.len() - neg;
+            if neg > 0 { format!("{err} (+{neg} neg)") } else { err.to_string() }
+        } else {
+            tasks.len().to_string()
+        };
         let blk = block(&format!("{} {}", LANES[li], count), focused);
         let inner = blk.inner(*col);
         f.render_widget(blk, *col);
@@ -383,11 +414,15 @@ fn board(app: &mut App, f: &mut Frame, area: Rect) {
             y += 1;
             if let Some(extra) = second_line(app, t) {
                 if y < inner.bottom() {
-                    let dead = t.state == "dead" || t.state == "stuck";
-                    f.render_widget(
-                        Paragraph::new(sp(trunc(&extra, w), if dead { fg(theme::BAD) } else { dim() })),
-                        Rect { x: inner.x, y, width: inner.width, height: 1 },
-                    );
+                    let dead = (t.state == "dead" && !t.is_negative()) || t.state == "stuck";
+                    let st = if dead {
+                        fg(theme::BAD)
+                    } else if t.state == "ready" && t.wait_reason.as_deref().is_some_and(|s| !s.is_empty()) {
+                        fg(theme::WARN)
+                    } else {
+                        dim()
+                    };
+                    f.render_widget(Paragraph::new(sp(trunc(&extra, w), st)), Rect { x: inner.x, y, width: inner.width, height: 1 });
                     y += 1;
                 }
             }
@@ -512,8 +547,13 @@ fn card(app: &mut App, f: &mut Frame, area: Rect) {
     lines.push(Line::from(sp(title, bold())));
     if let Some(t) = &t {
         let kc = theme::kind_color(t.kind());
+        let state_span = if t.is_negative() {
+            sp("NEG", dim().add_modifier(Modifier::BOLD))
+        } else {
+            sp(t.state.clone(), fg(state_color(&t.state)).add_modifier(Modifier::BOLD))
+        };
         let mut m = vec![
-            sp(t.state.clone(), fg(state_color(&t.state)).add_modifier(Modifier::BOLD)),
+            state_span,
             sp(format!(" · {} · prio {} · ", t.board, t.priority), dim()),
             sp(format!("tier {}", t.tier), fg(theme::tier_color(&t.tier))),
             sp(format!(" · attempts {}/{}", t.attempts, t.max_attempts), dim()),
@@ -524,12 +564,43 @@ fn card(app: &mut App, f: &mut Frame, area: Rect) {
         lines.push(Line::from(m));
         let mut l = vec![];
         for (k, v) in &t.labels {
+            if matches!(k.as_str(), "worktree_branch" | "worktree_dir" | "worktree") {
+                continue;
+            }
             l.push(sp(format!("{k}={v} "), if k == "type" { fg(kc) } else { dim() }));
         }
         if let Some(w) = &t.workdir {
             l.push(sp(format!(" ⌂ {w}"), dim()));
         }
-        lines.push(Line::from(l));
+        if !l.is_empty() {
+            lines.push(Line::from(l));
+        }
+        let wt_branch = t.labels.get("worktree_branch").map(String::as_str);
+        let wt_dir = t.labels.get("worktree_dir").map(String::as_str);
+        let wt_flag = t.labels.get("worktree").map(String::as_str);
+        if wt_branch.is_some() || wt_dir.is_some() || wt_flag.is_some() {
+            let mut wt = vec![sp("worktree ", dim())];
+            if let Some(b) = wt_branch {
+                wt.push(sp(b.to_string(), fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
+                if wt_dir.is_some() || wt_flag.is_some() {
+                    wt.push(sp(" · ", dim()));
+                }
+            }
+            if let Some(d) = wt_dir {
+                wt.push(sp(d.to_string(), dim()));
+                if wt_flag.is_some() {
+                    wt.push(sp(" · ", dim()));
+                }
+            }
+            if let Some(fl) = wt_flag {
+                let st = if fl.eq_ignore_ascii_case("off") { fg(theme::WARN) } else { dim() };
+                wt.push(sp(format!("worktree={fl}"), st));
+            }
+            lines.push(Line::from(wt));
+        }
+        if let Some(why) = t.wait_reason.as_deref().filter(|s| !s.is_empty()) {
+            lines.push(Line::from(vec![sp("wait ", fg(theme::WARN).add_modifier(Modifier::BOLD)), sp(why.to_string(), fg(theme::WARN))]));
+        }
     }
     lines.push(Line::from(""));
     match &detail {
@@ -603,12 +674,20 @@ fn card(app: &mut App, f: &mut Frame, area: Rect) {
     }
     for (i, d) in deps.iter().enumerate() {
         let dt = app.task(d);
+        let is_neg = dt.is_some_and(Task::is_negative);
         let (st, title) = dt.map(|x| (x.state.clone(), x.title.clone())).unwrap_or(("done?".into(), "(closed, not listed)".into()));
         let open = t.as_ref().is_some_and(|t| t.deps_open.contains(d));
+        let (badge, col) = if !open {
+            ("done".into(), theme::GOOD)
+        } else if is_neg {
+            ("NEG".into(), theme::DIM)
+        } else {
+            (st.clone(), state_color(&st))
+        };
         lines.push(Line::from(vec![
             sp(if i + 1 == deps.len() { " └ " } else { " ├ " }, dim()),
             sp(format!("{} ", d.chars().take(8).collect::<String>()), dim()),
-            sp(format!("[{}] ", if open { st.clone() } else { "done".into() }), fg(if open { state_color(&st) } else { theme::GOOD })),
+            sp(format!("[{badge}] "), fg(col)),
             sp(trunc(&title, (inner.width as usize).saturating_sub(24)), base()),
         ]));
     }
@@ -619,10 +698,11 @@ fn card(app: &mut App, f: &mut Frame, area: Rect) {
         lines.push(Line::from(sp("  nothing waits on this card", dim())));
     }
     for (i, b) in blocks.iter().enumerate() {
+        let (badge, col) = if b.is_negative() { ("NEG", theme::DIM) } else { (b.state.as_str(), state_color(&b.state)) };
         lines.push(Line::from(vec![
             sp(if i + 1 == blocks.len() { " └ " } else { " ├ " }, dim()),
             sp(format!("{} ", b.id.chars().take(8).collect::<String>()), dim()),
-            sp(format!("[{}] ", b.state), fg(state_color(&b.state))),
+            sp(format!("[{badge}] "), fg(col)),
             sp(trunc(&b.title, (inner.width as usize).saturating_sub(24)), base()),
         ]));
     }
@@ -707,19 +787,38 @@ fn usage(app: &mut App, f: &mut Frame, area: Rect) {
         if y + per > inner.bottom() {
             break;
         }
-        let state = match (&b.limit, &b.cap_hit) {
-            (Some(l), _) => (format!("LIMITED {}", l.kind.clone().unwrap_or_default()), theme::BAD),
-            (None, Some(c)) => (format!("held: {}", trunc(c, 50)), theme::WARN),
-            _ => ("ok".to_string(), theme::GOOD),
-        };
-        let head = Line::from(vec![
+        let budget_span = b.launch_budget.or_else(|| b.pacer.as_ref().map(|p| p.budget)).map(|n| {
+            let iv = b
+                .pacer
+                .as_ref()
+                .map(|p| p.interval.as_str())
+                .filter(|s| !s.is_empty())
+                .or(snap.runner.pace_interval.as_deref())
+                .unwrap_or("10m");
+            let why = b.budget_why.as_deref().or_else(|| b.pacer.as_ref().map(|p| p.why.as_str())).unwrap_or("");
+            let txt = if why.is_empty() { format!("{n}/{iv}") } else { format!("{n}/{iv} {why}") };
+            let col = if n == 0 { theme::WARN } else { theme::ACCENT };
+            sp(format!("{} ", pad(&txt, 14)), fg(col))
+        });
+        let mut head_spans = vec![
             sp(format!(" {:<16}", b.bucket), fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
             sp(format!("5h {:>7} / {:<4}", fmt_num(b.h5.output), b.h5.calls), base()),
             sp(format!("24h {:>7} / {:<5}", fmt_num(b.h24.output), b.h24.calls), base()),
             sp(format!("7d {:>7} / {:<6}", fmt_num(b.d7.output), b.d7.calls), base()),
             sp(format!("runs {:<3}", b.d7.runs), dim()),
-            sp(state.0, fg(state.1)),
-        ]);
+        ];
+        if let Some(bs) = budget_span {
+            head_spans.push(bs);
+        }
+        let used: usize = head_spans.iter().map(|s| s.content.chars().count()).sum();
+        let room = (inner.width as usize).saturating_sub(used);
+        let state = match (&b.limit, &b.cap_hit) {
+            (Some(l), _) => (trunc(&format!("LIMITED {}", l.kind.clone().unwrap_or_default()), room), theme::BAD),
+            (None, Some(c)) => (trunc(&format!("held: {c}"), room), theme::WARN),
+            _ => ("ok".to_string(), theme::GOOD),
+        };
+        head_spans.push(sp(state.0, fg(state.1)));
+        let head = Line::from(head_spans);
         f.render_widget(Paragraph::new(head), Rect { x: inner.x, y, width: inner.width, height: 1 });
         let data: Vec<u64> = snap.usage_hourly.get(&b.bucket).map(|v| v.iter().map(|x| (*x).max(0) as u64).collect()).unwrap_or_default();
         let w = inner.width as usize - 2;
@@ -799,10 +898,11 @@ fn feed(app: &mut App, f: &mut Frame, area: Rect) {
     let mut lines = vec![];
     let mut hits = vec![];
     for (i, e) in events.iter().enumerate().skip(top).take(h) {
-        let kc = theme::event_color(&e.kind);
+        let is_neg = e.kind == "dead" && e.payload.get("outcome").and_then(Value::as_str) == Some("negative");
+        let (kind_lbl, kc) = if is_neg { ("dead (neg)", theme::DIM) } else { (e.kind.as_str(), theme::event_color(&e.kind)) };
         let mut l = Line::from(vec![
             sp(format!(" {} ", fmt_hms(e.ts)), dim()),
-            sp(format!("{:<13}", pad(&e.kind, 13)), fg(kc).add_modifier(Modifier::BOLD)),
+            sp(format!("{:<13}", pad(kind_lbl, 13)), fg(kc).add_modifier(Modifier::BOLD)),
             sp(format!("{:<9}", e.task_id.as_deref().map(|t| t.chars().take(8).collect::<String>()).unwrap_or_default()), dim()),
             sp(format!("{:<11}", pad(e.actor.as_deref().unwrap_or(""), 11)), fg(theme::WARN)),
             sp(trunc(&feed_text(app, e), (inner.width as usize).saturating_sub(40)), base()),
@@ -865,26 +965,49 @@ fn ops(app: &mut App, f: &mut Frame, area: Rect) {
                     sp(if r.stop.is_empty() { String::new() } else { format!("{} requested", r.stop) }, fg(theme::WARN)),
                     sp(if !r.paused && !r.draining && r.stop.is_empty() { "none" } else { "" }, dim()),
                 ]));
+                let pacer_st = match r.pacer {
+                    Some(true) => ("on", theme::GOOD),
+                    Some(false) => ("off", theme::WARN),
+                    None => ("-", theme::DIM),
+                };
+                let wt_st = match r.auto_worktree {
+                    Some(true) => ("on", theme::GOOD),
+                    Some(false) => ("off", theme::WARN),
+                    None => ("-", theme::DIM),
+                };
+                let mut cfg_spans = vec![sp(" pacer ", dim()), sp(pacer_st.0, fg(pacer_st.1).add_modifier(Modifier::BOLD))];
+                if let Some(iv) = &r.pace_interval {
+                    if let Some(lpt) = r.launch_per_tick.filter(|n| *n > 0) {
+                        cfg_spans.push(sp(format!(" ({iv}, {lpt}/tick)"), dim()));
+                    } else {
+                        cfg_spans.push(sp(format!(" ({iv})"), dim()));
+                    }
+                }
+                cfg_spans.push(sp("   auto_worktree ", dim()));
+                cfg_spans.push(sp(wt_st.0, fg(wt_st.1).add_modifier(Modifier::BOLD)));
+                lines.push(Line::from(cfg_spans));
                 lines.push(Line::from(sp(format!(" ram free {:.1} GiB (stops starting below {:.1})  ready {}", r.free_gib, r.min_free_gib, r.ready), base())));
                 if let Some(n) = &r.note {
                     lines.push(Line::from(sp(format!(" note {n}"), dim())));
                 }
-                lines.push(Line::from(sp(" p pause/resume · d drain · R reload · S stop · g start · +/- slots", dim())));
+                lines.push(Line::from(sp(" p pause · d drain · R reload · S stop · g start · +/- slots · P pacer · w worktree", dim())));
             }
             1 => {
                 for (idx, b) in snap.boards.iter().enumerate() {
                     let c = |k: &str| b.counts.get(k).copied().unwrap_or(0);
+                    let neg = snap.tasks.iter().filter(|t| t.board == b.name && t.is_negative()).count() as i64;
+                    let dead_err = (c("dead") - neg).max(0);
+                    let neg_txt = if neg > 0 { format!(" neg {neg}") } else { String::new() };
                     let l = Line::from(vec![
                         sp(if b.paused { " ⏸ " } else { " ▶ " }, fg(if b.paused { theme::WARN } else { theme::GOOD })),
                         sp(format!("{:<12}", pad(&b.name, 12)), bold()),
                         sp(
                             format!(
-                                "running {} / max {}  open {} done {} dead {}",
+                                "running {} / max {}  open {} done {} dead {dead_err}{neg_txt}",
                                 b.running,
                                 b.max_slots.map(|m| m.to_string()).unwrap_or("∞".into()),
                                 c("open") + c("claimed"),
                                 c("done"),
-                                c("dead")
                             ),
                             base(),
                         ),
@@ -1034,7 +1157,7 @@ fn overlays(app: &mut App, f: &mut Frame, area: Rect) {
                 ("n  P  T  H  D", "note / priority / tier / harness / defer the selected card"),
                 ("a", "answer a decision card (note + done)"),
                 ("e  s", "open the card's workdir in $EDITOR / a shell (returns here after)"),
-                ("Ops screen", "p pause·resume  d drain  R reload  S stop  g start  +/- slots  J/K reorder tiers"),
+                ("Ops screen", "p pause·resume  d drain  R reload  S stop  g start  +/- slots  P pacer  w worktree  J/K tiers"),
                 ("F5", "refresh now"),
                 ("?  q  Ctrl-C", "this help / quit / quit"),
             ];

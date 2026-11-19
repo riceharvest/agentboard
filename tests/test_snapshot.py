@@ -257,3 +257,33 @@ def test_kill_one_run_with_a_live_runner(abx, tmp_path):
             p.wait(timeout=30)
         except subprocess.TimeoutExpired:
             p.kill()
+
+
+def test_snapshot_pacer_auto_worktree_and_wait_reason(abx, tmp_path):
+    jsonschema = pytest.importorskip("jsonschema")
+    v = jsonschema.Draft7Validator(json.load(open(SCHEMA)))
+
+    # Default runner config flags are exposed in snapshot
+    d = snap(abx)
+    assert d["runner"]["pacer"] is True
+    assert d["runner"]["auto_worktree"] is True
+    assert not list(v.iter_errors(d))
+
+    # Toggling via `ab config set` reflects in snapshot
+    j(abx, "config", "set", "pacer", "false")
+    j(abx, "config", "set", "auto_worktree", "false")
+    d = snap(abx)
+    assert d["runner"]["pacer"] is False
+    assert d["runner"]["auto_worktree"] is False
+
+    # Busy git workdir with auto_worktree=false emits wait_reason on ready tasks
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    t1 = j(abx, "add", "holder", "--workdir", str(repo))["id"]
+    t2 = j(abx, "add", "waiter", "--workdir", str(repo))["id"]
+    j(abx, "claim", t1)
+    d = snap(abx)
+    assert not list(v.iter_errors(d))
+    waiter = next(t for t in d["tasks"] if t["id"] == t2)
+    assert waiter.get("wait_reason") == "workdir busy (auto worktree off)"

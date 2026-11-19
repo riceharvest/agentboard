@@ -370,7 +370,7 @@ impl App {
                 }
                 match t.status.as_str() {
                     "done" => self.pending.push((PendingKind::Done, t.id.clone(), Instant::now())),
-                    "dead" => {
+                    "dead" if !t.is_negative() => {
                         self.pending.push((PendingKind::Dead, t.id.clone(), Instant::now()));
                         self.ring(format!("dead: {}", t.title));
                     }
@@ -651,7 +651,7 @@ impl App {
         let Some(id) = self.need_card() else { return };
         let dir = self
             .task(&id)
-            .and_then(|t| t.workdir.clone())
+            .and_then(|t| t.labels.get("worktree_dir").filter(|d| std::path::Path::new(d.as_str()).is_dir()).cloned().or_else(|| t.workdir.clone()))
             .or_else(|| self.board_of_task(&id).and_then(|b| self.snap.boards.iter().find(|x| x.name == b).and_then(|x| x.default_workdir.clone())));
         match dir {
             Some(d) if std::path::Path::new(&d).is_dir() => self.suspend = Some(if editor { Suspend::Editor(d) } else { Suspend::Shell(d) }),
@@ -661,6 +661,10 @@ impl App {
     }
 
     // ------------------------------------------------------------------ runner / ops
+    pub fn set_config_bool(&mut self, key: &str, val: bool) {
+        let v = if val { "true" } else { "false" };
+        self.act(format!("{key} {v}"), vec!["config".into(), "set".into(), key.into(), v.into()]);
+    }
     pub fn runner_verb(&mut self, verb: &str) {
         match verb {
             "pause" | "resume" | "start" | "run" => self.act(format!("runner {verb}"), vec!["runner".into(), verb.into()]),
@@ -733,7 +737,7 @@ impl App {
     }
 
     // ------------------------------------------------------------------ palette
-    pub const COMMANDS: [&'static str; 30] = [
+    pub const COMMANDS: [&'static str; 32] = [
         "board",
         "running",
         "card",
@@ -749,6 +753,8 @@ impl App {
         "stop",
         "start",
         "slots",
+        "pacer",
+        "auto_worktree",
         "retry",
         "cancel",
         "kill",
@@ -791,6 +797,15 @@ impl App {
                 n if n.parse::<u32>().is_ok() => self.act(format!("slots {n}"), vec!["runner".into(), "slots".into(), n.into()]),
                 _ => self.toast("usage: slots N | slots + | slots -", true),
             },
+            "pacer" | "auto_worktree" => {
+                let cur = if cmd == "pacer" { self.snap.runner.pacer } else { self.snap.runner.auto_worktree }.unwrap_or(true);
+                match rest {
+                    "" => self.set_config_bool(cmd, !cur),
+                    "on" | "true" | "1" => self.set_config_bool(cmd, true),
+                    "off" | "false" | "0" => self.set_config_bool(cmd, false),
+                    _ => self.toast(format!("usage: {cmd} [on|off]"), true),
+                }
+            }
             "retry" => self.do_retry(),
             "cancel" => self.do_cancel(),
             "kill" => self.do_kill(),
@@ -976,6 +991,8 @@ impl App {
                 'g' => self.runner_verb("start"),
                 '+' | '=' => self.slots_delta(1),
                 '-' => self.slots_delta(-1),
+                'P' => self.set_config_bool("pacer", !self.snap.runner.pacer.unwrap_or(true)),
+                'w' => self.set_config_bool("auto_worktree", !self.snap.runner.auto_worktree.unwrap_or(true)),
                 'b' => {}
                 _ => {}
             }

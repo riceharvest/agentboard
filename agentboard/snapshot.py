@@ -148,6 +148,12 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
             dep_status[x["dep_id"]] = x["status"]
     keys = rows[0].keys() if rows else ()
     tasks = [_task(r, keys, deps, dep_status, t) for r in rows]
+    held = store.busy_dirs(conn)
+    for d in tasks:
+        if d["state"] == "ready":
+            why = store.workdir_wait_reason(conn, d, held)
+            if why:
+                d["wait_reason"] = why
 
     # ---- boards
     counts, running = {}, {}
@@ -197,6 +203,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
               "heartbeat": hb, "heartbeat_age_s": (t - hb) if hb else None, "note": st.get("note"),
               "free_gib": round(R.free_gib(), 2), "min_free_gib": float(ctl["min_free_gib"] or 0), "ready": ready_runnable,
               "launch_per_tick": int(ctl.get("launch_per_tick") or 0), "pace_interval": usage.pace_interval(conn)[0],
+              "pacer": bool(ctl.get("pacer", True)), "auto_worktree": bool(ctl.get("auto_worktree", True)),
               "windowed": override is not None, "children": children}
 
     # ---- limits, caps, plan, usage

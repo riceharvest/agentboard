@@ -77,11 +77,16 @@ pub struct Task {
     pub created_at: Option<f64>,
     pub updated_at: Option<f64>,
     pub result_head: Option<String>,
+    pub wait_reason: Option<String>,
 }
 
 impl Task {
     pub fn kind(&self) -> &str {
         self.labels.get("type").map(String::as_str).unwrap_or("")
+    }
+
+    pub fn is_negative(&self) -> bool {
+        self.status == "dead" && self.labels.get("outcome").map(String::as_str) == Some("negative")
     }
 }
 
@@ -123,6 +128,10 @@ pub struct Runner {
     pub free_gib: f64,
     pub min_free_gib: f64,
     pub ready: i64,
+    pub launch_per_tick: Option<i64>,
+    pub pace_interval: Option<String>,
+    pub pacer: Option<bool>,
+    pub auto_worktree: Option<bool>,
     pub windowed: bool,
     pub children: Vec<Child>,
 }
@@ -183,6 +192,18 @@ pub struct BucketLimit {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
+pub struct PacerInfo {
+    pub budget: i64,
+    pub why: String,
+    pub interval: String,
+    pub interval_s: f64,
+    pub used_in_interval: i64,
+    pub remaining: i64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct Bucket {
     pub bucket: String,
     #[serde(rename = "5h")]
@@ -194,6 +215,9 @@ pub struct Bucket {
     pub limit: Option<BucketLimit>,
     pub cap: Option<Value>,
     pub cap_hit: Option<String>,
+    pub launch_budget: Option<i64>,
+    pub budget_why: Option<String>,
+    pub pacer: Option<PacerInfo>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

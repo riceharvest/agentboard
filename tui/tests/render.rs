@@ -449,3 +449,136 @@ fn nvidia_csv_is_made_readable() {
     assert_eq!(ab_tui::workers::fmt_nvidia("NVIDIA GeForce RTX 3060, 2, 1153, 12288"), "NVIDIA GeForce RTX 3060 2% 1.1/12.0 GiB");
     assert_eq!(ab_tui::workers::fmt_nvidia("something else"), "something else");
 }
+
+#[test]
+fn usage_screen_renders_pacer_launch_budgets() {
+    let mut a = app(false);
+    let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let buckets = v["usage"].as_array_mut().unwrap();
+    // Inject pacer / launch_budget / budget_why onto buckets via real JSON deserialization
+    if let Some(b0) = buckets.get_mut(0) {
+        b0["launch_budget"] = serde_json::json!(1);
+        b0["budget_why"] = serde_json::json!("pace");
+        b0["pacer"] = serde_json::json!({
+            "budget": 1, "why": "pace", "interval": "10m", "interval_s": 600.0,
+            "used_in_interval": 0, "remaining": 1, "detail": "plan pace"
+        });
+    }
+    if let Some(b1) = buckets.get_mut(1) {
+        b1["launch_budget"] = serde_json::json!(3);
+        b1["budget_why"] = serde_json::json!("aimd");
+        b1["pacer"] = serde_json::json!({
+            "budget": 3, "why": "aimd", "interval": "10m", "interval_s": 600.0,
+            "used_in_interval": 1, "remaining": 2, "detail": "aimd window"
+        });
+    }
+    if let Some(b2) = buckets.get_mut(2) {
+        b2["launch_budget"] = serde_json::json!(0);
+        b2["budget_why"] = serde_json::json!("pace");
+        b2["pacer"] = serde_json::json!({
+            "budget": 0, "why": "pace", "interval": "10m", "interval_s": 600.0,
+            "used_in_interval": 0, "remaining": 0, "detail": "over pace"
+        });
+    }
+    let snap: Snapshot = serde_json::from_value(v).expect("snapshot with pacer fields parses");
+    a.on_snapshot(snap, Duration::from_millis(10));
+    a.set_screen(Screen::Usage);
+    let s = draw(&mut a, 150, 44);
+    has(&s, &["1/10m pace", "3/10m aimd", "0/10m pace", "LIMITED manual", "held: plan guard"]);
+}
+
+#[test]
+fn negative_outcome_dead_card_is_neutral_and_skips_glitch_while_real_dead_glitches() {
+    let mut a = app(true);
+    let mut term = Terminal::new(TestBackend::new(220, 44)).unwrap();
+    // Initial draw so startup effect attaches and task rows are recorded
+    term.draw(|f| a.draw(f, Duration::from_millis(16))).unwrap();
+    a.bell = None;
+
+    // Transition one ready card to dead + outcome=negative: must NOT trigger glitch_dead or bell
+    let mut snap = a.snap.clone();
+    let neg_id = snap.tasks.iter().find(|t| t.title.starts_with("Does a shorter")).unwrap().id.clone();
+    {
+        let t = snap.tasks.iter_mut().find(|t| t.id == neg_id).unwrap();
+        t.status = "dead".into();
+        t.state = "dead".into();
+        t.attempts = 1;
+        t.labels.insert("outcome".into(), "negative".into());
+    }
+    if let Some(main_board) = snap.boards.iter_mut().find(|b| b.name == "main") {
+        *main_board.counts.entry("dead".into()).or_insert(0) += 1;
+    }
+    a.on_snapshot(snap.clone(), Duration::from_millis(10));
+    term.draw(|f| a.draw(f, Duration::from_millis(16))).unwrap();
+    assert!(a.fx.dead_glitches().is_empty(), "negative outcome must not trigger glitch_dead: {:?}", a.fx.dead_glitches());
+    assert!(a.bell.is_none(), "negative outcome must not ring the dead bell: {:?}", a.bell);
+
+    // Render board with fx off to inspect text cleanly
+    a.fx.disable();
+    let s = draw(&mut a, 220, 44);
+    // Original fixture has 1 ordinary dead card; adding 1 negative dead card keeps failure count at 1 (+1 neg)
+    has(&s, &["dead 1 (+1 neg)", "NEG", "– negative outcome"]);
+
+    // Card detail for the negative card shows NEG badge
+    a.open_card(neg_id.clone());
+    let detail_screen = draw(&mut a, 150, 44);
+    has(&detail_screen, &["NEG", "outcome=negative"]);
+
+    // Now re-enable fx and transition another card to an ordinary dead card: MUST trigger glitch_dead and bell
+    a.set_screen(Screen::Board);
+    a.fx.enabled = true;
+    let err_id = snap.tasks.iter().find(|t| t.title.starts_with("Survey the retry")).unwrap().id.clone();
+    {
+        let t = snap.tasks.iter_mut().find(|t| t.id == err_id).unwrap();
+        t.status = "dead".into();
+        t.state = "dead".into();
+        t.attempts = 3;
+    }
+    a.on_snapshot(snap, Duration::from_millis(10));
+    term.draw(|f| a.draw(f, Duration::from_millis(16))).unwrap();
+    assert!(a.fx.dead_glitches().contains(&err_id), "ordinary dead card must trigger glitch_dead: {:?}", a.fx.dead_glitches());
+    assert!(!a.fx.dead_glitches().contains(&neg_id), "negative card must still not be glitched");
+    assert!(a.bell.as_deref().is_some_and(|b| b.starts_with("dead:")), "ordinary dead card rings the bell: {:?}", a.bell);
+}
+
+#[test]
+fn card_detail_renders_worktree_metadata_and_wait_reason() {
+    let mut a = app(false);
+    let id = id_of(&a, "Survey the retry");
+    {
+        let t = a.snap.tasks.iter_mut().find(|t| t.id == id).unwrap();
+        t.labels.insert("worktree_branch".into(), "ab/t_demo01".into());
+        t.labels.insert("worktree_dir".into(), "/tmp/ab-worktrees/t_demo01".into());
+        t.labels.insert("worktree".into(), "off".into());
+        t.wait_reason = Some("workdir busy (auto worktree off)".into());
+    }
+    a.open_card(id.clone());
+    a.detail = Some((id, card_detail("x", "Body text"), Instant::now()));
+    let s = draw(&mut a, 150, 44);
+    has(
+        &s,
+        &[
+            "worktree ab/t_demo01",
+            "/tmp/ab-worktrees/t_demo01",
+            "worktree=off",
+            "wait workdir busy (auto worktree off)",
+        ],
+    );
+}
+
+#[test]
+fn ops_screen_displays_pacer_and_auto_worktree_state() {
+    let mut a = app(false);
+    a.snap.runner.pacer = Some(true);
+    a.snap.runner.pace_interval = Some("10m".into());
+    a.snap.runner.launch_per_tick = Some(2);
+    a.snap.runner.auto_worktree = Some(false);
+    a.set_screen(Screen::Ops);
+    let s = draw(&mut a, 150, 44);
+    has(&s, &["pacer on (10m, 2/tick)", "auto_worktree off", "P pacer", "w worktree"]);
+
+    a.snap.runner.pacer = Some(false);
+    a.snap.runner.auto_worktree = Some(true);
+    let s2 = draw(&mut a, 150, 44);
+    has(&s2, &["pacer off (10m, 2/tick)", "auto_worktree on"]);
+}

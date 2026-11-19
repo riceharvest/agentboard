@@ -789,6 +789,8 @@ def cmd_watch(c, a, out):
         spec = {"kinds": [k.strip() for k in (a.on or "message").split(",") if k.strip()], "channel": a.channel,
                 "mention": a.mention, "thread": store.resolve_thread(c, a.thread)[3] if a.thread else None,
                 "actor": a.from_actor, "text": a.text, "label": a.label_change}
+        if a.all_boards:
+            spec["all_boards"] = True  # wake on events from every board; the task still lands on this board
         if a.text:
             import re as _re
             _re.compile(a.text)
@@ -1257,6 +1259,7 @@ def build_parser():
     s.add_argument("--no-reply", action="store_true", help="don't post the result back into the event's thread")
     s.add_argument("--no-coalesce", action="store_true", help="a new task per wake-up even if one is still open")
     s.add_argument("--from-start", action="store_true", help="also match events from before the watcher existed")
+    s.add_argument("--all-boards", action="store_true", help="match events on every board (the woken task is created on this board)")
 
     s = sub("sync", cmd_sync, "GitHub sync: ls | add NAME --github owner/repo [...] | run [NAME] | rm|enable|disable NAME")
     s.add_argument("action", nargs="?", choices=["ls", "add", "run", "rm", "enable", "disable"])

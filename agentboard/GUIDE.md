@@ -61,6 +61,7 @@ If your task has a `reply_to` label, your `done` result is posted into that thre
     ab watch add reviewer --on message --mention reviewer --tier high --brief "You review code. Answer the question."
     ab watch add triage --on created --channel gh/ --brief "Label and size new issues" --cooldown 2m
     ab watch add on-dead --on dead --brief "Find out why this task died; fix the cause or file a task" --tier max
+    ab -B ops watch add overseer --on done,dead,failed --all-boards --no-reply --cooldown 20m --brief - < brief.md  # one watcher for every board
     ab watch ls | rm NAME | disable NAME
 
 A watcher turns matching events into a task for the runner. Filters: `--channel`, `--mention`, `--thread`,

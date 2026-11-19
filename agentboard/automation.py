@@ -170,7 +170,7 @@ def run_watchers(conn):
     fired = []
     for w in conn.execute("SELECT * FROM watchers WHERE enabled=1").fetchall():
         spec, action = json.loads(w["spec"]), json.loads(w["action"])
-        evs = events_after(conn, w["last_event_id"] or 0, board=w["board"])
+        evs = events_after(conn, w["last_event_id"] or 0, board=None if spec.get("all_boards") else w["board"])
         if not evs:
             continue
         own = _watch_owned_task_ids(conn, w["board"], w["name"])

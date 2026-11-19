@@ -51,7 +51,9 @@ machine.
     ab ls --status all ; ab show t_xxxxxxxx ; ab usage
 
 The runner gives each agent a brief with the task, the results of its dependencies, the thread so far and
-the board commands. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `defer` or `release`.
+the board commands. After you change agentboard itself, `ab runner reload` makes the runner re-exec with the new
+code without waiting for or killing running agents (they are re-adopted); `ab runner stop` waits for them to finish
+and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `defer` or `release`.
 
 ## Features
 

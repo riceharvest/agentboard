@@ -167,6 +167,8 @@ def apply_action(conn, action, actor):
         store.cfg_set(conn, "draining", True, actor)
     elif do == "stop":
         store.cfg_set(conn, "stop", "graceful", actor)
+    elif do == "reload":
+        store.cfg_set(conn, "stop", "reload", actor)
     elif do == "slots":
         store.cfg_set(conn, "slots", int(action["value"]), actor)
     elif do == "set":
@@ -313,11 +315,27 @@ class Runner:
             event(self.conn, None, "runner", "runner_stop", {"pid": os.getpid()})
         self.log("runner stopped")
 
+    def reload(self):
+        """Re-exec this runner with the code on disk. Running harnesses live in their own sessions and are
+        re-adopted from the db by the new process (same pid, so they are still our children)."""
+        self.log(f"reloading with {len(self.children)} run(s) in flight")
+        with tx(self.conn):
+            store.cfg_set(self.conn, "stop", "", "runner")
+            event(self.conn, None, "runner", "runner_reload", {"pid": os.getpid(), "runs": len(self.children)})
+        self.conn.close()
+        try:
+            self.lock_f.close()
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable, "-m", "agentboard", "runner", "run"])
+
     def tick(self):
         c = self.conn
         store.reap(c)
         self.poll_children()
         stop = cfg(c, "stop") or ""
+        if stop == "reload":
+            self.reload()
         if stop == "now":
             for ch in list(self.children.values()):
                 self.kill(ch, "stopped")
@@ -509,6 +527,12 @@ class Runner:
                 finished = rc is not None
             else:
                 rc, finished = None, not alive(ch.pid, ch.start)
+                if finished:  # adopted after a reload: it is our child again, reap it
+                    try:
+                        wp, st = os.waitpid(ch.pid, os.WNOHANG)
+                        rc = os.waitstatus_to_exitcode(st) if wp else None
+                    except OSError:
+                        pass
             if finished:
                 del self.children[rid]
                 self.finalize(ch, rc)

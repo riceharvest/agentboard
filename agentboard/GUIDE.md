@@ -34,6 +34,10 @@ ONE of these and stop:
     ab defer $AB_TASK --after <ID> --why "..."          # wait for another task
     ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"
 
+Shell quoting eats `$0`, `$1` and backticks inside double quotes. Put the text in single quotes, or read it from a
+file or stdin: `ab done $AB_TASK --summary-file result.md`, `ab fail $AB_TASK --why-file why.txt`,
+`ab note $AB_TASK --file notes.md`, or pass `-` as the text to read stdin.
+
 Along the way, run `ab note $AB_TASK "..."` so the next agent (or your own retry) has context.
 To split work, use `ab add "sub task" --body "..." [--dep ID] [--tier low]`; sub-tasks inherit your workdir.
 If your task has a `reply_to` label, your `done` result is posted into that thread automatically.

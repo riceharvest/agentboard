@@ -55,6 +55,13 @@ def body_arg(a):
     return getattr(a, "body", None) or ""
 
 
+def text_arg(value, path=None):
+    """Text from a --FILE option, '-' (stdin) or the plain argument (avoids shell quoting of $ and backticks)."""
+    if path:
+        return Path(path).expanduser().read_text()
+    return sys.stdin.read() if value == "-" else (value or "")
+
+
 def tline(d):
     lab = ",".join(f"{k}={v}" for k, v in (d.get("labels") or {}).items())
     extra = []
@@ -203,19 +210,19 @@ def cmd_renew(c, a, out):
 
 
 def cmd_note(c, a, out):
-    text = a.text if a.text != "-" else sys.stdin.read()
+    text = text_arg(a.text, a.file)
     tid = store.note(c, a.id, actor_of(a), text, jarg(a.data))
     out({"id": tid, "noted": True}, f"{tid} noted")
 
 
 def cmd_done(c, a, out):
-    text = a.result if a.result != "-" else sys.stdin.read()
-    tid = store.complete(c, a.id, actor_of(a), text or "", jarg(a.data), a.force)
+    text = text_arg(a.result, a.summary_file)
+    tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
     out({"id": tid, "status": "done"}, f"{tid} done")
 
 
 def cmd_fail(c, a, out):
-    tid, state = store.fail(c, a.id, actor_of(a), a.why, a.force)
+    tid, state = store.fail(c, a.id, actor_of(a), text_arg(a.why, a.why_file), a.force)
     out({"id": tid, "status": state}, f"{tid} failed -> {state}")
 
 
@@ -508,8 +515,10 @@ def cmd_runner(c, a, out):
         with store.tx(c):
             store.cfg_set(c, "paused", False, actor)
             store.cfg_set(c, "draining", False, actor)
+            if st.get("running"):
+                store.cfg_set(c, "stop", "", actor)  # cancels a pending graceful stop / reload
         if st.get("running"):
-            out({"started": False, "running": True, "pid": st["pid"]}, f"runner already running (pid {st['pid']}); unpaused")
+            out({"started": False, "running": True, "pid": st["pid"]}, f"runner already running (pid {st['pid']}); unpaused, pending stop cancelled")
             return
         pid = R.start_detached()
         for _ in range(20):
@@ -521,13 +530,14 @@ def cmd_runner(c, a, out):
             f"runner started (pid {pid}), log {store.HOME / 'runner.log'}" if st.get("running") else
             f"runner launched (pid {pid}) but no heartbeat yet; check {store.HOME / 'runner.log'}")
         return
-    sets = {"pause": {"paused": True}, "resume": {"paused": False, "draining": False}, "drain": {"draining": True},
-            "stop": {"stop": "now" if a.now else "graceful"}}
+    sets = {"pause": {"paused": True}, "resume": {"paused": False, "draining": False, "stop": ""}, "drain": {"draining": True},
+            "stop": {"stop": "now" if a.now else "graceful"}, "reload": {"stop": "reload"}}
     if act in sets:
         with store.tx(c):
             for k, v in sets[act].items():
                 store.cfg_set(c, k, v, actor)
-        out({"ok": True, "action": act}, f"runner: {act}" + (" (now)" if act == "stop" and a.now else ""))
+        out({"ok": True, "action": act}, f"runner: {act}" + (" (now)" if act == "stop" and a.now else "")
+            + (" (re-execs with the current code; running cards keep going)" if act == "reload" else ""))
         return
     if act == "slots":
         with store.tx(c):
@@ -568,14 +578,14 @@ def cmd_runner(c, a, out):
 def parse_action(s):
     """'pause' 'resume' 'drain' 'stop' 'slots=4' 'set:key=value'"""
     s = s.strip()
-    if s in ("pause", "resume", "drain", "stop"):
+    if s in ("pause", "resume", "drain", "stop", "reload"):
         return {"do": s}
     if s.startswith("slots="):
         return {"do": "slots", "value": int(s.split("=", 1)[1])}
     if s.startswith("set:") and "=" in s:
         k, v = s[4:].split("=", 1)
         return {"do": "set", "key": k, "value": store.coerce(v)}
-    raise ValueError(f"bad action {s!r}: use pause|resume|drain|stop|slots=N|set:key=value")
+    raise ValueError(f"bad action {s!r}: use pause|resume|drain|stop|reload|slots=N|set:key=value")
 
 
 def cmd_sched(c, a, out):
@@ -662,10 +672,6 @@ def cmd_config(c, a, out):
 def mline(m):
     head = f"m{m['id']} {fmt_ts(m['ts'])} {m['board']}/{m['channel']} {m['thread']} {m['author']}"
     return head + ": " + (m["body"] or "").strip().replace("\n", "\n    ")
-
-
-def text_arg(t):
-    return sys.stdin.read() if t == "-" else t
 
 
 def cmd_post(c, a, out):
@@ -1045,18 +1051,21 @@ def build_parser():
 
     s = sub("note", cmd_note, "append a note to a task thread")
     s.add_argument("id")
-    s.add_argument("text", help="'-' reads stdin")
+    s.add_argument("text", nargs="?", default="", help="'-' reads stdin")
+    s.add_argument("--file", help="read the note from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data", help="JSON (or @file)")
 
     s = sub("done", cmd_done, "complete your task", ["complete"])
     s.add_argument("id")
     s.add_argument("result", nargs="?", default="", help="'-' reads stdin")
+    s.add_argument("--summary-file", help="read the result from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data")
     s.add_argument("--force", action="store_true")
 
     s = sub("fail", cmd_fail, "give up this attempt (task retries until max attempts, then dead)")
     s.add_argument("id")
-    s.add_argument("why")
+    s.add_argument("why", nargs="?", default="", help="'-' reads stdin")
+    s.add_argument("--why-file", help="read the reason from this file")
     s.add_argument("--force", action="store_true")
 
     s = sub("release", cmd_release, "hand the task back without counting an attempt")
@@ -1141,8 +1150,8 @@ def build_parser():
     s.add_argument("specs", nargs="*", help="harness:model@effort, e.g. claude:sonnet@high")
     s.add_argument("--pos", type=int)
 
-    s = sub("runner", cmd_runner, "start | stop [--now] | pause | resume | drain | slots N | status | run | service [--enable]")
-    s.add_argument("action", nargs="?", choices=["start", "stop", "pause", "resume", "drain", "slots", "status", "run", "service"])
+    s = sub("runner", cmd_runner, "start | stop [--now] | reload | pause | resume | drain | slots N | status | run | service [--enable]")
+    s.add_argument("action", nargs="?", choices=["start", "stop", "reload", "pause", "resume", "drain", "slots", "status", "run", "service"])
     s.add_argument("value", nargs="?")
     s.add_argument("--slots", type=int)
     s.add_argument("--now", action="store_true")

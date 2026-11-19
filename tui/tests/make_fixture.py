@@ -17,10 +17,18 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
+def use_home(home):
+    """Point this process (env and agentboard.store's import-time HOME/DB_PATH) at `home`, so build() can run again in one process."""
+    from agentboard import store
+    os.environ["AB_HOME"] = str(home)
+    store.HOME = Path(home)
+    store.DB_PATH = store.HOME / store.DB_PATH.name
+
+
 def build(home, run_pids=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("AB_")}
     env.update(AB_HOME=str(home), PYTHONPATH=str(ROOT), AB_ACTOR="tui-test", AB_NO_COLOR="1")
-    os.environ.update(AB_HOME=str(home))
+    use_home(home)
 
     def ab(*args, actor=None, ok=True):
         e = dict(env)

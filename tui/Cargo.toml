@@ -5,7 +5,7 @@ edition = "2021"
 description = "Live terminal dashboard and control panel for agentboard (reads `ab snapshot --json`, acts through `ab` verbs)"
 license = "MIT"
 repository = "https://github.com/riceharvest/agentboard"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [[bin]]
 name = "ab-tui"

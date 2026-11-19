@@ -31,6 +31,9 @@ agentboard handles each of them:
   `ab tiers check` flags entries a harness no longer offers.
 - **Usage counts all your sessions.** It reads the local logs of Claude Code, opencode, pi and Hermes, so it
   sees board runs and your own interactive sessions eating the same limits.
+- **Isolated Hermes runs.** Hermes runs use a per-run `HERMES_HOME` by default (`hermes_isolate`, on by default) that
+  strips messaging/bot tokens and gateway locks, keeps worker `AB_*` env and workdir isolated, stops the ephemeral
+  gateway on kill/timeout/exit without touching your shared gateway, and preserves session usage accounting.
 
 ## Install
 

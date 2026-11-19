@@ -14,7 +14,7 @@ from .store import cfg, event, now, parse_dur, tx
 
 automation, H, usage = Lazy("automation"), Lazy("harness"), Lazy("usage")
 # stdlib modules only the runner process itself needs: not worth their import time for `ab snapshot`
-fcntl, signal, socket, subprocess = (Lazy(n, absolute=True) for n in ("fcntl", "signal", "socket", "subprocess"))
+fcntl, shutil, signal, socket, subprocess = (Lazy(n, absolute=True) for n in ("fcntl", "shutil", "signal", "socket", "subprocess"))
 
 PKG_ROOT = Path(__file__).resolve().parent.parent     # dir that contains the agentboard package
 
@@ -250,6 +250,7 @@ class Child:
         del self.__dict__["self"]
         self.kill_reason = None
         self.kill_at = None
+        self.hermes_home = None
 
 
 class Runner:
@@ -294,6 +295,10 @@ class Runner:
             c.board = t["board"] if t else store.DEFAULT_BOARD
             c.endpoint = r["endpoint"]
             c.provider = r["provider"]
+            if r["harness"] == "hermes":
+                hh = store.HOME / "runs" / f"{r['id']}.hermes"
+                if hh.is_dir():
+                    c.hermes_home = str(hh)
             if alive(r["pid"], r["pid_start"]):
                 self.children[r["id"]] = c
                 self.log(f"adopted run {r['id']} ({r['task_id']}, pid {r['pid']})")
@@ -347,7 +352,12 @@ class Runner:
 
     def tick(self):
         c = self.conn
+        expired_ids = {r["id"] for r in c.execute(
+            "SELECT id FROM tasks WHERE status='claimed' AND lease_until IS NOT NULL AND lease_until < ?", (now(),))}
         store.reap(c)
+        for ch in list(self.children.values()):
+            if ch.task_id in expired_ids:
+                self.kill(ch, "expired")
         self.poll_children()
         stop = cfg(c, "stop") or ""
         if stop == "reload":
@@ -590,6 +600,11 @@ class Runner:
             return False
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         env.update(xenv)
+        hermes_home = None
+        if cand.harness == "hermes" and cfg(c, "hermes_isolate"):
+            hermes_home = str(H.prepare_hermes_home(runs_dir / f"{run_id}.hermes"))
+            env = {k: v for k, v in env.items() if not H._is_stripped_hermes_env_key(k)}
+            env["HERMES_HOME"] = hermes_home
         home = str(store.HOME)
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id),
                     "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"],
@@ -599,6 +614,8 @@ class Runner:
                 proc = subprocess.Popen(cmd, cwd=workdir, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL,
                                         start_new_session=True, env=env)
         except OSError as e:
+            if hermes_home:
+                shutil.rmtree(hermes_home, ignore_errors=True)
             with tx(c):
                 c.execute("UPDATE runs SET ended_at=?, outcome='spawn_failed', detail=? WHERE id=?", (now(), str(e), run_id))
                 c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL WHERE id=? AND owner=?", (task["id"], owner))
@@ -615,22 +632,44 @@ class Runner:
         self.children[run_id].board = cur["board"]
         self.children[run_id].endpoint = cand.endpoint
         self.children[run_id].provider = cand.provider
+        self.children[run_id].hermes_home = hermes_home
         self.log(f"run {run_id}: {task['id']} -> {cand.label()} [{bucket}] pid {proc.pid}")
         return True
 
     # -- watching
     def kill(self, ch, reason):
+        hermes_home = getattr(ch, "hermes_home", None)
         if ch.kill_reason is None:
             ch.kill_reason, ch.kill_at = reason, now()
+            if ch.harness == "hermes" and not hermes_home:
+                # Non-isolated Hermes shares a gateway: SIGINT lets `hermes chat` send session.interrupt
+                # before escalating to SIGTERM/SIGKILL. Never stop the shared gateway.
+                try:
+                    os.killpg(ch.pid, signal.SIGINT)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                return
             try:
                 os.killpg(ch.pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-        elif now() - ch.kill_at > 15:
-            try:
-                os.killpg(ch.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            if ch.harness == "hermes" and hermes_home:
+                H.stop_hermes_gateway(hermes_home, force=False)
+        else:
+            elapsed = now() - ch.kill_at
+            if ch.harness == "hermes" and not hermes_home and elapsed > 5 and not getattr(ch, "_sigterm_sent", False):
+                ch._sigterm_sent = True
+                try:
+                    os.killpg(ch.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if elapsed > 15:
+                try:
+                    os.killpg(ch.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                if ch.harness == "hermes" and hermes_home:
+                    H.stop_hermes_gateway(hermes_home, force=True)
 
     def take_kill_requests(self):
         """`ab kill RUN` leaves run ids in the `kill_runs` setting; stop those runs and drop the handled ids."""
@@ -675,69 +714,82 @@ class Runner:
                 t = c.execute("SELECT status, owner FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
                 if t and t["status"] == "cancelled":
                     self.kill(ch, "cancelled")
+                elif t and t["status"] == "claimed" and t["owner"] != ch.owner:
+                    self.kill(ch, "expired")
 
     def finalize(self, ch, rc):
         c = self.conn
         a = H.ADAPTERS[ch.harness]
+        hermes_home = getattr(ch, "hermes_home", None)
 
         def rd(p):
             try:
                 return Path(p).read_text(errors="replace") if p else ""
             except OSError:
                 return ""
-        out, err = rd(ch.out_path), rd(ch.err_path)
-        res = a.parse(0 if rc is None else rc, out, err)
-        if ch.kill_reason:
-            res.ok, res.error_kind, res.error = False, ch.kill_reason, f"killed by runner: {ch.kill_reason}"
-        model = res.model or ch.model
-        with tx(c):
-            t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
-            mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
-            if res.error_kind in ("auth", "limit", "unavailable"):
-                kind = res.error_kind
-                if kind == "auth" and not getattr(ch, "provider", None):
-                    scope = harness_scope(ch.harness, getattr(ch, "endpoint", None))
-                else:  # a provider-pinned run lost one provider's login, not the whole harness
-                    scope = f"bucket:{ch.bucket}"
-                until = res.reset_at or (now() + parse_dur(cfg(c, f"cooldown.{kind}") or "30m"))
-                store.set_limit(c, scope, kind, until, res.error[:500])
-                if kind == "limit" and ch.bucket:
-                    usage.pacer_on_limit(c, ch.bucket)
-                if mine:
-                    c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
-                    event(c, ch.task_id, "runner", "rerouted", {"run": ch.run_id, "kind": kind, "scope": scope, "until": until})
-                outcome = kind
-            elif ch.kill_reason in ("stopped", "cancelled", "killed"):
-                if mine:
-                    c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
-                    event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "run killed" if ch.kill_reason == "killed" else "runner stopped"})
-                outcome = ch.kill_reason
-            elif mine:
-                if res.ok:
-                    store.post_message(c, "runner", "Agent exited without `ab done`; its final answer is kept as the result.",
-                                       thread=ch.task_id, check=False, _in_tx=True)
-                    result = (res.text or "finished, no summary")[:8000]
-                    c.execute("UPDATE tasks SET status='done', result=?, owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
-                              (result, now(), ch.task_id))
-                    event(c, ch.task_id, "runner", "done", {"run": ch.run_id, "auto": True})
-                    store._report_back(c, t, ch.owner, result)
-                    outcome = "done_auto"
-                else:
-                    why = (res.error or "agent failed")[:1500]
-                    store.post_message(c, "runner", f"Run {ch.run_id} on {ch.harness} failed ({res.error_kind}): {why}",
-                                       thread=ch.task_id, check=False, _in_tx=True)
-                    outcome = "timeout" if ch.kill_reason == "timeout" else "failed"
-                    store._fail_attempt(c, t, "runner", why, outcome)
+        try:
+            if ch.harness == "hermes" and hermes_home:
+                H.stop_hermes_gateway(hermes_home, force=False, wait_s=3.0)
+            out, err = rd(ch.out_path), rd(ch.err_path)
+            if ch.harness == "hermes" and hermes_home:
+                res = a.parse(0 if rc is None else rc, out, err, hermes_home=hermes_home)
             else:
-                outcome = f"agent_{t['status']}" if t else "task_gone"
-            c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, session_id=?, model=?, input=?, output=?, cache_read=?, "
-                      "cache_write=?, reasoning=?, cost_usd=?, detail=? WHERE id=?",
-                      (now(), rc, outcome, res.session_id, model, res.input, res.output, res.cache_read, res.cache_write,
-                       res.reasoning, res.cost_usd, (res.error if not res.ok else res.text)[:2000], ch.run_id))
-            usage.record_run_usage(c, ch.run_id, ch.harness, ch.bucket, model, ch.task_id, res)
-            event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc,
-                                                       "out": res.output, "in": res.input, "cost": res.cost_usd})
-        self.log(f"run {ch.run_id} ({ch.task_id}, {ch.harness}) -> {outcome}" + (f": {res.error[:160]}" if not res.ok else ""))
+                res = a.parse(0 if rc is None else rc, out, err)
+            if ch.kill_reason:
+                res.ok, res.error_kind, res.error = False, ch.kill_reason, f"killed by runner: {ch.kill_reason}"
+            model = res.model or ch.model
+            with tx(c):
+                t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+                mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
+                if res.error_kind in ("auth", "limit", "unavailable"):
+                    kind = res.error_kind
+                    if kind == "auth" and not getattr(ch, "provider", None):
+                        scope = harness_scope(ch.harness, getattr(ch, "endpoint", None))
+                    else:  # a provider-pinned run lost one provider's login, not the whole harness
+                        scope = f"bucket:{ch.bucket}"
+                    until = res.reset_at or (now() + parse_dur(cfg(c, f"cooldown.{kind}") or "30m"))
+                    store.set_limit(c, scope, kind, until, res.error[:500])
+                    if kind == "limit" and ch.bucket:
+                        usage.pacer_on_limit(c, ch.bucket)
+                    if mine:
+                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "rerouted", {"run": ch.run_id, "kind": kind, "scope": scope, "until": until})
+                    outcome = kind
+                elif ch.kill_reason in ("stopped", "cancelled", "killed", "expired"):
+                    if mine:
+                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "run killed" if ch.kill_reason == "killed" else "runner stopped"})
+                    outcome = ch.kill_reason
+                elif mine:
+                    if res.ok:
+                        store.post_message(c, "runner", "Agent exited without `ab done`; its final answer is kept as the result.",
+                                           thread=ch.task_id, check=False, _in_tx=True)
+                        result = (res.text or "finished, no summary")[:8000]
+                        c.execute("UPDATE tasks SET status='done', result=?, owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+                                  (result, now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "done", {"run": ch.run_id, "auto": True})
+                        store._report_back(c, t, ch.owner, result)
+                        outcome = "done_auto"
+                    else:
+                        why = (res.error or "agent failed")[:1500]
+                        store.post_message(c, "runner", f"Run {ch.run_id} on {ch.harness} failed ({res.error_kind}): {why}",
+                                           thread=ch.task_id, check=False, _in_tx=True)
+                        outcome = "timeout" if ch.kill_reason == "timeout" else "failed"
+                        store._fail_attempt(c, t, "runner", why, outcome)
+                else:
+                    outcome = f"agent_{t['status']}" if t else "task_gone"
+                c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, session_id=?, model=?, input=?, output=?, cache_read=?, "
+                          "cache_write=?, reasoning=?, cost_usd=?, detail=? WHERE id=?",
+                          (now(), rc, outcome, res.session_id, model, res.input, res.output, res.cache_read, res.cache_write,
+                           res.reasoning, res.cost_usd, (res.error if not res.ok else res.text)[:2000], ch.run_id))
+                usage.record_run_usage(c, ch.run_id, ch.harness, ch.bucket, model, ch.task_id, res,
+                                       force=bool(hermes_home))
+                event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc,
+                                                           "out": res.output, "in": res.input, "cost": res.cost_usd})
+            self.log(f"run {ch.run_id} ({ch.task_id}, {ch.harness}) -> {outcome}" + (f": {res.error[:160]}" if not res.ok else ""))
+        finally:
+            if hermes_home:
+                shutil.rmtree(hermes_home, ignore_errors=True)
 
 
 def start_detached():

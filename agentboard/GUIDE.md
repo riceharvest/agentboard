@@ -150,6 +150,17 @@ sets an auth cooldown on that provider bucket (`ab limits`, clear with `ab limit
 opencode and pi already take the provider in the model id (`opencode:openrouter/MODEL`, `pi:PROVIDER/MODEL`) and bucket per
 provider; `opencode/openrouter:...` is rejected.
 
+**Hermes isolation and stop-on-kill (`hermes_isolate`, default `true`).** Because `hermes chat` is a thin client to a
+Hermes gateway daemon, killing only the client leaves a session running on a shared gateway with the gateway's own
+environment. By default the runner creates an isolated per-run `HERMES_HOME` under `$AB_HOME/runs/<run>.hermes`, copies
+only provider auth/config (`auth.json`, `auth/`, `.env`, `config.yaml`) with messaging/bot/gateway tokens and platform
+sections stripped (no `gateway.lock` or shared `state.db`), and passes the worker's `AB_*` environment and workdir into
+that ephemeral gateway. On `ab kill`, timeout, lease expiry, cancellation, or normal exit, the runner stops the
+ephemeral gateway (`hermes gateway stop --yes` plus process-group teardown on `gateway.pid`), harvests token and cost
+accounting from the per-run `state.db`, and removes the temporary directory without touching any shared user gateway.
+Disable with `ab config set hermes_isolate false` (in non-isolated mode `ab kill` sends `SIGINT` before `SIGTERM` so
+`hermes chat` can interrupt its session without stopping the shared gateway).
+
 Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Opencode only runs `-free` models
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:
 `ab edit ID --harness claude --model opus`.

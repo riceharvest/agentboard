@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import time
@@ -534,18 +535,24 @@ class Hermes(Adapter):
         cmd = self.command(brief, model, effort, extra) + ["--provider", "custom", "--base-url", ep.base_url, "--api-key", ep.key]
         return cmd, {}
 
-    def parse(self, rc, out, err):
+    def parse(self, rc, out, err, hermes_home=None):
         r = Result()
-        m = re.search(r"session_id:\s*(\S+)", (err or "") + "\n" + (out or ""))
+        combined = (err or "") + "\n" + (out or "")
+        m = re.search(r"session_id:\s*(\S+)", combined) or re.search(r"(?m)^Session:\s*(\S+)", err or "")
         r.session_id = m[1] if m else None
         r.text = re.sub(r"(?m)^session_id:.*$", "", out or "").strip()
-        if r.session_id:
-            row = hermes_session(r.session_id)
-            if row:
-                r.input, r.output = row["input_tokens"] or 0, row["output_tokens"] or 0
-                r.cache_read, r.cache_write = row["cache_read_tokens"] or 0, row["cache_write_tokens"] or 0
-                r.reasoning = row["reasoning_tokens"] or 0
-                r.model = row["model"]
+        row = hermes_session(r.session_id, home=hermes_home) if (r.session_id or hermes_home) else None
+        if row:
+            r.session_id = r.session_id or row.get("id")
+            r.input, r.output = row.get("input_tokens") or 0, row.get("output_tokens") or 0
+            r.cache_read, r.cache_write = row.get("cache_read_tokens") or 0, row.get("cache_write_tokens") or 0
+            r.reasoning = row.get("reasoning_tokens") or 0
+            r.model = row.get("model")
+            cost = row.get("actual_cost_usd")
+            if cost is None:
+                cost = row.get("estimated_cost_usd")
+            if cost is not None:
+                r.cost_usd = float(cost)
         r.ok = rc == 0 and bool(r.text)
         if not r.ok:
             r.error = _tail(err) or r.text or f"exit {rc}"
@@ -846,23 +853,252 @@ ADAPTERS = {a.name: a for a in (Claude(), Agy(), OpenCode(), Gemini(), Pi(), Her
 # ---------------------------------------------------------------- hermes helpers
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 
+_HERMES_STRIP_ENV_PREFIXES = (
+    "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_", "MATRIX_", "SIGNAL_",
+    "WEIXIN_", "WECHAT_", "IMESSAGE_", "SMS_", "MSTEAMS_", "TEAMS_",
+    "BLUEBUBBLES_", "DINGTALK_", "FEISHU_", "LARK_", "LINE_", "MATTERMOST_",
+    "IRC_", "ZULIP_", "HERMES_GATEWAY_", "HERMES_TUI_GATEWAY_",
+    "HERMES_KANBAN_", "RELAY_", "GATEWAY_", "API_SERVER_",
+)
+_HERMES_STRIP_ENV_SUFFIXES = (
+    "_BOT_TOKEN", "_APP_TOKEN", "_WEBHOOK_URL", "_WEBHOOK_SECRET",
+)
+_HERMES_STRIP_ENV_EXACT = frozenset({
+    "SUDO_PASSWORD", "HERMES_PROFILE",
+})
+_HERMES_STRIP_YAML_KEYS = frozenset({
+    "platforms", "discord", "telegram", "slack", "whatsapp", "signal", "matrix",
+    "weixin", "wechat", "imessage", "sms", "msteams", "teams", "bluebubbles",
+    "dingtalk", "feishu", "lark", "line", "mattermost", "irc", "zulip",
+    "gateway", "kanban", "dashboard", "cron", "desktop", "updates", "onboarding",
+    "platform_toolsets",
+})
 
-def hermes_dbs():
-    dbs = [("default", HERMES_HOME / "state.db")]
-    for p in sorted((HERMES_HOME / "profiles").glob("*/state.db")):
+
+def _is_stripped_hermes_env_key(key):
+    k = key.strip().upper()
+    return (k in _HERMES_STRIP_ENV_EXACT
+            or k.startswith(_HERMES_STRIP_ENV_PREFIXES)
+            or k.endswith(_HERMES_STRIP_ENV_SUFFIXES))
+
+
+def _sanitize_hermes_env(text):
+    out = []
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            out.append(line)
+            continue
+        lhs = s.split("=", 1)[0].strip()
+        if lhs.startswith("export "):
+            lhs = lhs[7:].strip()
+        if _is_stripped_hermes_env_key(lhs):
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _sanitize_hermes_config(text):
+    out = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if line and not line[0].isspace() and not line.startswith("#"):
+            m = re.match(r"^([A-Za-z0-9_.-]+)\s*:", line)
+            if m:
+                skipping = m.group(1) in _HERMES_STRIP_YAML_KEYS
+                if skipping:
+                    continue
+            else:
+                skipping = False
+        elif skipping:
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def prepare_hermes_home(dest, source=None):
+    """Create an isolated per-run HERMES_HOME with provider auth/config but no bot tokens or gateway locks."""
+    src = Path(source) if source else HERMES_HOME
+    dst = Path(dest)
+    dst.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(dst, 0o700)
+    except OSError:
+        pass
+    auth_file = src / "auth.json"
+    if auth_file.is_file():
+        shutil.copy2(auth_file, dst / "auth.json")
+        try:
+            os.chmod(dst / "auth.json", 0o600)
+        except OSError:
+            pass
+    auth_dir = src / "auth"
+    if auth_dir.is_dir():
+        shutil.copytree(auth_dir, dst / "auth", dirs_exist_ok=True)
+    env_file = src / ".env"
+    if env_file.is_file():
+        out_env = dst / ".env"
+        out_env.write_text(_sanitize_hermes_env(env_file.read_text(errors="replace")))
+        try:
+            os.chmod(out_env, 0o600)
+        except OSError:
+            pass
+    cfg_file = src / "config.yaml"
+    if cfg_file.is_file():
+        out_cfg = dst / "config.yaml"
+        out_cfg.write_text(_sanitize_hermes_config(cfg_file.read_text(errors="replace")))
+        try:
+            os.chmod(out_cfg, 0o600)
+        except OSError:
+            pass
+    return dst
+
+
+def _pid_start(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _pid_alive(pid, start=None):
+    if not pid or pid <= 1:
+        return False
+    st = _pid_start(pid)
+    if st is None:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+    except OSError:
+        return False
+    return start is None or str(st) == str(start)
+
+
+def read_hermes_gateway_pid(home):
+    """Return (pid, start_time) from <home>/gateway.pid if it belongs to *home*, else (None, None)."""
+    home_p = Path(home)
+    pid_file = home_p / "gateway.pid"
+    if not pid_file.is_file():
+        return None, None
+    try:
+        raw = pid_file.read_text(errors="replace").strip()
+    except OSError:
+        return None, None
+    if not raw:
+        return None, None
+    pid, start = None, None
+    if raw.startswith("{"):
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            return None, None
+        recorded_home = doc.get("hermes_home")
+        if recorded_home:
+            try:
+                if os.path.realpath(recorded_home) != os.path.realpath(home_p):
+                    return None, None
+            except OSError:
+                return None, None
+        try:
+            pid = int(doc["pid"])
+        except (KeyError, TypeError, ValueError):
+            return None, None
+        if doc.get("start_time") is not None:
+            start = str(doc["start_time"])
+    else:
+        try:
+            pid = int(raw.splitlines()[0].strip())
+        except ValueError:
+            return None, None
+    if not pid or pid <= 1:
+        return None, None
+    return pid, start
+
+
+def _signal_pid_or_pgid(pid, sig):
+    try:
+        pgid = os.getpgid(pid)
+        my_pgid = os.getpgid(0)
+        if pgid == pid and pgid != my_pgid:
+            os.killpg(pgid, sig)
+            return
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def stop_hermes_gateway(home, force=False, wait_s=0.0):
+    """Stop the ephemeral Hermes gateway owned by an isolated per-run *home*.
+    Refuses to target the user's shared HERMES_HOME."""
+    if not home:
+        return False
+    home_p = Path(home)
+    if not home_p.exists():
+        return False
+    try:
+        if os.path.realpath(home_p) == os.path.realpath(HERMES_HOME):
+            return False
+    except OSError:
+        pass
+    pid, start = read_hermes_gateway_pid(home_p)
+    if pid is not None and not _pid_alive(pid, start):
+        return False
+    has_live = pid is not None or (home_p / "gateway.lock").exists()
+    if not has_live:
+        return False
+    if not force:
+        if shutil.which("hermes"):
+            env = {k: v for k, v in os.environ.items() if not _is_stripped_hermes_env_key(k)}
+            env["HERMES_HOME"] = str(home_p)
+            try:
+                subprocess.run(["hermes", "gateway", "stop", "--yes"], env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        pid, start = read_hermes_gateway_pid(home_p)
+        if pid and _pid_alive(pid, start):
+            _signal_pid_or_pgid(pid, signal.SIGTERM)
+        if wait_s > 0 and pid and _pid_alive(pid, start):
+            deadline = time.monotonic() + wait_s
+            while time.monotonic() < deadline and _pid_alive(pid, start):
+                time.sleep(0.05)
+            if _pid_alive(pid, start):
+                _signal_pid_or_pgid(pid, signal.SIGKILL)
+        return True
+    if pid and _pid_alive(pid, start):
+        _signal_pid_or_pgid(pid, signal.SIGKILL)
+        return True
+    return False
+
+
+def hermes_dbs(home=None):
+    base = Path(home) if home else HERMES_HOME
+    dbs = [("default", base / "state.db")]
+    for p in sorted((base / "profiles").glob("*/state.db")):
         dbs.append((p.parent.name, p))
     return [(n, p) for n, p in dbs if p.exists()]
 
 
-def hermes_session(sid):
-    for _, p in hermes_dbs():
+def hermes_session(sid, home=None):
+    for _, p in hermes_dbs(home):
         try:
             c = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
             c.row_factory = sqlite3.Row
-            row = c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            if sid:
+                row = c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            elif home:
+                row = c.execute("SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1").fetchone()
+            else:
+                row = None
             c.close()
             if row:
-                return row
+                return dict(row)
         except sqlite3.Error:
             continue
     return None

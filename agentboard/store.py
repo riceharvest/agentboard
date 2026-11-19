@@ -90,6 +90,7 @@ DEFAULTS = {
     "cooldown.auth": "6h",
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
+    "hermes_isolate": True,     # run Hermes in a per-run HERMES_HOME (strips bot tokens, stops ephemeral gateway on kill/exit)
     "tiers": {
         "max": ["claude:opus@high", "codex:@xhigh", "agy:Claude Opus 5.5 (High)", "agy:Gemini 4 Argon (High)"],
         "high": ["claude:sonnet@high", "codex:@high", "agy:Claude Sonnet 5.5 (High)", "agy:Gemini 4 Neon (High)"],

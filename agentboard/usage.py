@@ -203,9 +203,10 @@ def harvest(conn, only=None):
     return out
 
 
-def record_run_usage(conn, run_id, harness_name, bucket, model, task_id, res):
-    """Usage of harnesses we can't harvest from disk (agy, gemini, codex, pi --no-session) comes from the run itself."""
-    if H.ADAPTERS[harness_name].harvested and harness_name != "pi":
+def record_run_usage(conn, run_id, harness_name, bucket, model, task_id, res, force=False):
+    """Usage of harnesses we can't harvest from disk (agy, gemini, codex, pi --no-session,
+    or an isolated per-run Hermes home) comes from the run itself."""
+    if not force and H.ADAPTERS[harness_name].harvested and harness_name != "pi":
         return
     if not any((res.input, res.output, res.cache_read, res.cache_write)):
         return  # failed before any model call: nothing was spent

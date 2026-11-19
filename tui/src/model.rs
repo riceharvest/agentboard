@@ -136,6 +136,8 @@ pub struct Child {
     pub timeout_s: Option<f64>,
     pub title: Option<String>,
     pub board: Option<String>,
+    /// "retrying 429 (12m)" / "idle 40m" when the runner's stall watchdog sees the run stuck
+    pub stall: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

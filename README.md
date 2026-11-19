@@ -273,6 +273,22 @@ quota bucket has a launch budget per `pace_interval` (default 10m), shown in `ab
 
 Other buckets keep launching while one is held back. See `ab guide` ("Launch pacing").
 
+## Stall watchdog
+
+Free models get rate limited, and a harness that retries 429s internally looks perfectly healthy: live process, timers running,
+nothing happening. The runner reads each run's own logs (Hermes `agent.log`, Claude session transcript, Codex JSON stream) and
+catches two cases without burning an attempt:
+
+- **stuck in provider 429 retries** longer than `stall_retry_after` (default `10m`): killed as a `limit` on its bucket (cooldown
+  `stall_cooldown`, default `30m`, or the provider's reset hint; the pacer halves the bucket), the card reroutes to the next
+  candidate;
+- **no sign of life** longer than `stall_idle_after` (default `45m`): killed and retried once, then held for the overseer
+  (`stalled=overseer`, listed by `ab anomalies`).
+
+`ab runner status`, `ab snapshot` and the TUI show `retrying 429 (12m)` / `idle 40m` on the run. Cards that legitimately wait
+on a long job: label `stall=off` or `stall=90m`. Setting a threshold to `off` disables that watchdog. See `ab guide`
+("Stall watchdog").
+
 ## Snapshot and control verbs for UIs
 
     ab snapshot --json [-B BOARD] [--closed N] [--events-after ID] [--tail RUN_ID:BYTES]

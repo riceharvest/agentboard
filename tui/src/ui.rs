@@ -317,7 +317,8 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
     }
     if t.state == "claimed" {
         if let Some(c) = app.snap.runner.children.iter().find(|c| c.task_id == t.id) {
-            return Some(format!("  ▶ {}:{} {}", c.harness, c.model.clone().unwrap_or_default(), fmt_dur(c.elapsed_s + app.age())));
+            let stall = c.stall.as_ref().map(|s| format!("  ⚠ {s}")).unwrap_or_default();
+            return Some(format!("  ▶ {}:{} {}{}", c.harness, c.model.clone().unwrap_or_default(), fmt_dur(c.elapsed_s + app.age()), stall));
         }
     }
     if t.is_negative() {
@@ -467,6 +468,9 @@ fn running(app: &mut App, f: &mut Frame, area: Rect) {
         ];
         spans.extend(bar(12, frac, None, gauge_color(frac)));
         spans.push(sp(format!(" {:>6}/{:<6} ", fmt_dur(el), c.timeout_s.map(fmt_dur).unwrap_or_else(|| "∞".into())), base()));
+        if let Some(st) = &c.stall {
+            spans.push(sp(format!("⚠ {st}  "), fg(theme::BAD)));
+        }
         spans.push(sp(trunc(c.title.as_deref().unwrap_or(""), w.saturating_sub(100).max(10)), base()));
         let mut line = Line::from(spans);
         if i == app.sel.run {

@@ -211,6 +211,10 @@ class Adapter:
     harvested = False      # True when the usage harvester already counts this harness's sessions
     default_bucket = None
     provider_pin = False   # True when a spec may name the provider: 'hermes/nous:MODEL'
+    # Idle watchdog: where a "still alive and working" signal comes from. "out" = the run's stdout/stderr stream
+    # (a harness that streams events while it works); "probe" = probe()'s last_progress_at (its own log/transcript).
+    # None = nothing to watch (most harnesses print one blob at exit), so a quiet run is never called idle.
+    idle_signal = None
 
     def available(self):
         return bool(self.bin and shutil.which(self.bin))
@@ -233,6 +237,13 @@ class Adapter:
     def parse(self, rc, out, err):
         raise NotImplementedError
 
+    def probe(self, run):
+        """Optional: read the live run's OWN logs (never its stdout, never tool output) and report
+        {"retry_count", "retry_since", "reset_at", "last_progress_at"}: how many provider 429 retries it has been
+        stuck in since its last successful model call, since when, a reset hint, and when the last model call
+        succeeded. `run` has .started, .workdir, .hermes_home, .out_path, .err_path. None = no such log."""
+        return None
+
     def bucket(self, model):
         return self.default_bucket or self.name
 
@@ -242,6 +253,10 @@ class Adapter:
 
 class Claude(Adapter):
     name, bin, harvested = "claude", "claude", True
+    idle_signal = "probe"   # `-p --output-format json` prints once at exit: the session transcript shows life
+
+    def probe(self, run):
+        return probe_claude_transcript(run)
 
     def command(self, brief, model=None, effort=None, extra=()):
         cmd = ["claude", "-p", brief, "--output-format", "json", "--dangerously-skip-permissions"]
@@ -521,6 +536,13 @@ class Pi(Adapter):
 class Hermes(Adapter):
     name, bin, harvested = "hermes", "hermes", True
     provider_pin = True
+    idle_signal = "probe"   # `hermes chat -Q` prints nothing until it exits: only the run's own agent.log shows life
+
+    def probe(self, run):
+        hh = getattr(run, "hermes_home", None)
+        if not hh:  # shared gateway: its log is not this run's
+            return None
+        return probe_hermes_log(Path(hh) / "logs" / "agent.log")
 
     def command(self, brief, model=None, effort=None, extra=(), provider=None):
         cmd = ["hermes", "chat", "-q", brief, "--oneshot", "-Q", "--pass-session-id", "--yolo"]
@@ -564,6 +586,7 @@ class Hermes(Adapter):
 
 class Codex(Adapter):
     name, bin, default_bucket = "codex", "codex", "openai-codex"
+    idle_signal = "out"     # `exec --json` streams one event per line while it works
 
     def command(self, brief, model=None, effort=None, extra=()):
         cmd = ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
@@ -1432,6 +1455,104 @@ def hermes_bucket(provider):
     if p in ("openai-codex",):
         return "openai-codex"
     return f"hermes-{p}"
+
+
+# ---------------------------------------------------------------- stall probes (live run logs)
+# These read only lines the HARNESS wrote (anchored on its logger prefix / record type), never the model's or a
+# tool's output, so a card that is *about* rate limiting cannot trip them.
+_RL_RE = re.compile(r"\b429\b|RateLimit|rate[ _-]?limit|too many requests|upstream capacity", re.I)
+_HERMES_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3}) (?:DEBUG|INFO|WARNING|ERROR) "
+                          r"(?:\[[^\]\s]+\] )?(agent\.[\w.]+): (.*)$")
+_HERMES_OK = re.compile(r"API call #\d+:")
+_HERMES_RETRY = re.compile(r"Retrying API call in|API call failed \(attempt|Nous 429 looks like upstream capacity")
+
+
+def _read_tail(path, n=524288):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def _streak(events):
+    """events: time-ordered ('ok'|'rl', epoch, text). -> retry_count, retry_since, reset_at, last_progress_at, since the last 'ok'."""
+    last_ok, count, since, hint = None, 0, None, None
+    for kind, ts, text in events:
+        if kind == "ok":
+            last_ok, count, since, hint = ts, 0, None, None
+        else:
+            count += 1
+            since = since or ts
+            hint = parse_reset(text, base=ts) or hint
+    return {"retry_count": count, "retry_since": since, "reset_at": hint, "last_progress_at": last_ok}
+
+
+def probe_hermes_log(path):
+    """Hermes per-run HERMES_HOME logs/agent.log. Missing file -> a probe with no progress yet (not None: the run has a log
+    channel, it just has not written a model call). A 429 streak = provider-429 retry lines since the last `API call #N:`."""
+    txt = _read_tail(path)
+    if txt is None:
+        return {"retry_count": 0, "retry_since": None, "reset_at": None, "last_progress_at": None}
+    events = []
+    for line in txt.splitlines():
+        m = _HERMES_LINE.match(line)
+        if not m:
+            continue
+        try:
+            ts = datetime.strptime(m[1], "%Y-%m-%d %H:%M:%S").timestamp() + int(m[2]) / 1000.0
+        except ValueError:
+            continue
+        mod, msg = m[3], m[4]
+        if mod == "agent.conversation_loop" and _HERMES_OK.match(msg):
+            events.append(("ok", ts, msg))
+        elif _HERMES_RETRY.search(msg) and _RL_RE.search(msg):
+            events.append(("rl", ts, msg))
+    return _streak(events)
+
+
+def _claude_projects_dir(workdir):
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    return Path(base) / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(workdir))
+
+
+def probe_claude_transcript(run):
+    """Claude Code session transcript (~/.claude/projects/<cwd slug>/<session>.jsonl): newest file written since the run
+    started. `system`/`api_error` records with status 429 are the retry streak; any other record is progress."""
+    wd = getattr(run, "workdir", None)
+    if not wd:
+        return None
+    d = _claude_projects_dir(wd)
+    try:
+        files = [f for f in d.glob("*.jsonl") if f.stat().st_mtime >= run.started - 2]
+    except OSError:
+        return None
+    if not files:
+        return None
+    path = max(files, key=lambda f: f.stat().st_mtime)
+    txt = _read_tail(path, 262144)
+    if txt is None:
+        return None
+    events = []
+    for line in txt.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            o = json.loads(line)
+            ts = datetime.fromisoformat(str(o.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if o.get("type") == "system" and o.get("subtype") == "api_error":
+            e = o.get("error") or {}
+            blob = f"{e.get('status', '')} {e.get('message', '')} {e.get('formatted', '')}"
+            if e.get("status") == 429 or _RL_RE.search(blob):
+                events.append(("rl", ts, blob))
+        elif o.get("type") in ("assistant", "user"):
+            events.append(("ok", ts, ""))
+    return _streak(events)
 
 
 # ---------------------------------------------------------------- tiers and buckets

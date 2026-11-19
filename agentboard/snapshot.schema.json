@@ -131,7 +131,8 @@
         "title": {"type": ["string", "null"]},
         "board": {"type": ["string", "null"]},
         "out_path": {"type": ["string", "null"]},
-        "err_path": {"type": ["string", "null"]}
+        "err_path": {"type": ["string", "null"]},
+        "stall": {"type": ["string", "null"], "description": "'retrying 429 (12m)' / 'idle 40m' when the stall watchdog sees the run stuck"}
       }
     },
     "runner": {

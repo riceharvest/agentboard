@@ -154,9 +154,38 @@ def runner_status(conn):
         "SELECT r.id run, r.task_id, r.harness, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
         "t.title, t.board, t.timeout_s FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
     default_to = parse_dur(cfg(conn, "timeout"))
+    stalls = cfg(conn, "stall_state") or {}
+    t = now()
     for ch in d["children"]:
         ch["timeout_s"] = ch["timeout_s"] or default_to
+        ch["stall"] = stall_label(conn, stalls.get(str(ch["run"])), t)
     return d
+
+
+def dur_or_off(v):
+    """A stall threshold: seconds, or None for 0 / off / false / empty (watchdog disabled)."""
+    if v in (None, False, "", 0, "0") or str(v).strip().lower() in ("off", "no", "none"):
+        return None
+    return parse_dur(v)
+
+
+def stall_label(conn, st, t=None):
+    """'retrying 429 (12m)' / 'idle 40m' for a run the watchdog has seen stuck, else None. A fresh blip stays quiet:
+    it is shown once it has lasted half the kill threshold (at most 1m for retries, 10m for idle)."""
+    if not st:
+        return None
+    t = t if t is not None else now()
+    age = max(0.0, t - float(st["since"]))
+    if st["kind"] == "retry":
+        limit = dur_or_off(cfg(conn, "stall_retry_after")) or 600
+        return f"retrying 429 ({fmt_age(age)})" if age >= min(60, limit / 2) else None
+    limit = dur_or_off(cfg(conn, "stall_idle_after")) or 2700
+    return f"idle {fmt_age(age)}" if age >= min(600, limit / 2) else None
+
+
+def fmt_age(s):
+    s = int(s)
+    return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h{s % 3600 // 60:02d}m"
 
 
 # ---------------------------------------------------------------- schedules
@@ -318,6 +347,9 @@ class Child:
         self.kill_reason = None
         self.kill_at = None
         self.hermes_home = None
+        self.stall = None            # {"kind": "retry"|"idle", "since": epoch, "count": n} as last persisted
+        self.stall_error = None      # why the watchdog killed it (becomes the run's error text)
+        self.stall_reset_at = None
 
 
 class Runner:
@@ -827,6 +859,100 @@ class Runner:
                     self.kill(ch, "cancelled")
                 elif t and t["status"] == "claimed" and t["owner"] != ch.owner:
                     self.kill(ch, "expired")
+                else:
+                    try:
+                        self.watch_stall(ch, t)
+                    except Exception as e:  # a watchdog bug must never take the runner down
+                        self.log(f"run {rid}: stall watchdog error: {e!r}")
+        self.save_stall_state()
+
+    # -- stall watchdog
+    def stall_policy(self, ch):
+        """(retry_after_s, idle_after_s) for this run; None = that watchdog is off (config 0/off, or card label stall=off|<dur>)."""
+        c = self.conn
+        retry_after, idle_after = dur_or_off(cfg(c, "stall_retry_after")), dur_or_off(cfg(c, "stall_idle_after"))
+        row = c.execute("SELECT labels, park FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+        label = str((json.loads(row["labels"] or "{}") if row else {}).get("stall", "")).strip().lower()
+        if label in ("off", "no", "false", "0", "never"):
+            return None, None
+        park = json.loads(row["park"]) if row and row["park"] else None
+        if park and not park.get("woken_at") and park.get("run") == ch.run_id:
+            return None, None  # parked itself on a long job and is only exiting: not a stall
+        if label:
+            try:
+                idle_after = parse_dur(label)
+            except ValueError:
+                pass
+        return retry_after, idle_after
+
+    def run_workdir(self, ch):
+        if ch.workdir:
+            return ch.workdir
+        t = self.conn.execute("SELECT workdir, labels FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+        if not t:
+            return None
+        return (json.loads(t["labels"] or "{}") or {}).get("worktree_dir") or t["workdir"] or str(store.HOME / "work" / ch.task_id)
+
+    def watch_stall(self, ch, task_row):
+        """One look at a live run. (1) Stuck in provider 429 retries longer than stall_retry_after: the bucket is
+        rate-limited, whatever the process looks like -> kill as a LIMIT (cooldown, AIMD halving, reroute, no attempt).
+        (2) No sign of life longer than stall_idle_after: kill, retried once, then held for the overseer."""
+        a = H.ADAPTERS.get(ch.harness)
+        if a is None:
+            return
+        retry_after, idle_after = self.stall_policy(ch)
+        t = now()
+        view = type("Run", (), {"started": ch.started, "workdir": self.run_workdir(ch), "hermes_home": ch.hermes_home,
+                                "out_path": ch.out_path, "err_path": ch.err_path})
+        pr = a.probe(view)
+        state = None
+        if pr and pr.get("retry_count") and pr.get("retry_since"):
+            state = {"kind": "retry", "since": pr["retry_since"], "count": pr["retry_count"]}
+            if retry_after and t - pr["retry_since"] > retry_after:
+                cool = dur_or_off(cfg(self.conn, "stall_cooldown")) or 1800
+                until = max(pr.get("reset_at") or 0, t + cool)
+                ch.stall_reset_at = until
+                ch.stall_error = (f"stalled in provider rate-limit retries: {pr['retry_count']} x 429 over {fmt_age(t - pr['retry_since'])} "
+                                  f"with no successful model call (stall_retry_after {fmt_age(retry_after)})")
+                self.log(f"run {ch.run_id} ({ch.task_id}): {ch.stall_error}; cooling {ch.bucket} until {store.fmt_ts(until)}")
+                with tx(self.conn):
+                    event(self.conn, ch.task_id, "runner", "stall", {"run": ch.run_id, "kind": "retry", "bucket": ch.bucket,
+                                                                      "retries": pr["retry_count"], "since": pr["retry_since"]})
+                self.kill(ch, "limit")
+                return
+        if a.idle_signal and idle_after:
+            last = ch.started
+            if a.idle_signal == "out":
+                for pth in (ch.out_path, ch.err_path):
+                    try:
+                        last = max(last, os.stat(pth).st_mtime)
+                    except (OSError, TypeError):
+                        pass
+            elif pr is not None:
+                last = max(last, pr.get("last_progress_at") or 0)
+            else:
+                last = None  # probe has nothing to read (no transcript / shared gateway): no signal, so no verdict
+            if last is not None:
+                if t - last > idle_after:
+                    ch.stall_error = f"no sign of life for {fmt_age(t - last)} (stall_idle_after {fmt_age(idle_after)})"
+                    self.log(f"run {ch.run_id} ({ch.task_id}): {ch.stall_error}")
+                    with tx(self.conn):
+                        event(self.conn, ch.task_id, "runner", "stall", {"run": ch.run_id, "kind": "idle", "since": last})
+                    self.kill(ch, "idle")
+                    return
+                if state is None and t - last >= 60:  # a retry streak, if any, is the more telling label
+                    state = {"kind": "idle", "since": last, "count": 0}
+        ch.stall = state
+
+    def save_stall_state(self):
+        """Persist what the watchdog sees so `ab runner status`, `ab snapshot` and the TUI (other processes) can show it."""
+        c = self.conn
+        want = {str(r): ch.stall for r, ch in self.children.items() if ch.stall}
+        have = cfg(c, "stall_state") or {}
+        if want != have:
+            with tx(c):
+                c.execute("INSERT INTO control(key,value) VALUES('stall_state',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                          (json.dumps(want),))
 
     def finalize(self, ch, rc):
         c = self.conn
@@ -851,6 +977,9 @@ class Runner:
                 res = a.parse(0 if rc is None else rc, out, err)
             if ch.kill_reason:
                 res.ok, res.error_kind, res.error = False, ch.kill_reason, f"killed by runner: {ch.kill_reason}"
+                if ch.stall_error:
+                    res.error = f"killed by runner: {ch.stall_error}"
+                    res.reset_at = ch.stall_reset_at
             model = res.model or ch.model
             with tx(c):
                 t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
@@ -875,6 +1004,26 @@ class Runner:
                         c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                         event(c, ch.task_id, "runner", "rerouted", {"run": ch.run_id, "kind": kind, "scope": scope, "until": until})
                     outcome = kind
+                elif ch.kill_reason == "idle":
+                    # a stall is not the card's fault: no attempt. The first one gets a fresh run, the second holds
+                    # the card for the overseer instead of looping.
+                    prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='idle' AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
+                    if mine:
+                        if prior == 0:
+                            c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                            event(c, ch.task_id, "runner", "stalled", {"run": ch.run_id, "retry": True, "why": ch.stall_error})
+                            store.post_message(c, "runner", f"Run {ch.run_id} on {ch.harness} showed no sign of life ({ch.stall_error}); "
+                                               f"killed, retrying once.", thread=ch.task_id, check=False, _in_tx=True)
+                        else:
+                            lb = json.loads(t["labels"] or "{}")
+                            lb["stalled"] = "overseer"
+                            c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, runnable=0, labels=?, updated_at=? WHERE id=?",
+                                      (json.dumps(lb), now(), ch.task_id))
+                            event(c, ch.task_id, "runner", "stalled", {"run": ch.run_id, "retry": False, "why": ch.stall_error})
+                            store.post_message(c, "runner", f"Run {ch.run_id} on {ch.harness} went idle again ({ch.stall_error}). Held for the "
+                                               f"overseer (label stalled=overseer, not auto-run). Re-queue with: ab edit {ch.task_id} --auto -l stalled=",
+                                               thread=ch.task_id, check=False, _in_tx=True)
+                    outcome = "idle"
                 elif ch.kill_reason in ("stopped", "cancelled", "killed", "expired"):
                     if mine:
                         c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))

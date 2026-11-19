@@ -88,6 +88,9 @@ DEFAULTS = {
     "cooldown.limit": "30m",    # used when a limit error carries no reset time
     "cooldown.unavailable": "5m",
     "cooldown.auth": "6h",
+    "stall_retry_after": "10m", # a run stuck in provider 429 retries this long -> LIMIT on its bucket, killed, no attempt counted (0/off = never)
+    "stall_idle_after": "45m",  # a run showing no sign of life this long -> killed + retried once, then the overseer (0/off = never; card label stall=off|90m)
+    "stall_cooldown": "30m",    # bucket cooldown after a retry stall (a later provider reset hint wins)
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
     "hermes_isolate": True,     # run Hermes in a per-run HERMES_HOME (strips bot tokens, stops ephemeral gateway on kill/exit)
@@ -1132,6 +1135,11 @@ def anomalies(conn, actor="agent", board=None, since=None):
                 out.append({"kind": "blocked", "task_id": r["id"], "board": r["board"], "deps": bad,
                             "title": r["title"], "updated_at": r["updated_at"],
                             "message": f"blocked: {r['id']} <{r['board']}> waits on dead/cancelled {','.join(bad)}: {r['title'][:60]}"})
+    for r in conn.execute("SELECT * FROM tasks WHERE status='open' AND json_extract(labels,'$.stalled')='overseer'"):
+        if board and r["board"] != board or not can(conn, actor, "read", r["board"], r["channel"]):
+            continue
+        out.append({"kind": "stalled", "task_id": r["id"], "board": r["board"], "title": r["title"], "updated_at": r["updated_at"],
+                    "message": f"stalled: {r['id']} <{r['board']}> went idle twice, held for the overseer: {r['title'][:60]}"})
     return out
 
 

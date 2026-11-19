@@ -301,7 +301,8 @@ def render_text(s):
              f"paused={r['paused']} draining={r['draining']} ready={r['ready']} free={r['free_gib']}GiB"]
     for c in r["children"]:
         lines.append(f"  run {c['run']} {c['task_id']} {c['harness']}:{c['model'] or ''} [{c['bucket']}] "
-                     f"{store.fmt_dur(c['elapsed_s'])}/{store.fmt_dur(c['timeout_s'])}  {(c['title'] or '')[:60]}")
+                     f"{store.fmt_dur(c['elapsed_s'])}/{store.fmt_dur(c['timeout_s'])}" + (f"  [{c['stall']}]" if c.get("stall") else "")
+                     + f"  {(c['title'] or '')[:60]}")
     for b in s["boards"]:
         lines.append(f"board {b['name']:<12} {'PAUSED ' if b['paused'] else ''}running={b['running']} max_slots={b['max_slots']} "
                      + " ".join(f"{k}={v}" for k, v in sorted(b["counts"].items())))

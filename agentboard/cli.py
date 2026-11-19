@@ -711,7 +711,8 @@ def cmd_runner(c, a, out):
             lines.append("note: " + s["note"])
         for ch in s.get("children", []):
             lines.append(f"  run {ch['run']} {ch['task_id']} {ch['harness']}:{ch['model'] or ''} [{ch['bucket']}] "
-                         f"{fmt_dur(now() - ch['started_at'])}  {(ch['title'] or '')[:60]}")
+                         f"{fmt_dur(now() - ch['started_at'])}"
+                         + (f"  [{ch['stall']}]" if ch.get("stall") else "") + f"  {(ch['title'] or '')[:60]}")
         return "\n".join(lines)
     out(st, txt)
 

@@ -273,6 +273,25 @@ New runs are spread over each quota's window instead of started all at once. Two
   - `cap`: a `max_runs` (or `max_output`/`max_cost`/`max_calls`) soft cap is the hard ceiling over both.
 A card whose bucket has no budget left waits and the runner tries the next candidate in its tier.
 
+## Stall watchdog (runs stuck on provider retries, or silent)
+
+A live process is not a working agent. Every runner tick reads each run's OWN logs (never its stdout or tool output, so a
+card *about* rate limiting cannot trip it) through an optional per-adapter probe: Hermes' per-run `logs/agent.log`
+(`$AB_HOME/runs/<run>.hermes/`), Claude's session transcript (`~/.claude/projects/<cwd>/<session>.jsonl`), Codex' streamed
+`--json` output. Two verdicts:
+- **Retry stall** (`stall_retry_after`, default `10m`): no successful model call since the first provider 429 retry
+  (Hermes retries 429s internally with backoff, so the run looks frozen). The run is killed as a **limit** on its bucket:
+  cooldown `stall_cooldown` (default `30m`, or the provider's reset hint when that is later), the bucket's AIMD budget is halved,
+  the card goes back to the queue and the next candidate takes it. **No attempt is counted.** Run outcome: `limit`.
+- **Idle stall** (`stall_idle_after`, default `45m`): no sign of life (Hermes/Claude: last model call or transcript entry; Codex:
+  no output growth). The run is killed and the card retried once, no attempt counted (outcome `idle`); a second idle run holds the
+  card for the overseer: labels `stalled=overseer`, not auto-run, listed by `ab anomalies`. Re-queue it with
+  `ab edit ID --auto -l stalled=`. Harnesses that print once at exit and have no log to read (agy, gemini, ...) are never called idle.
+- `ab runner status`, `ab snapshot` (`runner.children[].stall`) and the TUI mark such runs `retrying 429 (12m)` / `idle 40m`.
+- Cards that legitimately go quiet (a long tool call, waiting on a job): label `stall=off` (never killed) or `stall=90m` (idle
+  threshold for this card). Cards that `ab park` are not watched. `ab config set stall_retry_after off` / `stall_idle_after off`
+  (or `0`) turn a watchdog off globally.
+
 ## Controlling the runner (admin)
 
     ab runner start [--slots 3] | status | pause | resume | drain | stop [--now] | slots 4

@@ -230,6 +230,9 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
                         "limit": {"kind": l["kind"], "until": l["until"], "reason": l["reason"]} if l else None,
                         "cap": caps.get(b), "cap_hit": usage.cap_status(conn, b, live_plan)})
 
+    # ---- usage history for sparklines (optional keys: schema v1 clients may ignore them)
+    usage_hourly, usage_split = usage.history(conn, t)
+
     # ---- watchers
     watchers = []
     for w in conn.execute("SELECT * FROM watchers ORDER BY board, name"):
@@ -260,6 +263,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
         "boards": boards,
         "tasks": tasks, "tasks_open": open_n, "tasks_closed_shown": len(closed_rows),
         "runner": runner, "limits": limits, "caps": caps, "plan": plan, "usage": buckets,
+        "usage_hourly": usage_hourly, "usage_split": usage_split,
         "watchers": watchers, "schedules": schedules, "active_windows": active,
         "tiers": {"order": ctl["tier_order"] or list(tiers), "tiers": tiers, "fallback": ctl["tier_fallback"],
                   "default": ctl["default_tier"]},

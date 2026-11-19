@@ -1480,11 +1480,38 @@ def build_parser():
     s.add_argument("--bucket", help="quota bucket name (default ep:NAME)")
 
     sub("mcp", cmd_mcp, "serve the board as an MCP server on stdio")
+    s = sub("tui", cmd_tui, "live terminal dashboard and control panel (runs the separate ab-tui binary)")
+    s.add_argument("tui_args", nargs=argparse.REMAINDER)
     return p
+
+
+TUI_INSTALL = ("cargo install --git https://github.com/riceharvest/agentboard ab-tui"
+               "   (from a checkout: cargo install --path tui)")
+
+
+def run_tui(rest):
+    """`ab tui [ab-tui options]`: exec the terminal UI if it is installed, else say how to install it. Opens no database."""
+    import shutil
+    exe = os.environ.get("AB_TUI_BIN") or shutil.which("ab-tui")
+    if not exe:
+        print("ab: the terminal UI (ab-tui) is not installed. Install it with:\n    " + TUI_INSTALL, file=sys.stderr)
+        return 127
+    os.environ.setdefault("AB_BIN", shutil.which("ab") or shutil.which("agentboard") or os.path.abspath(sys.argv[0]))
+    try:
+        os.execv(exe, [exe, *rest])
+    except OSError as e:
+        print(f"ab: cannot run {exe}: {e}", file=sys.stderr)
+        return 127
+
+
+def cmd_tui(c, a, out):  # only reached through `ab --json tui` style calls: main() handles plain `ab tui` before the db opens
+    return run_tui(a.tui_args)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "tui":
+        return run_tui(argv[1:])
     a = fast_snapshot_args(argv)
     if a is None:
         a = build_parser().parse_args(argv)

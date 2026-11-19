@@ -362,6 +362,30 @@ def all_window_totals(conn, now=None):
     return out
 
 
+def history(conn, now=None, hours=168):
+    """-> (hourly, split) for UIs from ONE scan of the usage table.
+    hourly: {bucket: [output tokens per hour, oldest first, `hours` entries]} (sparkline data);
+    split: [{harness, model, bucket, calls, output, fresh_in, cost_usd}] over the same window, biggest output first, at most 40."""
+    now = now or time.time()
+    first = int(now // 3600) - hours + 1
+    hourly, split = {}, {}
+    for r in conn.execute("SELECT bucket, harness, model, CAST(ts/3600 AS INTEGER) h, COUNT(*) c, SUM(output) o, SUM(input+cache_write) f, SUM(cost_usd) d "
+                          "FROM usage WHERE ts>=? GROUP BY bucket, harness, model, h", (first * 3600,)):
+        i = r["h"] - first
+        if not 0 <= i < hours:
+            continue
+        if r["bucket"] is not None:
+            hourly.setdefault(r["bucket"], [0] * hours)[i] += r["o"] or 0
+        s = split.setdefault((r["harness"], r["model"], r["bucket"]), {"calls": 0, "output": 0, "fresh_in": 0, "cost_usd": 0.0})
+        s["calls"] += r["c"]
+        s["output"] += r["o"] or 0
+        s["fresh_in"] += r["f"] or 0
+        s["cost_usd"] += r["d"] or 0
+    rows = [{"harness": k[0], "model": k[1], "bucket": k[2], **v} for k, v in split.items()]
+    rows.sort(key=lambda x: -x["output"])
+    return hourly, rows[:40]
+
+
 def cap_status(conn, bucket, plan=_LIVE):
     """None if the bucket is under its soft cap (or has none), else a reason string."""
     cap = (store.cfg(conn, "caps") or {}).get(bucket)

@@ -85,6 +85,56 @@ and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab
 
 Full agent-facing docs: [`agentboard/GUIDE.md`](agentboard/GUIDE.md), also printed by `ab guide`.
 
+## Terminal UI (`ab tui`)
+
+![ab tui: board lanes, running agents with live output, decisions, usage and ops](tui/docs/ab-tui.gif)
+
+A live dashboard and control panel in one terminal (Rust: [ratatui](https://ratatui.rs) + [tachyonfx](https://github.com/junkdog/tachyonfx)).
+It holds no board logic: it polls `ab snapshot --json` about once a second (events incrementally with `--events-after`) and every
+action is an `ab` verb, with a confirmation for the destructive ones.
+
+    cargo install --git https://github.com/riceharvest/agentboard ab-tui    # or, from a checkout: cargo install --path tui
+    ab tui                      # execs ab-tui; with no binary installed it prints the line above
+    ab tui --board-home DIR --no-fx
+
+| Screen | What it shows | Keys |
+|---|---|---|
+| header (always) | runner state, slots gauge, open schedule window, Claude 5h and weekly gauges with the weekly **pace** marker and guard reason, cooldown countdowns, free RAM, a GPU line | |
+| 1 Board | kanban per board: ready / running / waiting / review / done / dead with counts and caps, coloured by `type` label and tier, "waits on" for dependencies | arrows, `b` board, `Enter` |
+| 2 Running | one row per run: harness:model, bucket, elapsed vs timeout bar, live tail of the selected run | `K` kill run |
+| 3 Card | body (simple markdown), notes, run history with tokens, result, dependency tree | `r` retry, `x` cancel, `n` note, `P` `T` `H` priority/tier/harness, `D` defer, `e` `s` open workdir in `$EDITOR` / a shell |
+| 4 Decisions | open manual cards owned by you with their options and default | `a` answer (note + done) |
+| 5 Usage | per bucket 5h / 24h / 7d totals with a 7-day sparkline, split per harness and model | |
+| 6 Feed | every event as it happens | `/` filter |
+| 7 Ops | runner, boards, watchers, schedules, tiers, caps | `p` pause/resume, `d` drain, `R` reload, `S` stop, `+` `-` slots, `Enter` toggle, `J` `K` reorder tiers |
+| 8 Panels | your own panels (below) | |
+
+`Tab` or `1`-`8` switch screens, `?` is the key help, `:` the command palette (`pause`, `slots 4`, `board web`, `fx off`, `ab VERB ...`),
+`/` filters. The mouse works for tabs, selection and scrolling.
+
+Effects (tachyonfx, drawn after the widgets, never blocking input): sweep-in at start, slide between screens, new feed lines fade in,
+a green glow when a card finishes, a red glitch when one dies, the Decisions tab breathes while something waits for you. `--no-fx`
+(or `fx = false`) turns them off; they also switch themselves off when the terminal draws slowly. The terminal bell (and
+`notify-send`, if installed) rings for new decision cards and dead cards.
+
+Settings and custom panels go in `tui.toml` in the board home (`$AB_HOME`, default `~/.agentboard`); nothing is required:
+
+    poll_ms = 1000                 # snapshot interval
+    owner = "me"                   # whose decision cards to show (default: the actor `ab` runs as)
+    bell = true
+    gpu_command = "nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader"
+    ram_command = "..."            # replaces the /proc/meminfo reading (first lines of its output are shown)
+    [[panel]]                      # any shell command, refreshed every N seconds, shown on screen 8
+    title = "Digest"
+    command = "cat ~/digest.txt"
+    refresh = 30
+
+`ab-tui` strips `AB_TASK`, `AB_RUN` and `AB_BOARD` from the environment of the `ab` commands it runs, so starting it from inside an agent
+session cannot act as that agent. The tests (`cargo test` in `tui/`) render every screen into ratatui's `TestBackend` from a
+fixture snapshot (`tui/tests/fixtures/snapshot.json`, made by `tui/tests/make_fixture.py` and checked against
+`agentboard/snapshot.schema.json` by `tests/test_tui.py`) and drive every control against a throwaway `AB_HOME`.
+`tui/docs/record.py` recorded the GIF from the real binary on a generated board.
+
 ## Harness support
 
 "Own account" means the harness runs with its normal login. "Endpoint" means agentboard points it at an
@@ -168,7 +218,7 @@ A UI makes one call and renders. For a live feed, pass the previous call's `even
 events come back (oldest first, at most `--events-limit`, `events_truncated` says if some were dropped). `--tail 12:4000`
 adds the last 4,000 bytes of run 12's stdout and stderr with ANSI escapes removed (`ab tail --run 12 --bytes 4000
 [--follow 30s]` prints the same). The snapshot opens the database read-only and never calls the provider, a harness or `gh`;
-`plan.claude_plan_pct` is the last reading the runner stored. Fields are documented in the schema; extra keys may appear later.
+`plan.claude_plan_pct` is the last reading the runner stored. `usage_hourly` (per bucket, output tokens per hour for the last 168 hours) and `usage_split` (per harness/model/bucket) are what a UI draws sparklines and tables from. Fields are documented in the schema; extra keys may appear later.
 
 Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on stdout, `2` usage, `3` nothing/timeout):
 

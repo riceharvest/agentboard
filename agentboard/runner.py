@@ -240,6 +240,10 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 
+def norm_dir(d):
+    return os.path.realpath(os.path.expanduser(str(d))) if d else ""
+
+
 # ---------------------------------------------------------------- runner
 class Child:
     def __init__(self, run_id, task_id, owner, harness, model, bucket, pid, start, proc, timeout_s, workdir, out_path, err_path, started):
@@ -428,12 +432,55 @@ class Runner:
             return cand, b, None
         return None, None, "; ".join(reasons) or "tier has no candidates"
 
+    def lockfree(self, labels):
+        """Non-code cards (watch/decision/dive/overseer, or label lock=none) don't take the workdir lock."""
+        lock = str(labels.get("lock", "")).lower()
+        if lock:
+            return lock in ("none", "off", "no", "free")
+        return str(labels.get("type", "")) in (cfg(self.conn, "lockfree_types") or [])
+
+    def busy_dirs(self):
+        """Workdirs held right now by ANY claimed card (any board, any harness, any owner, runner child or
+        manual claim, re-adopted run) that took the lock. Cards running in their own worktree or lock-free hold nothing."""
+        held = set()
+        for r in self.conn.execute("SELECT id, workdir, labels FROM tasks WHERE status='claimed' AND workdir IS NOT NULL AND workdir!=''"):
+            lb = json.loads(r["labels"] or "{}")
+            if not lb.get("worktree_dir") and not self.lockfree(lb):
+                held.add(norm_dir(r["workdir"]))
+        for ch in self.children.values():
+            if ch.workdir and getattr(ch, "holds_lock", True):
+                held.add(norm_dir(ch.workdir))
+        return held
+
+    def make_worktree(self, task, workdir):
+        """`git worktree add -b ab/<task> <dir> HEAD` next to the busy repo. Returns the new dir or None."""
+        try:
+            top = subprocess.run(["git", "-C", workdir, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=30)
+            if top.returncode:
+                return None
+            wt = Path(store.HOME) / "worktrees" / task["id"]
+            branch = f"ab/{task['id']}"
+            if not wt.exists():
+                wt.parent.mkdir(parents=True, exist_ok=True)
+                r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", "-b", branch, str(wt), "HEAD"],
+                                   capture_output=True, text=True, timeout=120)
+                if r.returncode:  # branch left over from an earlier attempt: reuse it
+                    r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", str(wt), branch],
+                                       capture_output=True, text=True, timeout=120)
+                if r.returncode:
+                    self.log(f"{task['id']}: git worktree failed: {(r.stderr or r.stdout).strip()[-200:]}")
+                    return None
+            return str(wt), branch, top.stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"{task['id']}: git worktree failed: {e}")
+            return None
+
     def fill(self, slots):
         c = self.conn
         if len(self.children) >= slots:
             return None
         chans = cfg(c, "channels") or None
-        busy_dirs = {ch.workdir for ch in self.children.values() if ch.workdir}
+        busy_dirs = self.busy_dirs()
         limits = store.active_limits(c)
         caps = {r["name"]: r["max_slots"] for r in c.execute("SELECT name, max_slots FROM boards")}
         note = None
@@ -448,8 +495,15 @@ class Runner:
                 note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
                 break
             workdir = t["workdir"] or str(store.HOME / "work" / t["id"])
-            if not cfg(c, "share_workdir") and workdir in busy_dirs:
-                continue
+            labels = json.loads(t["labels"] or "{}")
+            free = self.lockfree(labels)
+            wt = None
+            if not free and not cfg(c, "share_workdir") and norm_dir(workdir) in busy_dirs:
+                want = str(labels.get("worktree", "")).lower()
+                want = want in ("on", "1", "yes", "true") if want else bool(cfg(c, "worktree"))
+                if not want or not Path(workdir).is_dir():
+                    continue
+                wt = True  # made after the other checks pass, in spawn()
             cand, bucket, why = self.pick(t, limits)
             if cand is None:
                 if self.waiting.get(t["id"]) != why:
@@ -460,12 +514,17 @@ class Runner:
                 note = f"{t['id']} waiting: {why}"
                 continue
             self.waiting.pop(t["id"], None)
-            if self.spawn(t, cand, bucket, workdir):
-                busy_dirs.add(workdir)
+            if self.spawn(t, cand, bucket, workdir, worktree=bool(wt), lockfree=free) and not wt and not free:
+                busy_dirs.add(norm_dir(workdir))
         return note
 
-    def spawn(self, task, cand, bucket, workdir):
+    def spawn(self, task, cand, bucket, workdir, worktree=False, lockfree=False):
         c = self.conn
+        wtinfo = None
+        if worktree:
+            wtinfo = self.make_worktree(task, workdir)
+            if not wtinfo:
+                return False  # not a git repo / git failed: stay queued like a plain busy dir
         a = H.ADAPTERS[cand.harness]
         with tx(c):
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
@@ -485,11 +544,30 @@ class Runner:
             event(c, task["id"], "runner", "started", {"run": run_id, "harness": cand.harness, "model": cand.model,
                                                        "effort": cand.effort, "bucket": bucket, "candidate": cand.label(),
                                                        **({"provider": cand.provider} if cand.provider else {})})
+        orig_workdir = workdir
+        if wtinfo:
+            workdir = wtinfo[0]
+            with tx(c):
+                lb = json.loads(c.execute("SELECT labels FROM tasks WHERE id=?", (task["id"],)).fetchone()[0] or "{}")
+                lb.update(worktree_dir=workdir, worktree_branch=wtinfo[1])
+                c.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(lb), task["id"]))
+                event(c, task["id"], "runner", "worktree", {"dir": workdir, "branch": wtinfo[1], "from": orig_workdir})
+            cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
+        elif json.loads(cur["labels"] or "{}").get("worktree_dir"):  # earlier attempt used a worktree, this one holds the real dir
+            with tx(c):
+                lb = json.loads(cur["labels"] or "{}")
+                lb.pop("worktree_dir", None)
+                c.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(lb), task["id"]))
+            cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
         Path(workdir).mkdir(parents=True, exist_ok=True)
         runs_dir = store.HOME / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
         brief = build_brief(c, cur, workdir, (cur["attempts"] or 0) + 1, owner)
+        if wtinfo:
+            brief = brief.replace("\n\n", f"\nWORKTREE: {orig_workdir} is in use by another card, so you run in your own git worktree on branch {wtinfo[1]}. "
+                                  f"Commit there; when done merge it back (`git -C {wtinfo[2]} merge {wtinfo[1]}`, or rebase/PR) and "
+                                  f"say in your result which branch holds the work.\n\n", 1)
         extra = (cfg(c, "extra_args") or {}).get(cand.harness, [])
         try:
             ep = H.get_endpoint(c, cand.endpoint) if cand.endpoint else None
@@ -523,6 +601,7 @@ class Runner:
         timeout_s = cur["timeout_s"] or parse_dur(cfg(c, "timeout"))
         self.children[run_id] = Child(run_id, task["id"], owner, cand.harness, cand.model, bucket, proc.pid, start, proc,
                                       timeout_s, workdir, out_path, err_path, now())
+        self.children[run_id].holds_lock = not (wtinfo or lockfree)
         self.children[run_id].board = cur["board"]
         self.children[run_id].endpoint = cand.endpoint
         self.children[run_id].provider = cand.provider

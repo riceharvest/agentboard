@@ -78,6 +78,8 @@ DEFAULTS = {
     "sync_every_s": 120,
     "channels": "",             # comma list the runner serves; empty = all
     "share_workdir": False,     # allow two runs in the same workdir at once
+    "worktree": False,          # busy git workdir -> run the card in its own `git worktree` (card label worktree=on|off overrides)
+    "lockfree_types": ["watch", "decision", "dive", "overseer"],  # label type=X cards that neither wait for nor hold a workdir (label lock=none|hold overrides)
     "tier_fallback": "any",     # none | up | down | any: when every candidate of a tier is limited
     "default_tier": "medium",
     "cooldown.limit": "30m",    # used when a limit error carries no reset time

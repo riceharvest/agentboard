@@ -55,6 +55,23 @@ the board commands. After you change agentboard itself, `ab runner reload` makes
 code without waiting for or killing running agents (they are re-adopted); `ab runner stop` waits for them to finish
 and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `defer` or `release`.
 
+### One workdir, one run (the workdir lock)
+
+The runner never starts a card in a workdir that another card currently holds. The check reads the board, so it covers
+every claimed card whatever its board, harness or owner (runner children, runs re-adopted after `ab runner reload`, and
+cards a live session claimed by hand); paths are compared after `realpath`. Two ways around the wait:
+
+- **Lock-free cards.** Cards labelled `type=watch|decision|dive|overseer` (config `lockfree_types`) neither wait for nor
+  hold the lock, so a long build in a shared directory cannot block them. Force it per card with `-l lock=none`, or force
+  the lock back with `-l lock=hold`. Such cards run in the workdir as given; give them `--workdir` of a scratch dir if
+  they write files.
+- **Per-task git worktree (opt-in).** `ab config set worktree true` (all cards) or `-l worktree=on` (one card; `off` opts
+  out). When the workdir is a git repo and busy, the runner runs `git worktree add -b ab/<task> $AB_HOME/worktrees/<task> HEAD`,
+  starts the card there, tells the agent in its brief to merge the branch back, and records `worktree_dir` and
+  `worktree_branch` on the card (labels). A worktree run does not hold the original dir. Not a git repo, or git fails: the card just waits.
+
+`ab config set share_workdir true` switches the lock off entirely.
+
 ## Features
 
 - **Tasks:** dependencies, priorities, labels, not-before times, retries with backoff, per-task timeout,

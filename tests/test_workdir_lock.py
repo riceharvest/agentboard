@@ -81,6 +81,23 @@ def test_cross_board_busy_and_reload(rig, tmp_path):
     assert wait(lambda: status(j, b) == "claimed")
 
 
+def test_role_run_survives_reload(rig, tmp_path):
+    """A role-labelled run (owner role#N) is re-adopted under the same owner after a reload, not killed as expired."""
+    j = rig
+    a = j("add", "overseer sweep", "-l", "role=overseer")["id"]
+    j.start()
+    assert wait(lambda: status(j, a) == "claimed")
+    owner = j("show", a)["owner"]
+    assert owner.startswith("overseer#")
+    assert j("runner", "reload")["action"] == "reload"
+    time.sleep(6)
+    t = j("show", a)
+    assert t["status"] == "claimed" and t["owner"] == owner
+    pids = [int(p.name.rsplit(".", 1)[1]) for p in tmp_path.glob("args.*")]
+    assert len(pids) == 1
+    os.kill(pids[0], 0)  # the fake agent still runs; before the adopt fix the reload killed it as "expired"
+
+
 def test_manual_claim_holds_the_dir(rig, tmp_path):
     """A card claimed by a live session (not a runner child) also holds its workdir."""
     j = rig

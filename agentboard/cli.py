@@ -13,7 +13,7 @@ from . import runner as R
 from . import store, usage
 from .store import fmt_dur, fmt_ts, now, parse_dur, parse_time
 
-GUIDE = Path(__file__).resolve().parent.parent / "AGENT.md"
+GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
 
 
 class Out:

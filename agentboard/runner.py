@@ -16,7 +16,25 @@ from . import harness as H
 from . import store, usage
 from .store import cfg, event, now, parse_dur, tx
 
-AB_SCRIPT = Path(__file__).resolve().parent.parent / "ab"
+PKG_ROOT = Path(__file__).resolve().parent.parent     # dir that contains the agentboard package
+
+
+def ab_path_dirs():
+    """Dirs to put on a worker's PATH so `ab` resolves: the installed entry point and/or a git checkout."""
+    import shutil
+    dirs = []
+    w = shutil.which("ab")
+    if w:
+        dirs.append(str(Path(w).resolve().parent))
+    if (PKG_ROOT / "ab").exists():
+        dirs.append(str(PKG_ROOT))
+    if not dirs:
+        dirs.append(str(Path(sys.executable).parent))
+    return list(dict.fromkeys(dirs))
+
+
+def _pythonpath(env):
+    return f"{PKG_ROOT}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(PKG_ROOT)
 RUNNER_LEASE = 600          # the runner renews its children's claims every tick; this only matters if it dies
 STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "AI_AGENT", "HERMES_AGENT",
              "HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID",
@@ -423,7 +441,7 @@ class Runner:
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": str(store.HOME),
                     "AB_BOARD": cur["board"],
-                    "PATH": f"{AB_SCRIPT.parent}:{env.get('PATH', '')}"})
+                    "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
         try:
             with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
                 proc = subprocess.Popen(cmd, cwd=workdir, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL,
@@ -542,8 +560,10 @@ class Runner:
 def start_detached():
     store.HOME.mkdir(parents=True, exist_ok=True)
     logf = open(store.HOME / "runner.log", "ab")
-    p = subprocess.Popen([sys.executable, str(AB_SCRIPT), "runner", "run"], stdout=logf, stderr=logf,
-                         stdin=subprocess.DEVNULL, start_new_session=True, env={**os.environ, "AB_HOME": str(store.HOME)})
+    env = {**os.environ, "AB_HOME": str(store.HOME)}
+    env["PYTHONPATH"] = _pythonpath(env)
+    p = subprocess.Popen([sys.executable, "-m", "agentboard", "runner", "run"], stdout=logf, stderr=logf,
+                         stdin=subprocess.DEVNULL, start_new_session=True, env=env)
     return p.pid
 
 
@@ -553,9 +573,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-Environment=AB_HOME={home}
-Environment=PATH={path}
-ExecStart={py} {script} runner run
+Environment="AB_HOME={home}"
+Environment="PATH={path}"
+Environment="PYTHONPATH={pythonpath}"
+ExecStart={py} -m agentboard runner run
 Restart=on-failure
 RestartSec=10
 KillMode=process
@@ -566,4 +587,5 @@ WantedBy=default.target
 
 
 def service_text():
-    return SERVICE.format(home=store.HOME, path=os.environ.get("PATH", ""), py=sys.executable, script=AB_SCRIPT)
+    return SERVICE.format(home=store.HOME, path=":".join(ab_path_dirs() + [os.environ.get("PATH", "")]),
+                          pythonpath=_pythonpath(os.environ), py=sys.executable)

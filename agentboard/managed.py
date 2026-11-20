@@ -33,6 +33,28 @@ def is_managed(e):
     return bool(e and e.get("start_cmd"))
 
 
+def yield_active(e):
+    """True while the endpoint's yield_file exists. A file whose first word is a pid that is no longer alive is stale:
+    it is removed and ignored (so a crashed requester cannot hold the device)."""
+    path = e.get("yield_file") if e else None
+    if not path:
+        return False
+    try:
+        with open(path) as f:
+            head = f.read(200).split()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if head and head[0].isdigit() and _pid_start(int(head[0])) is None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def _pid_start(pid):
     try:
         with open(f"/proc/{pid}/stat") as f:
@@ -122,6 +144,15 @@ class Lifecycle:
         self._health[name] = (now(), ok, detail)
         return ok, detail
 
+    def yielding(self, name, eps=None):
+        """The yield file (own or a group-mate's) that currently asks this endpoint to give up its device, else None."""
+        eps = self.endpoints() if eps is None else eps
+        e = eps.get(name) or {}
+        for n, oe in eps.items():
+            if (n == name or (e.get("group") and oe.get("group") == e["group"])) and yield_active(oe):
+                return oe["yield_file"]
+        return None
+
     @staticmethod
     def runs_on(children, name):
         return sum(1 for ch in children.values() if getattr(ch, "endpoint", None) == name)
@@ -148,6 +179,10 @@ class Lifecycle:
         lim = limits.get(f"endpoint:{name}")
         if lim:
             return f"endpoint {name} {lim['kind']} until {store.fmt_ts(lim['until'])}: {lim.get('reason') or ''}".strip(), False
+        yf = self.yielding(name, eps)
+        if yf:       # a GPU job wants the device: no new runs here, the card reroutes (hold=False) without using an attempt
+            self.wanting.pop(name, None)
+            return f"endpoint {name} yields the device ({yf} exists)", False
         mine = self.state().get(name)
         ok, detail = self.healthy(name, e)
         if ok:
@@ -302,6 +337,10 @@ class Lifecycle:
                 continue
             if self.runs_on(children, name):
                 self.last_busy[name] = now()
+                continue
+            yf = self.yielding(name, eps)
+            if yf:
+                self.stop(name, f"yield file {yf}")
                 continue
             if status == "starting":
                 if self.healthy(name, e)[0]:

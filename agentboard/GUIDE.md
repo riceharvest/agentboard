@@ -36,6 +36,7 @@ exactly ONE of these and stop:
     ab fail $AB_TASK --negative "intended negative"    # dead immediately, label outcome=negative (skipped by `ab anomalies` and `--on dead` watchers)
     ab defer $AB_TASK --after <ID> --why "..."          # wait for another task
     ab park $AB_TASK --pid PID --note "..."             # wait for a long external job (see below); no attempt counted
+    ab defer $AB_TASK --until +1d --why "needs 7 days of data"   # waiting on time or data: defer, never release
     ab edit $AB_TASK --tier high && ab release $AB_TASK "needs a stronger model"
 
 Shell quoting eats `$0`, `$1` and backticks inside double quotes. Put the text in single quotes, or read it from a

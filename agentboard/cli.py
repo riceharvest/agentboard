@@ -1508,7 +1508,7 @@ def build_parser():
     s.add_argument("--all-boards", action="store_true")
     s.add_argument("--since", help="only dead cards updated within this window, e.g. 6h, 1d")
 
-    s = sub("release", cmd_release, "hand the task back without counting an attempt")
+    s = sub("release", cmd_release, "hand the task back without counting an attempt (to wait on time or data use `ab defer ID --until T --why ...`, not release: repeated quick releases trigger a relaunch backoff)")
     s.add_argument("id")
     s.add_argument("why", nargs="?")
     s.add_argument("--force", action="store_true")

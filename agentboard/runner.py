@@ -63,6 +63,7 @@ below. Your shell may not export AB_TASK/AB_ACTOR/AB_BOARD; `ab` then works them
   ab defer {id} --after ID [--why "..."]           park this task until ID is done, then stop
   ab park {id} --pid PID --note "..."              long job detached (nohup/setsid): exit now, a fresh agent resumes when it ends
   ab park {id} --file PATH [--grace 60s] --note "..."   same, waking when the file exists and stops growing
+  ab defer {id} --until T --why "..."              waiting on time or data: defer, NOT release (quick repeated releases get a relaunch backoff)
   ab edit {id} --tier high && ab release {id} "needs a stronger model"   escalate, then stop
   ab done {id} "short result: what changed, where, how it was verified"
   ab fail {id} "why it cannot be done"
@@ -167,6 +168,41 @@ def runner_status(conn):
         ch["timeout_s"] = ch["timeout_s"] or default_to
         ch["stall"] = stall_label(conn, stalls.get(str(ch["run"])), t)
     return d
+
+
+def loop_backoff(conn, t, run_id, started=None):
+    """Release->relaunch loop guard: the last N runs of the card each ended released (agent_open/agent_claimed, no `ab done`)
+    within M minutes -> not_before = now + backoff (doubling per further short run, capped) and a note. Called inside the
+    run-end transaction for a run that ended released; this run's row is not written yet, so it counts as the newest."""
+    n = dur_or_off(cfg(conn, "release_loop_runs"))
+    mm = cfg(conn, "release_loop_minutes")
+    mins = None if dur_or_off(mm) is None else parse_dur(mm, "m")
+    if not n or not mins:
+        return False
+    n = int(n)
+    cur = conn.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()
+    t_now = now()
+    if cur is None or t_now - (cur["started_at"] or t_now) > mins:
+        return False
+    streak = 1
+    for r in conn.execute("SELECT outcome, started_at, ended_at FROM runs WHERE task_id=? AND id<? ORDER BY id DESC", (t["id"], run_id)):
+        if r["outcome"] in ("agent_open", "agent_claimed", "release_loop") and r["ended_at"] and r["ended_at"] - (r["started_at"] or 0) <= mins:
+            streak += 1
+        else:
+            break
+    if streak < n:
+        return False
+    base = dur_or_off(cfg(conn, "release_loop_backoff")) or 600
+    cap = dur_or_off(cfg(conn, "release_loop_max")) or 21600
+    delay = min(cap, base * 2 ** (streak - n))
+    until = t_now + delay
+    conn.execute("UPDATE tasks SET not_before=?, updated_at=? WHERE id=?", (until, t_now, t["id"]))
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(until))
+    store.post_message(conn, "runner", f"relaunch loop: {streak} short released runs; backoff until {when}. "
+                       f"If you are waiting on time or data, use `ab defer {t['id']} --until T --why ...`, not `ab release`.",
+                       thread=t["id"], check=False, _in_tx=True)
+    event(conn, t["id"], "runner", "release_loop", {"run": run_id, "streak": streak, "until": until})
+    return True
 
 
 def dur_or_off(v):
@@ -1372,6 +1408,9 @@ class Runner:
                         store._fail_attempt(c, t, "runner", why, outcome)
                 else:
                     outcome = f"agent_{t['status']}" if t else "task_gone"
+                    if t is not None and outcome == "agent_open":
+                        if loop_backoff(c, t, ch.run_id):
+                            outcome = "release_loop"
                 c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, session_id=?, model=?, input=?, output=?, cache_read=?, "
                           "cache_write=?, reasoning=?, cost_usd=?, detail=? WHERE id=?",
                           (now(), rc, outcome, res.session_id, model, res.input, res.output, res.cache_read, res.cache_write,

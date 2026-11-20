@@ -99,6 +99,10 @@ DEFAULTS = {
     "limit_resume": "off",      # opt-in: workers checkpoint (commits + progress file); a retry after a limit death gets that state in its brief
     "limit_skip_after": "2",    # with limit_resume on: a card's route (bucket) with this many limit deaths is skipped for that card (0/off = never)
     "verify_rounds": "2",       # cards with --verify CMD: failed verifications that reopen the card before it is failed (0 = the first failure fails it)
+    "release_loop_runs": "3",   # a card whose last N runs each ended released (no `ab done`) within release_loop_minutes gets a not_before backoff (0/off = never)
+    "release_loop_minutes": "3",  # what counts as a short run for the rule above
+    "release_loop_backoff": "10m",  # first backoff; doubles with every further short released run, capped at release_loop_max
+    "release_loop_max": "6h",
     "verify_timeout": "10m",    # a verify command running longer than this counts as a failure
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models

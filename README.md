@@ -355,6 +355,12 @@ Exit 0 accepts. Otherwise the card reopens with the last 40 lines of the output 
 at most `verify_rounds` times (default `2`; no attempt is used); the next failure fails the card with the output as its result.
 `verify_timeout` (default `10m`) bounds the command. Runs show outcome `verify_failed`; `ab show` lists the `verify:` line.
 
+**Release-loop guard** (default on). An agent that calls `ab release` without progress used to be relaunched at once, forever. When a card's
+last `release_loop_runs` (default `3`) runs each ended released within `release_loop_minutes` (default `3`), the card gets
+`not_before` = now + `release_loop_backoff` (default `10m`, doubling per further short released run, capped by `release_loop_max`, default `6h`)
+and a note. Runs show outcome `release_loop`; `ab outcomes` counts them as failure class `release_loop`. Set `release_loop_runs off` to disable.
+Agents waiting on time or data should use `ab defer ID --until T --why ...`.
+
 **Resume after a limit death** (opt-in, default off). Runs killed by a provider limit used to restart from scratch.
 `ab config set limit_resume on` adds checkpoint rules to every brief (commit to the branch at milestones, keep an
 uncommitted `.ab-progress.md` in the workdir), and the retry brief of a card whose last run died on a limit lists the

@@ -1677,7 +1677,15 @@ def _resolve_task_arg(conn, a, fn_name):
     """`ab done/note/fail` without a usable task id: take it from the run home. `ab done "summary"` with $AB_TASK empty
     reaches us with the summary in the id slot; a value that is not a task on this board moves into the text slot."""
     slot = TASK_SLOT[fn_name]
-    if a.id and store.get_task(conn, a.id) is not None:
+    if a.id and (t := store.get_task(conn, a.id)) is not None:
+        if not os.environ.get("AB_ACTOR") and not getattr(a, "actor", None):
+            # explicit id, identity unset: a run home still tells us who we are, when the id is that run's own task
+            ctx, _ = infer_run(conn, board=getattr(a, "board", None) or os.environ.get("AB_BOARD") or None)
+            if ctx and ctx["task"] == t["id"]:
+                for k, v in (("AB_ACTOR", ctx["actor"]), ("AB_BOARD", ctx["board"]), ("AB_RUN", str(ctx["run"]))):
+                    if not os.environ.get(k):
+                        os.environ[k] = v
+                os.environ.setdefault("AB_TASK", ctx["task"])
         return
     if a.id and getattr(a, slot) or a.id and any(getattr(a, k, None) for k in TEXT_FILE_OPTS):
         return  # an explicit id that is not a task: let the store report it

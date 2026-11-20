@@ -143,14 +143,30 @@ def _matched_lines(blob, kind):
     return None
 
 
-def _finish(r, rc, out, err):
-    """Shared post-processing: classify failures, find reset times."""
+_BOXED = re.compile(r"^\s*(?:[│┃┆║|╭╰┌└├]|[+\-<>]\s|\d+[:\t ]|@@|diff |index |---|\+\+\+)")
+_HARNESS_OUT_LINE = re.compile(r"^\W*(?:error|api call failed|retrying api call|non-retryable|http \d{3}|\w*(?:error|exception):)", re.I)
+
+
+def _provider_error_text(out, err):
+    """Hermes: only what the harness itself reported. stderr minus boxed/diff-looking lines (tool output echoed there is
+    agent content, e.g. code containing `in (429, 500)`), plus stdout lines that are log records or error lines. The
+    transcript on stdout is never scanned."""
+    keep = [l for l in (err or "").splitlines()[-200:] if l.strip() and not _BOXED.match(l)]
+    keep += [l for l in (out or "").splitlines()[-200:]
+             if l.strip() and not _BOXED.match(l) and (_HERMES_LINE.match(l) or _HARNESS_OUT_LINE.match(l))]
+    return "\n".join(keep)[-4000:]
+
+
+def _finish(r, rc, out, err, scan=None):
+    """Shared post-processing: classify failures, find reset times. `scan`, when given, is the only text classified."""
     if not r.ok:
-        blob = "\n".join(x for x in (r.error, r.text if not r.ok else "", _tail(err, 4000)) if x)
+        blob = scan if scan is not None else "\n".join(x for x in (r.error, r.text if not r.ok else "", _tail(err, 4000)) if x)
         if not r.error_kind:
             r.error_kind = classify(blob) or "failed"
         if r.error_kind in ("auth", "limit", "unavailable"):
-            r.error = _matched_lines(r.error or "", r.error_kind) or _matched_lines(blob, r.error_kind) or r.error
+            hit = (_matched_lines(blob, r.error_kind) or _matched_lines(r.error or "", r.error_kind)) if scan is not None \
+                else (_matched_lines(r.error or "", r.error_kind) or _matched_lines(blob, r.error_kind))
+            r.error = hit or r.error
         if not r.error:
             r.error = _tail(blob, 1500) or f"exit code {rc} with no output"
         if r.error_kind == "limit":
@@ -578,7 +594,7 @@ class Hermes(Adapter):
         r.ok = rc == 0 and bool(r.text)
         if not r.ok:
             r.error = _tail(err) or r.text or f"exit {rc}"
-        return _finish(r, rc, out, err)
+        return _finish(r, rc, out, err, scan=_provider_error_text(out, err))
 
     def bucket(self, model, provider=None):
         return hermes_bucket(provider or hermes_default_provider() or "")

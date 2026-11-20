@@ -186,3 +186,22 @@ def test_nested_home_resolves_innermost_run():
     ctx, reason = cli.infer_run(None, env={"HERMES_HOME": inner}, cwd="/tmp")
     assert ctx is None
     assert reason.startswith(f"run home {inner} ")  # marker missing at the INNER home; outer ab-run-279 never consulted
+
+
+def test_done_explicit_task_id_infers_actor_from_run_home(abx, live_run):
+    """`ab done t_X 'summary'` with AB_* unset: the id resolves, the actor still comes from the run home."""
+    r = live_run(run_id=21)
+    code, out, err = _ab(abx, str(r["home"]), ["done", r["task"], "explicit result"], {"HERMES_HOME": str(r["home"])})
+    assert code == 0, (out, err)
+    assert _status(abx, r["task"])[0] == "done"
+
+
+def test_explicit_id_of_other_task_does_not_adopt_run_actor(abx, live_run):
+    r = live_run(run_id=22)
+    code, out, err = abx("--json", "add", "someone else's", "--board", "main")
+    other = json.loads(out)["id"]
+    code, out, err = _ab(abx, str(r["home"]), ["note", other, "hi"], {"HERMES_HOME": str(r["home"])})
+    c = _db(abx)
+    n = c.execute("SELECT author FROM messages WHERE thread=? ORDER BY id DESC", (other,)).fetchone()
+    c.close()
+    assert n is None or n[0] != "hermes#22"

@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS schedules(
   id INTEGER PRIMARY KEY, name TEXT UNIQUE, kind TEXT, spec TEXT, action TEXT, enabled INTEGER DEFAULT 1,
   last_fired REAL, created_by TEXT, created_at REAL);
 CREATE TABLE IF NOT EXISTS runner(id INTEGER PRIMARY KEY CHECK(id=1), pid INTEGER, host TEXT,
-  started_at REAL, heartbeat REAL, state TEXT, active INTEGER, slots INTEGER, note TEXT);
+  started_at REAL, heartbeat REAL, state TEXT, active INTEGER, slots INTEGER, note TEXT, code_ver TEXT);
 CREATE TABLE IF NOT EXISTS models(harness TEXT, model TEXT, label TEXT, seen_at REAL, PRIMARY KEY(harness, model));
 """
 
@@ -158,6 +158,20 @@ def connect_ro(path=None):
     return conn
 
 
+def code_version():
+    """Fingerprint of the installed package code: a hash of (name, size, mtime) of every .py file next to this one.
+    The runner records it at start; a later difference means the runner still runs older code (`ab runner reload`)."""
+    import hashlib
+    h = hashlib.sha1()
+    for f in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        st = f.stat()
+        h.update(f"{f.name}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()[:10]
+
+
+STALE_MSG = "runner code older than installed code: ab runner reload"
+
+
 def _cols(conn, table):
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -180,6 +194,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE tasks ADD COLUMN cmd TEXT")
     if "key" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN key TEXT")
+    if "code_ver" not in _cols(conn, "runner"):
+        conn.execute("ALTER TABLE runner ADD COLUMN code_ver TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_key ON tasks(board, key)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")

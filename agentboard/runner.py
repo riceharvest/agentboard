@@ -156,6 +156,7 @@ def runner_status(conn):
     if r:
         poll = float(cfg(conn, "poll_s") or 5)
         d["running"] = bool(d["pid"] and alive(d["pid"], None) and d["heartbeat"] and now() - d["heartbeat"] < poll * 3 + 30)
+    d["stale"] = bool(r and d["running"] and d.get("code_ver") and d["code_ver"] != store.code_version())
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT r.id run, r.task_id, r.harness, t.cmd, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
         "t.title, t.board, t.timeout_s FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
@@ -383,13 +384,15 @@ class Runner:
         self.lock_f.write(str(os.getpid()))
         self.lock_f.flush()
 
+    code_ver = store.code_version()  # fixed when this runner process loaded its code
+
     def heartbeat(self, state, slots, note=None):
         self.conn.execute(
-            "INSERT INTO runner(id,pid,host,started_at,heartbeat,state,active,slots,note) VALUES(1,?,?,?,?,?,?,?,?) "
+            "INSERT INTO runner(id,pid,host,started_at,heartbeat,state,active,slots,note,code_ver) VALUES(1,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, host=excluded.host, heartbeat=excluded.heartbeat, state=excluded.state, "
-            "active=excluded.active, slots=excluded.slots, note=excluded.note, "
+            "active=excluded.active, slots=excluded.slots, note=excluded.note, code_ver=excluded.code_ver, "
             "started_at=CASE WHEN runner.pid=excluded.pid THEN runner.started_at ELSE excluded.started_at END",
-            (os.getpid(), self.host, now(), now(), state, len(self.children), slots, note))
+            (os.getpid(), self.host, now(), now(), state, len(self.children), slots, note, self.code_ver))
 
     def adopt(self):
         """Runs left by a previous runner: keep watching the live ones, settle the finished ones."""

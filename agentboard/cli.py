@@ -330,7 +330,10 @@ def cmd_add(c, a, out):
     info = {}
     tid = store.add_task(c, actor_of(a), board=board_of(a), key=a.key, key_live=a.key_live, _info=info,
                          deps=[store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])], **kw)
+    stale = R.runner_status(c).get("stale")
     out({"id": tid, "existed": bool(info.get("existed"))}, tid)
+    if stale:
+        print(store.STALE_MSG, file=sys.stderr)
 
 
 def cmd_ls(c, a, out):
@@ -877,6 +880,8 @@ def cmd_runner(c, a, out):
                 f"draining={s['draining']} ready={s['ready']} free={s['free_gib']}GiB"
                 + (f" heartbeat {fmt_dur(now() - s['heartbeat'])} ago" if s.get("heartbeat") else ""))
         lines = [head]
+        if s.get("stale"):
+            lines.append(store.STALE_MSG)
         if s.get("note"):
             lines.append("note: " + s["note"])
         for ch in s.get("children", []):

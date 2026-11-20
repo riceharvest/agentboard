@@ -295,6 +295,21 @@ def skip_7d(cap, now=None):
     return u is not None and (now if now is not None else time.time()) < float(u)
 
 
+PACE_KEYS = ("pace_lead_h", "pace_7d_lead_h")
+
+
+def quota_gating(conn):
+    """True when `gating` is "quota": only the max_*_pct caps, soft caps and provider limits gate launches."""
+    return store.cfg(conn, "gating") == "quota"
+
+
+def effective_cap(conn, cap):
+    """The cap as the gate applies it: in quota gating the pace keys are ignored, the % caps stay."""
+    if cap and quota_gating(conn):
+        return {k: v for k, v in cap.items() if k not in PACE_KEYS}
+    return cap
+
+
 def uses_plan(cap):
     return any(cap.get(k) is not None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h", "pace_lead_h"))
 
@@ -680,6 +695,9 @@ def launch_budget(conn, bucket, plan=_LIVE, now=None, pacer_state=None):
     """Current launch budget for `bucket` over `pace_interval` and why ('pace' | 'aimd' | 'cap'). Never writes to the db."""
     now = now if now is not None else time.time()
     interval_str, interval_s = pace_interval(conn)
+    if quota_gating(conn):
+        return {"budget": 10 ** 6, "why": "quota", "interval": interval_str, "interval_s": interval_s,
+                "used_in_interval": 0, "remaining": 10 ** 6, "detail": "quota gating: no launch budget, % caps + provider limits only"}
     cap = (store.cfg(conn, "caps") or {}).get(bucket) or {}
     pstate = pacer_state if pacer_state is not None else _load_pacer(conn)
     st = pstate.get(bucket) or {}
@@ -738,7 +756,7 @@ def launch_budget(conn, bucket, plan=_LIVE, now=None, pacer_state=None):
 
 def pacer_status(conn, bucket, plan=_LIVE, now=None):
     """None if `bucket` has remaining launch budget in the current interval, else a reason string."""
-    if store.cfg(conn, "pacer") is False:
+    if store.cfg(conn, "pacer") is False or quota_gating(conn):
         return None
     info = launch_budget(conn, bucket, plan=plan, now=now)
     if info["used_in_interval"] >= info["budget"]:
@@ -791,7 +809,7 @@ def history(conn, now=None, hours=168):
 
 def cap_status(conn, bucket, plan=_LIVE):
     """None if the bucket is under its soft cap (or has none), else a reason string."""
-    cap = (store.cfg(conn, "caps") or {}).get(bucket)
+    cap = effective_cap(conn, (store.cfg(conn, "caps") or {}).get(bucket))
     if not cap:
         return None
     r = plan_status(cap) if plan is _LIVE else plan_reason(cap, plan)

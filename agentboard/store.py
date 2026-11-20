@@ -70,6 +70,7 @@ DEFAULTS = {
     "launch_per_tick": 2,       # smooth starts: at most K new runs started per runner tick overall
     "pacer": True,              # per-bucket launch budgets (pace / AIMD / cap); false = only slots, caps and launch_per_tick
     "pace_interval": "10m",     # interval for per-bucket launch budgets (pace / AIMD)
+    "gating": "pace",           # "pace": pacer + pace guards; "quota": launch whenever every max_*_pct cap and provider limit allows (no pace lines, no per-interval budgets)
     "paused": False,
     "draining": False,
     "stop": "",                 # "", "graceful", "now"

@@ -221,6 +221,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
     plan = {"claude_plan_pct": ({**plan_raw, "age_s": plan_age, "stale": stale} if plan_raw else None),
             "weekly_pace_pct": None, "guards": []}
     for b, cap in caps.items():
+        cap = usage.effective_cap(conn, cap)
         if not usage.uses_plan(cap):
             continue
         if live_plan:

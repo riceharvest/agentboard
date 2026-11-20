@@ -369,6 +369,11 @@ cards, opt-in labels trim what a run loads before its first request: `ab add ...
 built-in tools, `claude --tools`), `--label skills=none` (`--disable-slash-commands`), `--label mcp=none` (`--strict-mcp-config`). No label,
 no change; other harnesses ignore them. Measure with the run's first assistant `usage` in the harness transcript versus the `runs` row.
 Runner change: `ab runner reload` needed.
+**Release-loop guard** (default on). An agent that calls `ab release` without progress used to be relaunched at once, forever. When a card's
+last `release_loop_runs` (default `3`) runs each ended released within `release_loop_minutes` (default `3`), the card gets
+`not_before` = now + `release_loop_backoff` (default `10m`, doubling per further short released run, capped by `release_loop_max`, default `6h`)
+and a note. Runs show outcome `release_loop`; `ab outcomes` counts them as failure class `release_loop`. Set `release_loop_runs off` to disable.
+Agents waiting on time or data should use `ab defer ID --until T --why ...`.
 
 **Resume after a limit death** (opt-in, default off). Runs killed by a provider limit used to restart from scratch.
 `ab config set limit_resume on` adds checkpoint rules to every brief (commit to the branch at milestones, keep an

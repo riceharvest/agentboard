@@ -54,6 +54,8 @@ machine.
     ab add "Add a /health endpoint" --body "FastAPI app in ./api, add a test" --tier medium --workdir ~/code/api
     ab add "Review the /health change" --dep t_xxxxxxxx --tier high
     ab add "Nightly export" --cmd "./export.sh" --after 02:00        # a command card: runs the script itself, no model
+    ab add "ship v2" --key release:v2                                  # idempotent: same key again prints the existing id
+    ab add --plan chain.json --key chain:v2                            # a whole chain of cards (deps by key) in one transaction
     ab runner start --slots 2
     ab ls --status all ; ab show t_xxxxxxxx ; ab usage
 

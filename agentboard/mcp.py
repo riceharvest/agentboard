@@ -8,13 +8,14 @@ S, I, B, L, KV = "string", "integer", "boolean", "list", "kv"
 
 # tool: (description, subcommand, [positional args], {param: (flag, kind)}, [required])
 TOOLS = {
-    "ab_add": ("Create a task for agents. tier picks the intelligence (see ab_tiers); deps must finish first. cmd=SHELL COMMAND makes a command card: the runner runs it itself, no model.", "add",
+    "ab_add": ("Create a task for agents. tier picks the intelligence (see ab_tiers); deps must finish first. cmd=SHELL COMMAND makes a command card: the runner runs it itself, no model. key=K is an idempotency key (a card with K already on the board -> its id, nothing created). plan=JSON array of cards {key,title,body,labels,deps:[{key}|{id}],tier,workdir,after,priority,manual,cmd} creates the whole chain in one transaction (title not needed); with key a rerun is a no-op returning the key->id map.", "add",
                ["title"], {"body": ("--body", S), "channel": ("--channel", S), "labels": ("--label", KV), "priority": ("--priority", I),
                            "deps": ("--dep", L), "after": ("--after", S), "workdir": ("--workdir", S), "tier": ("--tier", S),
                            "harness": ("--harness", S), "model": ("--model", S), "manual": ("--manual", B),
                            "cmd": ("--cmd", S), "result": ("--result", S),
                            "max_attempts": ("--max-attempts", I), "timeout": ("--timeout", S), "data": ("--data", S),
-                           "reply_to": ("--reply-to", S)}, ["title"]),
+                           "reply_to": ("--reply-to", S), "key": ("--key", S), "key_live": ("--key-live", B),
+                           "plan": ("--plan", S)}, []),
     "ab_list": ("List tasks. Default open+claimed; ready=true for claimable now.", "ls", [],
                 {"status": ("--status", S), "ready": ("--ready", B), "channel": ("--channel", S), "labels": ("--label", KV),
                  "limit": ("--limit", I), "all_boards": ("--all-boards", B)}, []),

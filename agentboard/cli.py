@@ -227,33 +227,110 @@ def visible(c, a, rows):
 
 
 # ---------------------------------------------------------------- commands
-def cmd_add(c, a, out):
-    workdir = a.workdir
+PLAN_FIELDS = {"key", "title", "body", "labels", "deps", "tier", "workdir", "after", "priority", "manual", "cmd", "channel",
+               "harness", "model", "max_attempts", "timeout", "data", "result"}
+
+
+def _card_kwargs(title, body, labels, priority, after, workdir, tier, harness, model, manual, max_attempts, timeout, data,
+                 cmd, result, channel="main"):
+    """Validated add_task kwargs, shared by `ab add` and `ab add --plan`."""
     if workdir is None and os.environ.get("AB_TASK"):
         workdir = os.getcwd()  # sub-tasks created inside a run inherit the run's workdir
     if workdir:
         workdir = str(Path(workdir).expanduser().resolve())
-    check_harness_pin(a.harness)
-    data = jarg(a.data)
-    if a.cmd is not None:
-        if not a.cmd.strip():
+    check_harness_pin(harness)
+    if cmd is not None:
+        if not cmd.strip():
             raise ValueError("--cmd needs a command")
-        if a.manual or a.harness or a.model:
+        if manual or harness or model:
             raise ValueError("--cmd cards run a command: no --manual/--harness/--model")
-        if a.result:
-            data = {**(data or {}), "cmd_result": a.result}
-    elif a.result:
+        if result:
+            data = {**(data or {}), "cmd_result": result}
+    elif result:
         raise ValueError("--result only applies to --cmd cards")
+    return dict(title=title, body=body, channel=channel, labels=labels, priority=priority,
+                not_before=parse_time(after) if after else None, workdir=workdir, tier=tier, harness=harness, model=model,
+                runnable=not manual, max_attempts=max_attempts, timeout_s=parse_dur(timeout) if timeout else None, data=data, cmd=cmd)
+
+
+def plan_specs(raw):
+    """Parse + validate a plan (JSON array of card objects) BEFORE anything is written; unknown fields are refused."""
+    try:
+        cards = json.loads(raw)
+    except ValueError as e:
+        raise ValueError(f"plan is not valid JSON: {e}") from None
+    if isinstance(cards, dict) and isinstance(cards.get("cards"), list):
+        cards = cards["cards"]
+    if not isinstance(cards, list) or not cards:
+        raise ValueError("a plan is a non-empty JSON array of cards")
+    specs = []
+    for i, cd in enumerate(cards):
+        who = f"card {i}" + (f" ({cd.get('key')})" if isinstance(cd, dict) and cd.get("key") else "")
+        if not isinstance(cd, dict):
+            raise ValueError(f"{who}: not an object")
+        bad = sorted(set(cd) - PLAN_FIELDS)
+        if bad:
+            raise ValueError(f"{who}: unknown field(s) {', '.join(bad)} (allowed: {', '.join(sorted(PLAN_FIELDS))})")
+        if not isinstance(cd.get("title"), str) or not cd["title"].strip():
+            raise ValueError(f"{who}: title is required")
+        for f, typ in (("key", str), ("body", str), ("tier", str), ("workdir", str), ("after", str), ("cmd", str), ("result", str),
+                       ("channel", str), ("harness", str), ("model", str), ("timeout", str)):
+            if cd.get(f) is not None and not isinstance(cd[f], typ):
+                raise ValueError(f"{who}: {f} must be a string")
+        if cd.get("key") is not None and not cd["key"].strip():
+            raise ValueError(f"{who}: key must not be empty")
+        for f in ("priority", "max_attempts"):
+            if cd.get(f) is not None and (not isinstance(cd[f], int) or isinstance(cd[f], bool)):
+                raise ValueError(f"{who}: {f} must be an integer")
+        if cd.get("manual") is not None and not isinstance(cd["manual"], bool):
+            raise ValueError(f"{who}: manual must be true or false")
+        lab = cd.get("labels") or {}
+        if not isinstance(lab, dict):
+            raise ValueError(f"{who}: labels must be an object")
+        deps = []
+        for d in cd.get("deps") or []:
+            if isinstance(d, str):
+                d = {"id": d}
+            if not isinstance(d, dict) or len(d) != 1 or next(iter(d)) not in ("key", "id") or not isinstance(next(iter(d.values())), str):
+                raise ValueError(f"{who}: a dep is {{\"key\": K}} or {{\"id\": ID}} (or a bare task id string)")
+            deps.append(d)
+        try:
+            kw = _card_kwargs(cd["title"], cd.get("body") or "", {str(k): str(v) for k, v in lab.items()}, cd.get("priority") or 0,
+                              cd.get("after"), cd.get("workdir"), cd.get("tier"), cd.get("harness"), cd.get("model"),
+                              bool(cd.get("manual")), cd.get("max_attempts") or 3, cd.get("timeout"), cd.get("data"),
+                              cd.get("cmd"), cd.get("result"), cd.get("channel") or "main")
+        except ValueError as e:
+            raise ValueError(f"{who}: {e}") from None
+        specs.append({"key": cd.get("key"), "deps": deps, "kw": kw})
+    return specs
+
+
+def cmd_add(c, a, out):
+    if a.plan:
+        if a.title or a.dep or a.cmd is not None or a.manual or a.label or a.body or a.body_file or a.harness or a.model or a.data:
+            raise ValueError("--plan takes the cards from the plan file: no title/--body/--dep/--cmd/--label/... (only --key, --key-live)")
+        raw = a.plan if a.plan.lstrip().startswith("[") else (sys.stdin.read() if a.plan == "-" else text_arg(None, a.plan))  # inline JSON (MCP) | - | file
+        specs = plan_specs(raw)
+        # a dep given as a task id may be an alias the board resolves (like --dep)
+        for sp in specs:
+            sp["deps"] = [{"id": store.get_task(c, d["id"])["id"] if store.get_task(c, d["id"]) else d["id"]} if "id" in d else d
+                          for d in sp["deps"]]
+        r = store.add_plan(c, actor_of(a), specs, board_of(a), a.key, a.key_live)
+        out(r, lambda r: "\n".join(f"{k}\t{v}" for k, v in r["ids"].items()))
+        return
+    if not a.title:
+        raise ValueError("a title is required (or --plan FILE)")
     labels = kv_list(a.label)
     if a.reply_to:
         store.resolve_thread(c, a.reply_to)
         labels["reply_to"] = a.reply_to
-    tid = store.add_task(c, actor_of(a), a.title, body_arg(a), a.channel, labels, a.priority,
-                         [store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])],
-                         parse_time(a.after) if a.after else None, workdir, a.tier, a.harness, a.model,
-                         not a.manual, a.max_attempts, parse_dur(a.timeout) if a.timeout else None, data,
-                         board=board_of(a), cmd=a.cmd)
-    out({"id": tid}, tid)
+    data = jarg(a.data)
+    kw = _card_kwargs(a.title, body_arg(a), labels, a.priority, a.after, a.workdir, a.tier, a.harness, a.model, a.manual,
+                      a.max_attempts, a.timeout, data, a.cmd, a.result, a.channel)
+    info = {}
+    tid = store.add_task(c, actor_of(a), board=board_of(a), key=a.key, key_live=a.key_live, _info=info,
+                         deps=[store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])], **kw)
+    out({"id": tid, "existed": bool(info.get("existed"))}, tid)
 
 
 def cmd_ls(c, a, out):
@@ -1320,7 +1397,10 @@ def build_parser():
         return s
 
     s = sub("add", cmd_add, "create a task")
-    s.add_argument("title")
+    s.add_argument("title", nargs="?")
+    s.add_argument("--key", help="idempotency key: if a card with this key is already on the board (not cancelled) print its id and create nothing; with --plan, a rerun is a no-op that prints the existing key->id map")
+    s.add_argument("--key-live", action="store_true", help="--key only matches open/claimed cards (a finished one frees the key)")
+    s.add_argument("--plan", metavar="FILE", help="create a whole plan: JSON array of cards {key,title,body,labels,deps:[{key}|id],tier,workdir,after,priority,manual,cmd,...} in ONE transaction ('-' reads stdin)")
     s.add_argument("--body", "-b", help="description ('-' reads stdin)")
     s.add_argument("--body-file")
     s.add_argument("--channel", "-c", default="main")

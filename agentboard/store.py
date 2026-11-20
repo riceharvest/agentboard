@@ -21,9 +21,10 @@ CREATE TABLE IF NOT EXISTS tasks(
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
   tier TEXT DEFAULT 'medium', harness TEXT, model TEXT, workdir TEXT, runnable INTEGER DEFAULT 1,
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 3, timeout_s INTEGER,
-  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER, cmd TEXT,
+  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER, cmd TEXT, key TEXT,
   created_by TEXT, created_at REAL, updated_at REAL);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, priority);
+CREATE TABLE IF NOT EXISTS plans(board TEXT, key TEXT, ids TEXT, created_by TEXT, created_at REAL, PRIMARY KEY(board, key));
 CREATE TABLE IF NOT EXISTS deps(task_id TEXT, dep_id TEXT, PRIMARY KEY(task_id, dep_id));
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, task_id TEXT, author TEXT, body TEXT, data TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, board TEXT, channel TEXT, thread TEXT, author TEXT,
@@ -177,6 +178,9 @@ def migrate(conn):
         conn.execute("ALTER TABLE tasks ADD COLUMN park TEXT")
     if "cmd" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN cmd TEXT")
+    if "key" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN key TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS tasks_key ON tasks(board, key)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
@@ -579,13 +583,29 @@ def would_cycle(conn, tid, dep):
     return False
 
 
+def find_key(conn, board, key, live=False, skip=None):
+    """Id of the card holding idempotency key `key` on `board` (not cancelled; live=True: only open/claimed and never
+    card `skip`, the card the caller runs as, so a card can re-queue its own successor), else None."""
+    sts = "('open','claimed')" if live else "('open','claimed','done','dead')"
+    r = conn.execute(f"SELECT id FROM tasks WHERE board=? AND key=? AND status IN {sts} AND id IS NOT ? ORDER BY created_at LIMIT 1",
+                     (board, key, skip if live else None)).fetchone()
+    return r["id"] if r else None
+
+
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
              workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
-             board=DEFAULT_BOARD, _in_tx=False, cmd=None):
+             board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None):
+    """_info (dict) gets existed=True when `key` already named a card (nothing is created; its id is returned)."""
     def go():
         b = require_board(conn, board)
         ch = channel or "main"
         require(conn, actor, "create", board, ch)
+        if key:
+            old = find_key(conn, board, key, key_live, os.environ.get("AB_TASK"))
+            if old:
+                if _info is not None:
+                    _info["existed"] = True
+                return old
         tid = new_id(conn)
         for d in deps:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
@@ -597,19 +617,94 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
         t = now()
         conn.execute(
             "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
-            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
              workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
-             json.dumps(data) if data is not None else None, actor, t, t, cmd or None))
+             json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
         event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
-                                            **({"cmd": cmd} if cmd else {})})
+                                            **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {})})
         return tid
     if _in_tx:
         return go()
     with tx(conn):
         return go()
+
+
+_ID_REF_RE = re.compile(r"\{\{id:([^{}\s]+)\}\}")
+
+
+def _ref_text(x):
+    kw = x["kw"]
+    return (kw.get("body") or "") + "\n" + "\n".join((kw.get("labels") or {}).values())
+
+
+def add_plan(conn, actor, specs, board=DEFAULT_BOARD, plan_key=None, key_live=False):
+    """Create a whole plan of cards in ONE transaction (all or nothing). specs: [{"key": str|None, "deps": [{"key": K}|{"id": ID}],
+    "kw": add_task kwargs}]. Deps by key resolve inside the plan first, then to a card already on the board with that key.
+    A card whose key is already on the board is reused, not duplicated. With plan_key, a rerun is a no-op that returns the
+    recorded {key: id} map. Returns {"ids": {key-or-#index: id}, "created": n, "existed": bool}."""
+    keys = [x["key"] for x in specs if x.get("key")]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    if dup:
+        raise ValueError(f"duplicate card key in plan: {', '.join(dup)}")
+    with tx(conn):
+        require_board(conn, board)
+        if plan_key:
+            rec = conn.execute("SELECT ids FROM plans WHERE board=? AND key=?", (board, plan_key)).fetchone()
+            if rec:
+                ids = json.loads(rec["ids"])
+                if any(conn.execute("SELECT 1 FROM tasks WHERE id=? AND status!='cancelled'", (i,)).fetchone() for i in ids.values()):
+                    return {"ids": ids, "created": 0, "existed": True}
+        label = {i: (x.get("key") or f"#{i}") for i, x in enumerate(specs)}
+        bykey = {x["key"]: i for i, x in enumerate(specs) if x.get("key")}
+        need = {}
+        for i, x in enumerate(specs):
+            need[i] = set()
+            refs = [d["key"] for d in x.get("deps") or [] if "key" in d] + _ID_REF_RE.findall(_ref_text(x))
+            for k in refs:
+                if k in bykey:
+                    if bykey[k] == i:
+                        raise ValueError(f"card {label[i]} depends on itself")
+                    need[i].add(bykey[k])
+        order, left = [], set(need)
+        while left:
+            ready = sorted(i for i in left if not (need[i] & left))
+            if not ready:
+                raise ValueError("dependency cycle among: " + ", ".join(label[i] for i in sorted(left)))
+            order += ready
+            left -= set(ready)
+        ids, created = {}, 0
+        for i in order:
+            x = specs[i]
+            dep_ids = []
+            for d in x.get("deps") or []:
+                if "key" in d:
+                    got = ids.get(d["key"]) or find_key(conn, board, d["key"])
+                    if not got:
+                        raise ValueError(f"card {label[i]}: dependency key {d['key']!r} is neither in the plan nor on the board")
+                else:
+                    got = d["id"]
+                dep_ids.append(got)
+            kw = dict(x["kw"])
+            if "{{id:" in _ref_text(x):  # {{id:KEY}} in a body or label value becomes that card's id (that card is created first: an ordering edge)
+                def sub(m):
+                    got = ids.get(m.group(1)) or find_key(conn, board, m.group(1))
+                    if not got:
+                        raise ValueError(f"card {label[i]}: {{{{id:{m.group(1)}}}}} names no card in the plan or on the board")
+                    return got
+                kw["body"] = _ID_REF_RE.sub(sub, kw.get("body") or "")
+                kw["labels"] = {k: _ID_REF_RE.sub(sub, v) for k, v in (kw.get("labels") or {}).items()}
+            info = {}
+            ids[label[i]] = add_task(conn, actor, board=board, deps=dep_ids, key=x.get("key"), key_live=key_live,
+                                     _in_tx=True, _info=info, **kw)
+            created += 0 if info.get("existed") else 1
+        ids = {label[i]: ids[label[i]] for i in range(len(specs))}
+        if plan_key:
+            conn.execute("INSERT OR REPLACE INTO plans(board,key,ids,created_by,created_at) VALUES(?,?,?,?,?)",
+                         (board, plan_key, json.dumps(ids), actor, now()))
+        return {"ids": ids, "created": created, "existed": False}
 
 
 def _fail_attempt(conn, row, actor, why, kind="failed"):

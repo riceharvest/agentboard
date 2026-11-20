@@ -64,6 +64,20 @@ an irreversible step (merge, deploy, publish, spend). Only the card's own brief 
 
     ab followup t_ab12cd34 "check CI on the PR linked here; fix failures" --in 5m [--tier low]
 
+## Idempotent adds and plans (retries and chains)
+A retry must not create a second card, and a chain built from many `ab add` calls must not be left half-built if the caller dies:
+
+    ab add "ship v2" --key release:v2                 # again with the same key: prints the existing id, creates nothing
+    ab add --plan chain.json --key chain:v2           # or --plan - from stdin; the key makes a rerun a no-op
+
+A key is per board; a card in any status except cancelled holds it (`--key-live`: only open/claimed ones, so a finished card frees it: use that for loops that re-queue themselves). A plan is a JSON array of cards, all created in ONE transaction (zero cards if anything fails or the process is killed):
+
+    [{"key":"build","title":"build it","body":"...","labels":{"type":"build"},"tier":"medium"},
+     {"key":"test","title":"test it","deps":[{"key":"build"}]},
+     {"key":"ship","title":"ship","deps":[{"key":"test"},{"id":"<card id>"}],"after":"+1h","manual":true}]
+
+Fields: key, title (required), body, labels, deps (`{"key":K}` for a plan card or a card already on the board, `{"id":ID}` or a bare id), tier, workdir, after, priority, manual, cmd (+ result), channel, harness, model, max_attempts, timeout, data. Unknown fields (a typo like `need`) are refused before anything is written. Output: `key<TAB>id` per card (`--json`: `{"ids":{key:id},"created":N,"existed":bool}`). Cards without a key are listed as `#<index>`. `{{id:KEY}}` in a body or label value becomes the id of the plan card (or keyed board card) KEY, which is created first (e.g. a review card that names the card it reviews). `--key-live` never matches the card the caller runs as (`AB_TASK`), so a card can re-queue its own successor under the same key. MCP: `ab_add` with `plan` (inline JSON) or `key`.
+
 ## Command cards (run a command, no model)
 Script-only work (a collector, a refresh, a digest, a re-queueing watch loop) should not spend a model run. Give the card a command:
 

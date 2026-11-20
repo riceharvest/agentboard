@@ -177,3 +177,12 @@ def test_explicit_env_task_is_not_overridden(abx, live_run):
     code, out, err = _ab(abx, str(r["home"]), ["done", "", "x"], {"AB_TASK": other["task"]})
     assert code == 1 and "not the task of run 16" in err, (code, err)
     assert _snapshot(abx) == before
+
+
+def test_nested_home_resolves_innermost_run():
+    """A home nested inside another profile (e.g. TMPDIR scratch under a live profile) names the inner run, not the outer."""
+    from agentboard import cli
+    inner = "/tmp/abtest-root/profiles/ab-run-279/cache/scratch/pytest/profiles/ab-run-8"
+    ctx, reason = cli.infer_run(None, env={"HERMES_HOME": inner}, cwd="/tmp")
+    assert ctx is None
+    assert reason.startswith(f"run home {inner} ")  # marker missing at the INNER home; outer ab-run-279 never consulted

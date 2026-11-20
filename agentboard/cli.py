@@ -159,8 +159,9 @@ def infer_run(c, board=None, env=None, cwd=None):
         if not p:
             continue
         full = str(Path(p).expanduser().resolve())
-        m = RUN_HOME_RE.search(full)
-        if m:
+        matches = list(RUN_HOME_RE.finditer(full))
+        if matches:
+            m = matches[-1]  # innermost: a home may be nested inside another profile (e.g. TMPDIR scratch dirs)
             hits[src] = (int(m.group(1)), Path(full[:m.end()]))
     if not hits:
         return None, None

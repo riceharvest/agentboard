@@ -51,7 +51,7 @@ board={board} channel={channel} tier={tier} attempt={attempt}/{max_attempts}{lab
 workdir: {workdir}
 
 {body}
-{park}{context}{deps}{notes}
+{park}{context}{deps}{notes}{resume}
 BOARD (the `ab` CLI is on PATH). Your task is {id}, you act as {actor} on board {board}. Use these literal ids in the commands
 below. Your shell may not export AB_TASK/AB_ACTOR/AB_BOARD; `ab` then works them out from this run's home, and if it cannot, prefix:
   AB_TASK={id} AB_ACTOR={actor} AB_BOARD={board} ab done {id} "..."     (never --force to get past "held by")
@@ -316,6 +316,72 @@ def park_resume(conn, task):
     return txt + "\n"
 
 
+PROGRESS_FILE = ".ab-progress.md"
+
+
+def _git(workdir, *args):
+    try:
+        r = subprocess.run(["git", "-C", workdir, *args], capture_output=True, text=True, timeout=20)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _resume_on(conn):
+    return str(cfg(conn, "limit_resume")).lower() in ("on", "true", "1", "yes")
+
+
+def checkpoint_rules(conn):
+    """Brief text for opt-in `limit_resume`: workers leave resumable state, since a provider limit can kill them any time."""
+    if not _resume_on(conn):
+        return ""
+    return (f"\nCHECKPOINTS (a provider limit can kill this run at any moment, and the retry resumes from what you leave): commit to your "
+            f"branch at each milestone (small commits, clear messages), and keep a short progress file `{PROGRESS_FILE}` in the workdir "
+            f"(done so far / next step / open problems; do not commit it). Update it before every long step.\n")
+
+
+def limit_resume_text(conn, task, workdir):
+    """Opt-in `limit_resume`: when the card's last run died on a provider limit, tell the retry what that run left behind."""
+    if not _resume_on(conn):
+        return ""
+    last = conn.execute("SELECT id, harness, outcome FROM runs WHERE task_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+                        (task["id"],)).fetchone()
+    if not last or last["outcome"] != "limit":
+        return checkpoint_rules(conn)
+    parts = [f"\nRESUMING AFTER A PROVIDER LIMIT: run {last['id']} ({last['harness']}) was killed by a limit, not by a fault in the task. "
+             f"Do NOT start over: continue from the state below (verify it first).\n"]
+    first = conn.execute("SELECT MIN(started_at) FROM runs WHERE task_id=?", (task["id"],)).fetchone()[0]
+    shas = _git(workdir, "log", "--format=%H", f"--since=@{int(first or 0)}", "-n", "50").split()
+    if shas:  # commits made since this card's first run started (works on a worktree branch and on a plain checkout)
+        stat = _git(workdir, "diff", "--stat", f"{shas[-1]}^..HEAD") or _git(workdir, "show", "--stat", "--format=", shas[-1])
+        parts.append("COMMITS SINCE THIS CARD STARTED:\n" + _git(workdir, "log", "--oneline", f"{shas[-1]}^..HEAD") + "\n"
+                     + (stat[-1500:] + "\n" if stat else ""))
+    else:
+        parts.append("COMMITS SINCE THIS CARD STARTED: (none)\n")
+    dirty = _git(workdir, "status", "--short")
+    if dirty:
+        parts.append("UNCOMMITTED CHANGES:\n" + dirty[:1000] + "\n")
+    try:
+        prog = (Path(workdir) / PROGRESS_FILE).read_text(errors="replace").strip()
+    except OSError:
+        prog = ""
+    parts.append(f"PROGRESS FILE ({PROGRESS_FILE}):\n" + (prog[-2500:] if prog else "(none written)") + "\n")
+    n = conn.execute("SELECT author, body FROM messages WHERE thread=? AND author!='runner' ORDER BY id DESC LIMIT 1", (task["id"],)).fetchone()
+    if n:
+        parts.append(f"LAST NOTE ({n['author']}): {(n['body'] or '')[:1000]}\n")
+    return "".join(parts) + checkpoint_rules(conn)
+
+
+def limit_skip_n(conn):
+    """Limit deaths of one card on one route after which the route is skipped for it; 0 = off (needs limit_resume on)."""
+    if not _resume_on(conn):
+        return 0
+    try:
+        return max(0, int(cfg(conn, "limit_skip_after")))
+    except (TypeError, ValueError):
+        return 0
+
+
 def build_brief(conn, task, workdir, attempt, actor="?"):
     deps = conn.execute("SELECT p.id, p.title, p.result FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=?",
                         (task["id"],)).fetchall()
@@ -340,6 +406,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         actor=actor, board=task["board"], context=ctx, park=park_resume(conn, task),
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
+                        resume=limit_resume_text(conn, task, workdir),
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 
@@ -535,6 +602,7 @@ class Runner:
     def pick(self, task, limits):
         primary, extra = H.candidates_for(self.conn, task)
         reasons = []
+        skip_n = limit_skip_n(self.conn)
         for cand in primary + extra:
             a = H.ADAPTERS.get(cand.harness)
             if a is None or not a.available():
@@ -559,6 +627,10 @@ class Runner:
             bl = limits.get(f"bucket:{b}")
             if bl:
                 reasons.append(f"{cand.label()}: {b} {bl['kind']} until {store.fmt_ts(bl['until'])}")
+                continue
+            if skip_n and self.conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND bucket=? AND outcome='limit'",
+                                            (task["id"], b)).fetchone()[0] >= skip_n:
+                reasons.append(f"{cand.label()}: {skip_n} limit deaths of this card on {b}, route skipped")
                 continue
             cap = usage.cap_status(self.conn, b)
             if cap:

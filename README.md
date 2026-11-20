@@ -349,6 +349,13 @@ Opt-in extras, default `off`: `stall_retry_count N` (kill as a limit after N pro
 call), `stall_idle_cooldown 30m` (an idle kill also cools the run's bucket like a limit, still no attempt),
 `stall_idle_blind on` (idle rule for harnesses with no log, judged by output growth).
 
+**Resume after a limit death** (opt-in, default off). Runs killed by a provider limit used to restart from scratch.
+`ab config set limit_resume on` adds checkpoint rules to every brief (commit to the branch at milestones, keep an
+uncommitted `.ab-progress.md` in the workdir), and the retry brief of a card whose last run died on a limit lists the
+commits made since the card started (with diff stat), uncommitted changes, the progress file and the last note.
+`limit_skip_after N` (default `2`, `0`/`off` = never): after N limit deaths of the card on one route (bucket), the runner
+skips that route for this card and takes the next tier entry; if every entry is skipped the card waits, with the reason shown.
+
 `ab runner status`, `ab snapshot` and the TUI show `retrying 429 (12m)` / `idle 40m` on the run. Cards that legitimately wait
 on a long job: label `stall=off` or `stall=90m`. Setting a threshold to `off` disables that watchdog. See `ab guide`
 ("Stall watchdog").

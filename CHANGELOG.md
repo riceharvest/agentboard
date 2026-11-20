@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resume after limit deaths (opt-in, default off): `ab config set limit_resume on` tells workers to commit at milestones and keep a progress file (`.ab-progress.md`, uncommitted) in the workdir; a retry after a run that died on a provider limit gets that run's commits (+ diff stat), uncommitted changes, progress file and the last note in its brief. `limit_skip_after N` (default 2, only with `limit_resume on`): once a card has N limit deaths on one route (bucket), that route is skipped for the card and the next tier entry is used. Runner change: `ab runner reload` needed.
+
 - `ab outcomes [--since 7d] [--by label:type,harness,tier] [--json]`: read-only outcome ledger (runs, accepted outcomes, agent-hours, tokens, $ where known, $ and tokens per accepted outcome, failure classes) per group. New module `agentboard/outcomes.py`. Runner change: none needed.
 
 - Stall watchdog opt-ins (default off): `stall_retry_count N` kills a run as a limit after N provider 429 retries since its last good model call; `stall_idle_cooldown DUR` makes an idle kill also cool the run's bucket (limit row + pacer halving, still no attempt); `stall_idle_blind on` applies the idle rule to harnesses without a log probe, judged by output growth. Runner change: `ab runner reload` needed.

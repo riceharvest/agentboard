@@ -354,6 +354,11 @@ card *about* rate limiting cannot trip it) through an optional per-adapter probe
   idle kill also cool the run's bucket like a limit (the retried card then routes elsewhere; still no attempt);
   `stall_idle_blind on` applies the idle rule to harnesses with no log to read (agy, gemini, ...) using output growth,
   so only turn it on if their runs stream output while working.
+- **Resume after limit deaths** (opt-in, `limit_resume on`, default `off`): briefs tell the worker to commit at milestones and
+  keep an uncommitted `.ab-progress.md` in the workdir. When the card's last run died on a provider limit, the retry brief
+  carries the commits since the card started (+ diff stat), uncommitted changes, the progress file and the last note: continue,
+  don't restart. `limit_skip_after N` (default 2): N limit deaths of one card on one route (bucket) skip that route for the
+  card (next tier entry). Needs `ab runner reload`.
 - `ab runner status`, `ab snapshot` (`runner.children[].stall`) and the TUI mark such runs `retrying 429 (12m)` / `idle 40m`.
 - Cards that legitimately go quiet (a long tool call, waiting on a job): label `stall=off` (never killed) or `stall=90m` (idle
   threshold for this card). Cards that `ab park` are not watched. `ab config set stall_retry_after off` / `stall_idle_after off`

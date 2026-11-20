@@ -1837,6 +1837,10 @@ def _resolve_task_arg(conn, a, fn_name):
         return  # an explicit id that is not a task: let the store report it
     ctx, reason = adopt_run_identity(conn, board=getattr(a, "board", None))
     if ctx is None:
+        if a.id and re.search(r"\s", a.id) and not getattr(a, slot):
+            # `ab done "$AB_TASK" "summary"` with AB_TASK empty: the summary landed in the id slot, not a task id
+            raise ValueError(f"no task id: AB_TASK is empty, so the text {a.id[:60]!r} was read as the task id. "
+                             f"Pass the id first: ab {fn_name[4:]} <task id> '<text>' (or export AB_TASK, AB_ACTOR, AB_BOARD)")
         if a.id:
             return  # no run home: keep the store's own error for a bad id
         raise ValueError(f"no task id: pass it, or export AB_TASK, AB_ACTOR and AB_BOARD" + (f" ({reason})" if reason else ""))

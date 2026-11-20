@@ -559,6 +559,8 @@ def park_cond(park):
         return ""
     if park.get("pid"):
         return f"pid {park['pid']} to exit"
+    if park.get("reply_thread"):
+        return f"a reply in thread {park['reply_thread']}"
     if park.get("file"):
         return f"file {park['file']} (stable for {fmt_dur(park.get('grace_s') or 0)})"
     return "a wake condition"
@@ -1126,19 +1128,28 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
     return row["id"]
 
 
-def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False):
+def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False, reply=None):
     """Park a claimed card on a long external job: release the claim WITHOUT counting an attempt and record
     the wake condition (process gone, or file present and stable for grace_s). The runner wakes it later."""
     if not note or not note.strip():
         raise ValueError("ab park needs --note: what you wait for and what the next agent should do with the result")
-    if bool(pid) == bool(file):
-        raise ValueError("give exactly one of --pid PID or --file PATH")
+    if bool(pid) + bool(file) + bool(reply) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH or --reply THREAD")
     with tx(conn):
         row = _owned(conn, tid, actor, force)
         if row["status"] not in ("open", "claimed"):
             raise ValueError(f"task {row['id']} is {row['status']}, cannot park")
         spec = {"note": note.strip(), "at": now()}
-        if pid:
+        if reply:
+            th = str(reply).strip()
+            if conn.execute("SELECT 1 FROM messages WHERE thread=? LIMIT 1", (th,)).fetchone() is None:
+                raise ValueError(f"no thread {th!r} (post the question first: ab ask CHANNEL \"...\" --wait 0s prints the thread id)")
+            mine = conn.execute("SELECT MAX(id) m FROM messages WHERE thread=? AND author=?", (th, actor)).fetchone()["m"]
+            last = conn.execute("SELECT MAX(id) m FROM messages WHERE thread=?", (th,)).fetchone()["m"]
+            # replies newer than this agent's own last post in the thread wake the card (one that arrived
+            # between the ask and the park still counts)
+            spec.update(reply_thread=th, reply_after=mine or last, reply_by=actor)
+        elif pid:
             spec.update(pid=int(pid), pid_start=pid_start)
         else:
             path = os.path.abspath(os.path.expanduser(file or ""))
@@ -1308,3 +1319,10 @@ def active_limits(conn):
 def clear_limit(conn, scope, actor="?"):
     conn.execute("DELETE FROM limits WHERE scope=?", (scope,))
     event(conn, None, actor, "limit_cleared", {"scope": scope})
+
+
+def park_replies(conn, spec):
+    """Messages that answer a reply-park: newer than the parker's last post in the thread, from anyone else
+    (not the parking agent itself, not the runner)."""
+    return conn.execute("SELECT * FROM messages WHERE thread=? AND id>? AND author NOT IN (?, 'runner') ORDER BY id",
+                        (spec["reply_thread"], spec.get("reply_after") or 0, spec.get("reply_by") or "")).fetchall()

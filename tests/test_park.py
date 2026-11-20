@@ -27,6 +27,12 @@ case "$brief" in
     ab done "$AB_TASK" "resumed after park and finished"
     exit 0 ;;
 esac
+if [ -n "$PARK_REPLY_Q" ]; then
+  th=$(ab --json ask main "$PARK_REPLY_Q" --wait 0s | python3 -c 'import json,sys; print(json.load(sys.stdin)["thread"])')
+  echo "$th" > "$PARK_THREADFILE"
+  ab park "$AB_TASK" --reply "$th" --note "$PARK_NOTE"
+  exit 0
+fi
 if [ -n "$PARK_FILE" ]; then
   echo "parking on file $PARK_FILE"
   ab park "$AB_TASK" --file "$PARK_FILE" --grace "${PARK_GRACE:-2s}" --note "$PARK_NOTE"
@@ -52,6 +58,8 @@ def rig(abx, tmp_path):
     fake.mkdir()
     (fake / "claude").write_text(FAKE_CLAUDE)
     (fake / "claude").chmod(0o755)
+    (fake / "ab").write_text(f'#!/bin/sh\nexec {sys.executable} {ROOT}/ab "$@"\n')  # this checkout's ab, not an installed one
+    (fake / "ab").chmod(0o755)
     home = tmp_path / "fakehome"
     home.mkdir()
     env = {"PATH": f"{fake}:{os.environ['PATH']}", "HOME": str(home),
@@ -201,6 +209,33 @@ def _conn(abx):
     return store.connect(abx.home / store.DB_PATH.name)
 
 
+def test_park_reply_wakes_with_the_reply_in_the_brief(rig):
+    """--reply park: the run exits at once (slot frees), our own and the runner's posts do not wake it,
+    a reply from someone else does, and the fresh agent's brief carries the reply text."""
+    j = rig
+    tf = j.tmp / "thread.txt"
+    j.env["PARK_REPLY_Q"] = "which region should the eval use?"
+    j.env["PARK_THREADFILE"] = str(tf)
+    a = j("add", "needs an answer", "--workdir", str(j.tmp / "wa"))["id"]
+    j.start(slots="1")
+    assert wait(lambda: parked(j, a)), j("show", a)
+    t = j("show", a)
+    thread = tf.read_text().strip()
+    assert t["attempts"] == 0 and t["park"]["reply_thread"] == thread
+    assert wait(lambda: j("show", a)["runs"][0]["outcome"] == "parked"), j("show", a)["runs"]
+    time.sleep(3)
+    assert parked(j, a)  # no reply yet: still waiting, no slot held
+    j("--as", "overseer#9", "reply", thread, "use eu-west, the budget is capped at 5 dollars")
+    assert wait(lambda: j("show", a)["status"] in ("claimed", "done")), j("show", a)
+    assert wait(lambda: j("show", a)["status"] == "done"), j("show", a)
+    t = j("show", a)
+    assert t["attempts"] == 0 and len(t["runs"]) == 2
+    briefs = [open(os.path.join(str(j.tmp), f)).read() for f in os.listdir(j.tmp) if f.startswith("args.")]
+    resume = [x for x in briefs if "RESUMING AFTER PARK" in x]
+    assert len(resume) == 1 and "use eu-west, the budget is capped at 5 dollars" in resume[0], briefs
+    assert "overseer#9" in resume[0]
+
+
 def test_park_validation_and_permissions(abx):
     from agentboard import store
     tid = abx("--json", "add", "x")
@@ -210,7 +245,8 @@ def test_park_validation_and_permissions(abx):
     for args, msg in ((["park", tid, "--pid", str(os.getpid())], "--note"),
                       (["park", tid, "--pid", str(os.getpid()), "--file", "/tmp/f", "--note", "n"], "exactly one"),
                       (["park", tid, "--pid", "999999", "--note", "n"], "not running"),
-                      (["park", tid, "--note", "n"], "--pid")):
+                      (["park", tid, "--note", "n"], "--pid"),
+                      (["park", tid, "--reply", "m99999", "--note", "n"], "no thread")):
         code, out, err = abx("--json", *args)
         assert code == 1 and msg in out + err, (args, out, err)
     code, out, err = abx("--json", "--as", "someone-else", "park", tid, "--file", "/tmp/f", "--note", "n")

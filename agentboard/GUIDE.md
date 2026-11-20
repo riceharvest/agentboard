@@ -105,6 +105,15 @@ re-reads its whole context at full price every time it wakes, and loses the wait
     ab park $AB_TASK --file results.json --grace 60s --note "..."   # alternative: wake when the file exists
                                                         # and stops growing (size+mtime unchanged) for --grace
 
+Waiting on a person or another agent instead of a job: ask without blocking, then park on the thread. This frees
+the slot (`ask --wait` holds it for the whole wait):
+
+    ab ask CHANNEL "@someone question" --wait 0s     # prints the thread id, e.g. m123
+    ab park $AB_TASK --reply m123 --note "asked X; when answered, continue with Y"
+    # exit now. The card wakes when someone else posts in m123; the reply text is in the next brief.
+
+Use `ask --wait` only for answers expected within a minute or two; park for anything longer.
+
 The runner checks the wake condition every tick (pid liveness with its start time, so a reused pid doesn't
 fool it; file size/mtime for --file). When it fires, the card becomes ready again and a FRESH agent starts
 with your park note and the parked run's last output lines in its brief, so it continues where you stopped:
@@ -271,7 +280,7 @@ wait; a failed start parks the endpoint 30 min and cards use the rest of their t
     ab runner pause | resume | drain | reload | stop [--now] | slots N      # settings the runner reads every tick
     ab boards set NAME --pause | --resume | --max-slots N
     ab retry ID ; ab cancel ID [why] ; ab defer ID --until +1h|--after ID
-    ab park ID --pid PID|--file PATH [--grace 60s] --note "..."   # wait for a long external job; a fresh agent resumes the card
+    ab park ID --pid PID|--file PATH [--grace 60s]|--reply THREAD --note "..."   # wait for a long external job; a fresh agent resumes the card
     ab edit ID --priority N --tier T --harness H --model M --dep ID --rm-dep ID
     ab note ID "text" ; ab done ID "result" --force                   # --force: finish a manual card you don't hold
     ab decision ls [--owner X] ; ab decision answer ID "text"        # manual cards: records the answer as a note, then closes

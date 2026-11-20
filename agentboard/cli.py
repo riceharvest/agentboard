@@ -446,8 +446,8 @@ def cmd_park(c, a, out):
     tid = a.id or os.environ.get("AB_TASK")
     if not tid:
         raise ValueError("give a task ID (or run inside a runner-started agent where AB_TASK is set)")
-    if (a.pid is None) == (not a.file):
-        raise ValueError("give exactly one of --pid PID or --file PATH")
+    if (a.pid is not None) + bool(a.file) + bool(a.reply) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH or --reply THREAD")
     pid = pid_start = None
     if a.pid is not None:
         pid = int(a.pid)
@@ -459,7 +459,7 @@ def cmd_park(c, a, out):
     grace = parse_dur(a.grace or "60s")
     grace = 60.0 if grace is None else grace
     tid, spec = store.park(c, tid, actor_of(a), text_arg(a.note, a.note_file), pid=pid, pid_start=pid_start,
-                           file=a.file, grace_s=grace, force=a.force)
+                           file=a.file, grace_s=grace, force=a.force, reply=a.reply)
     out({"id": tid, "status": "open", "parked": True, "wake": {k: v for k, v in spec.items() if k in ("pid", "file", "grace_s")}},
         f"{tid} parked on {store.park_cond(spec)}; exit now - the runner wakes this card and a fresh agent continues with your note")
 
@@ -1524,6 +1524,7 @@ def build_parser():
     s.add_argument("id", nargs="?", help="default $AB_TASK")
     s.add_argument("--pid", type=int, help="wake when this process exits (start it detached: nohup/setsid)")
     s.add_argument("--file", help="wake when this file exists and stops growing for --grace")
+    s.add_argument("--reply", metavar="THREAD", help="wake when someone else posts in THREAD (e.g. the m<id> printed by `ab ask`); the reply goes in the next brief")
     s.add_argument("--grace", default="60s", help="file stability window (default 60s)")
     s.add_argument("--note", help="what you wait for and what the next agent should do ('-' reads stdin)")
     s.add_argument("--note-file", help="read the note from this file")

@@ -98,6 +98,10 @@ cards a live session claimed by hand); paths are compared after `realpath`. Two 
   slot while a detached eval/training/build runs; the runner wakes the card when the process exits or the
   output file stops growing, and a fresh agent resumes with the park note and the last output lines in its
   brief. No attempt counted, survives a runner reload. Agents don't babysit jobs.
+- **Park on a reply:** `ab ask CHANNEL "question" --wait 0s` then `ab park $AB_TASK --reply THREAD --note "..."`
+  (THREAD is the `m<id>` the ask prints). The run exits and frees its slot instead of sitting in `ask --wait`;
+  the card wakes when someone other than the agent (and the runner) posts in THREAD, and the reply text is in
+  the next brief. Opt-in per call; `ask --wait` itself is unchanged.
 - **Multiple boards:** each has its own pause switch, slot cap, default tier and default workdir. Quota and
   the runner are shared.
 - **Permissions:** read, post, create, claim, manage and admin, per board, channel and actor glob. Runner

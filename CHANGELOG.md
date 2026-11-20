@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab park ID --reply THREAD --note "..."`: park on a reply instead of holding a slot in `ab ask --wait`. The card wakes when someone other than the parking agent (and the runner) posts in THREAD after the agent's own last post there; the reply text goes in the next brief. Opt-in per call, `ask` is unchanged (note `ask --wait 0s` posts without blocking). MCP `ab_park` takes `reply`. Runner change: `ab runner reload` needed.
+
 - claude launches: repeated `--settings` (base `extra_args` + tier `extra_args_tier`) are merged into one `--settings` JSON (deep-merge, hooks lists concatenated), because claude keeps only the last. Grant refusals (`has no 'admin' on ...`) are no longer auto-retried: the card is held with label `needs_admin=overseer` and `ab anomalies` reports `needs-admin`. Runner change: `ab runner reload` needed.
 
 - Cache-stable brief: the fixed command/rules block now comes first (no ids in it), the per-run part (ids, attempt, body, deps, notes) after it. Opt-in per-card labels `tools=A,B`, `skills=none`, `mcp=none` trim a claude run's always-loaded context (`--tools`, `--disable-slash-commands`, `--strict-mcp-config`); no label = unchanged. Runner change: `ab runner reload` needed.

@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import store
@@ -27,7 +27,27 @@ def _set_cursor(conn, source, key, value):
                  (source, key, json.dumps(value)))
 
 
+def _priced(conn, bucket, ts, u):
+    """cost_usd for a usage row whose provider reports none, from cfg `usage_rates` (opt-in, per bucket):
+    {"input": $/M, "output": $/M, "cache_read": $/M, "cache_write": $/M, "scale": f,
+     "peak_utc": {"days": [0..4], "hours": [[1, 4], [6, 10]], "factor": 2}}. The result is what the plan counts
+    against its allowance (list price x scale x peak factor), so `max_cost` / `windows` caps pace on it."""
+    if u.get("cost_usd"):
+        return u.get("cost_usd")
+    r = (store.cfg(conn, "usage_rates") or {}).get(bucket)
+    if not r:
+        return u.get("cost_usd")
+    c = sum(float(u.get(f) or 0) * float(r.get(f) or 0) for f in ("input", "output", "cache_read", "cache_write")) / 1e6
+    pk = r.get("peak_utc")
+    if pk:
+        t = datetime.fromtimestamp(ts, timezone.utc)
+        if t.weekday() in pk.get("days", range(7)) and any(a <= t.hour + t.minute / 60 < b for a, b in pk.get("hours", [])):
+            c *= float(pk.get("factor") or 1)
+    return c * float(r.get("scale") or 1)
+
+
 def _put(conn, source, key, ts, harness, bucket, model, u, task_id=None, replace=False):
+    u = {**u, "cost_usd": _priced(conn, bucket, ts, u)}
     verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
     conn.execute(f"{verb} INTO usage(source,key,ts,harness,bucket,model,task_id,input,output,cache_read,cache_write,reasoning,cost_usd) "
                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -825,6 +845,10 @@ def cap_status(conn, bucket, plan=_LIVE):
     for k, field in (("max_output", "output"), ("max_cost", "cost_usd"), ("max_runs", "runs"), ("max_calls", "calls")):
         if cap.get(k) is not None and t[field] >= float(cap[k]):
             return f"soft cap {k}={cap[k]} reached in the last {cap.get('window', '5h')} ({field}={t[field]:.0f})"
+    for dur, lim in (cap.get("windows") or {}).items():  # several cost windows at once, e.g. {"7d": 2.5, "30d": 9}
+        spent = window_totals(conn, bucket, store.parse_dur(dur))["cost_usd"]
+        if spent >= float(lim):
+            return f"soft cap windows[{dur}]={lim} reached (cost_usd={spent:.4f})"
     return None
 
 

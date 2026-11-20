@@ -421,3 +421,13 @@ Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on s
     ab done ID "result" --force     ab decision ls [--owner X] | answer ID "text"    (manual cards: note, then done)
     ab kill RUN_ID                  (stops one run; the task goes back to the queue without an attempt. `cancel` ends the work)
     ab watch|sched enable|disable NAME
+
+### Cost-priced usage, multi-window caps, escalate on failure (all opt-in)
+
+    ab config set usage_rates '{"BUCKET": {"input": 0.15, "output": 0.6, "cache_read": 0.003, "scale": 0.6, "peak_utc": {"days": [0,1,2,3,4], "hours": [[1,4],[6,10]], "factor": 2}}}'
+    ab caps set BUCKET --window 5h  # then edit the cap in config: {"windows": {"7d": 2.4, "30d": 9.5}} pauses the bucket when its priced spend in each window reaches the limit
+    ab config set escalation_ladder '["cheap","medium","high"]' && ab config set escalate_on_fail true
+
+`usage_rates` prices usage rows whose provider reports no cost (per million tokens, with an optional scale and a peak-hours multiplier), so
+`max_cost` and `windows` caps can pace such a bucket. With `escalate_on_fail` a failed attempt retries the card one rung up `escalation_ladder`
+(a start tier that is too cheap costs one retry). A Hermes spec may carry an effort: `hermes/PROVIDER:MODEL@low` is passed as `--reasoning low`.

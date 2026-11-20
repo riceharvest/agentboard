@@ -566,6 +566,8 @@ class Hermes(Adapter):
             cmd += ["--provider", provider]
         if model:
             cmd += ["-m", model]
+        if effort:
+            cmd += ["--reasoning", effort]
         return cmd + list(extra)
 
     def endpoint_command(self, brief, model, effort, ep, extra):

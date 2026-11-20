@@ -115,8 +115,11 @@ DEFAULTS = {
                    "opencode:opencode/deepseek-v4.1-flash-free"],
         "low": ["opencode:opencode/deepseek-v4.1-flash-free", "agy:Gemini 3.8 Flash (Medium)", "codex:@low", "claude:haiku"],
     },
+    "escalate_on_fail": False,  # opt-in: a failed attempt retries the card one rung up cfg escalation_ladder (cheap tier first, stronger on failure)
+    "escalation_ladder": [],    # ordered tier names, cheapest first, e.g. ["probe", "low", "medium", "high", "max"]
     "tier_order": ["low", "medium", "high", "max"],
     "caps": {},                 # bucket -> {"window": "5h", "max_output": N, "max_cost": USD, "max_runs": N}
+    "usage_rates": {},          # bucket -> {"input"/"output"/"cache_read"/"cache_write": $ per M, "scale": f, "peak_utc": {...}}: prices rows whose provider reports no cost, so max_cost / windows caps can pace them
     "bucket_map": {},           # "harness/model-glob" -> bucket, overrides the built-in mapping
     "extra_args": {},           # harness -> [args] appended to every launch
     "extra_args_tier": {},      # tier -> {harness -> [args]} appended after extra_args for entries of that tier
@@ -763,6 +766,15 @@ def add_plan(conn, actor, specs, board=DEFAULT_BOARD, plan_key=None, key_live=Fa
 GRANT_REFUSAL_RE = re.compile(r"no admin grant|has no '\w+' on [\w.-]+:", re.I)
 
 
+def escalated_tier(conn, row):
+    """Opt-in (cfg escalate_on_fail): the next rung of cfg escalation_ladder after the card's tier, or None. A failed attempt retries one rung up."""
+    if not cfg(conn, "escalate_on_fail"):
+        return None
+    ladder = cfg(conn, "escalation_ladder") or []
+    cur = row["tier"] or cfg(conn, "default_tier")
+    return ladder[ladder.index(cur) + 1] if cur in ladder and ladder.index(cur) + 1 < len(ladder) else None
+
+
 def _fail_attempt(conn, row, actor, why, kind="failed"):
     """Count an attempt; dead after max_attempts, else back to open with backoff."""
     attempts = (row["attempts"] or 0) + 1
@@ -784,8 +796,11 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
         _report_back(conn, row, actor, f"DEAD after {attempts} attempts: {why}")
         return "dead"
     nb = now() + (parse_dur(cfg(conn, "backoff")) or 0) * attempts
-    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, not_before=?, updated_at=? WHERE id=?",
-                 (attempts, nb, now(), row["id"]))
+    up = escalated_tier(conn, row)
+    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, not_before=?, updated_at=?, tier=COALESCE(?, tier) WHERE id=?",
+                 (attempts, nb, now(), up, row["id"]))
+    if up:
+        event(conn, row["id"], actor, "escalated", {"from": row["tier"] or cfg(conn, "default_tier"), "to": up})
     event(conn, row["id"], actor, kind, {"why": why, "attempts": attempts, "retry_at": nb})
     return "open"
 

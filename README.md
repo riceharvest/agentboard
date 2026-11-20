@@ -349,6 +349,12 @@ Opt-in extras, default `off`: `stall_retry_count N` (kill as a limit after N pro
 call), `stall_idle_cooldown 30m` (an idle kill also cools the run's bucket like a limit, still no attempt),
 `stall_idle_blind on` (idle rule for harnesses with no log, judged by output growth).
 
+**Done gate** (opt-in per card). An agent can call itself done; a command can't be talked into it. `ab add "title" --verify 'pytest -q tests/x'`
+(or `ab edit ID --verify CMD`, empty string removes it): after the agent calls `ab done` the runner runs CMD in the card's workdir.
+Exit 0 accepts. Otherwise the card reopens with the last 40 lines of the output in the next brief (`YOUR LAST ab done WAS REJECTED`),
+at most `verify_rounds` times (default `2`; no attempt is used); the next failure fails the card with the output as its result.
+`verify_timeout` (default `10m`) bounds the command. Runs show outcome `verify_failed`; `ab show` lists the `verify:` line.
+
 **Resume after a limit death** (opt-in, default off). Runs killed by a provider limit used to restart from scratch.
 `ab config set limit_resume on` adds checkpoint rules to every brief (commit to the branch at milestones, keep an
 uncommitted `.ab-progress.md` in the workdir), and the retry brief of a card whose last run died on a limit lists the

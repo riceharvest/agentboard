@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Done gate: `ab add/edit --verify CMD` (opt-in per card, default none). After the agent calls `ab done` the runner runs CMD in the card's workdir (worktree if it has one). Exit 0 accepts. Any other exit (or running past `verify_timeout`, default 10m) rejects: the card is reopened with the last 40 lines of output in the next brief (same route, no attempt used), at most `verify_rounds` (default 2) times; the next failure fails the card with the output as its result. Runs show outcome `verify_failed`. Also works in `ab add --plan` (`verify` field). New column `tasks.verify` (auto-migrated). Runner change: `ab runner reload` needed.
+
 - Resume after limit deaths (opt-in, default off): `ab config set limit_resume on` tells workers to commit at milestones and keep a progress file (`.ab-progress.md`, uncommitted) in the workdir; a retry after a run that died on a provider limit gets that run's commits (+ diff stat), uncommitted changes, progress file and the last note in its brief. `limit_skip_after N` (default 2, only with `limit_resume on`): once a card has N limit deaths on one route (bucket), that route is skipped for the card and the next tier entry is used. Runner change: `ab runner reload` needed.
 
 - `ab outcomes [--since 7d] [--by label:type,harness,tier] [--json]`: read-only outcome ledger (runs, accepted outcomes, agent-hours, tokens, $ where known, $ and tokens per accepted outcome, failure classes) per group. New module `agentboard/outcomes.py`. Runner change: none needed.

@@ -119,6 +119,8 @@ def show_text(d):
         lines += [f"[{fmt_ts(n['ts'])} m{n['id']} {n['author']}] {n['body']}" for n in d["notes"]]
     if d.get("cmd"):
         lines.insert(2, f"cmd: {d['cmd']}")
+    if d.get("verify"):
+        lines.insert(2, f"verify: {d['verify']}")
     if d.get("runs"):
         lines.append("")
         for r in d["runs"]:
@@ -228,11 +230,11 @@ def visible(c, a, rows):
 
 # ---------------------------------------------------------------- commands
 PLAN_FIELDS = {"key", "title", "body", "labels", "deps", "tier", "workdir", "after", "priority", "manual", "cmd", "channel",
-               "harness", "model", "max_attempts", "timeout", "data", "result"}
+               "harness", "model", "max_attempts", "timeout", "data", "result", "verify"}
 
 
 def _card_kwargs(title, body, labels, priority, after, workdir, tier, harness, model, manual, max_attempts, timeout, data,
-                 cmd, result, channel="main"):
+                 cmd, result, channel="main", verify=None):
     """Validated add_task kwargs, shared by `ab add` and `ab add --plan`."""
     if workdir is None and os.environ.get("AB_TASK"):
         workdir = os.getcwd()  # sub-tasks created inside a run inherit the run's workdir
@@ -248,9 +250,13 @@ def _card_kwargs(title, body, labels, priority, after, workdir, tier, harness, m
             data = {**(data or {}), "cmd_result": result}
     elif result:
         raise ValueError("--result only applies to --cmd cards")
+    if verify is not None and cmd is not None:
+        raise ValueError("--verify gates agent cards; a --cmd card already settles by its exit code")
+    if verify is not None and not str(verify).strip():
+        verify = None
     return dict(title=title, body=body, channel=channel, labels=labels, priority=priority,
                 not_before=parse_time(after) if after else None, workdir=workdir, tier=tier, harness=harness, model=model,
-                runnable=not manual, max_attempts=max_attempts, timeout_s=parse_dur(timeout) if timeout else None, data=data, cmd=cmd)
+                runnable=not manual, max_attempts=max_attempts, timeout_s=parse_dur(timeout) if timeout else None, data=data, cmd=cmd, verify=verify)
 
 
 def plan_specs(raw):
@@ -274,7 +280,7 @@ def plan_specs(raw):
         if not isinstance(cd.get("title"), str) or not cd["title"].strip():
             raise ValueError(f"{who}: title is required")
         for f, typ in (("key", str), ("body", str), ("tier", str), ("workdir", str), ("after", str), ("cmd", str), ("result", str),
-                       ("channel", str), ("harness", str), ("model", str), ("timeout", str)):
+                       ("channel", str), ("harness", str), ("model", str), ("timeout", str), ("verify", str)):
             if cd.get(f) is not None and not isinstance(cd[f], typ):
                 raise ValueError(f"{who}: {f} must be a string")
         if cd.get("key") is not None and not cd["key"].strip():
@@ -298,7 +304,7 @@ def plan_specs(raw):
             kw = _card_kwargs(cd["title"], cd.get("body") or "", {str(k): str(v) for k, v in lab.items()}, cd.get("priority") or 0,
                               cd.get("after"), cd.get("workdir"), cd.get("tier"), cd.get("harness"), cd.get("model"),
                               bool(cd.get("manual")), cd.get("max_attempts") or 3, cd.get("timeout"), cd.get("data"),
-                              cd.get("cmd"), cd.get("result"), cd.get("channel") or "main")
+                              cd.get("cmd"), cd.get("result"), cd.get("channel") or "main", cd.get("verify"))
         except ValueError as e:
             raise ValueError(f"{who}: {e}") from None
         specs.append({"key": cd.get("key"), "deps": deps, "kw": kw})
@@ -326,7 +332,7 @@ def cmd_add(c, a, out):
         labels["reply_to"] = a.reply_to
     data = jarg(a.data)
     kw = _card_kwargs(a.title, body_arg(a), labels, a.priority, a.after, a.workdir, a.tier, a.harness, a.model, a.manual,
-                      a.max_attempts, a.timeout, data, a.cmd, a.result, a.channel)
+                      a.max_attempts, a.timeout, data, a.cmd, a.result, a.channel, a.verify)
     info = {}
     tid = store.add_task(c, actor_of(a), board=board_of(a), key=a.key, key_live=a.key_live, _info=info,
                          deps=[store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])], **kw)
@@ -481,7 +487,7 @@ def check_harness_pin(harness):
 
 def cmd_edit(c, a, out):
     f = {}
-    for k in ("title", "channel", "priority", "tier", "harness", "model", "max_attempts", "move_to"):
+    for k in ("title", "channel", "priority", "tier", "harness", "model", "max_attempts", "move_to", "verify"):
         v = getattr(a, k)
         if v is not None:
             f["board" if k == "move_to" else k] = v if v != "" else None
@@ -1445,6 +1451,7 @@ def build_parser():
     s.add_argument("--workdir", "-w", "--cwd", help="where the work runs (--cwd for command cards)")
     s.add_argument("--cmd", help="command card: the runner runs this shell command itself (no model, no quota); exit 0=done, 75=release, else fail")
     s.add_argument("--result", help="command card: fixed result text on exit 0 (default: last output line)")
+    s.add_argument("--verify", help="done gate: after the agent calls `ab done` the runner runs this shell command in the workdir; exit 0 accepts, else the card reopens with the last 40 lines of output in the next brief (config verify_rounds, default 2, then it fails)")
     s.add_argument("--tier", "-t", help="intelligence tier (see `ab tiers`)")
     s.add_argument("--harness", help="pin a harness (skips tier routing); HARNESS@ENDPOINT or hermes/PROVIDER pins where it runs")
     s.add_argument("--model", help="pin a model (with --harness)")
@@ -1552,6 +1559,7 @@ def build_parser():
     s.add_argument("--body-file")
     s.add_argument("--priority", type=int)
     s.add_argument("--max-attempts", type=int)
+    s.add_argument("--verify", help="done gate command (see `ab add --verify`); empty string removes it")
     s.add_argument("--label", "-l", action="append", help="key=value, or key= to remove")
     s.add_argument("--dep", action="append")
     s.add_argument("--rm-dep", action="append")

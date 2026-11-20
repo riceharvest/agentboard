@@ -354,6 +354,10 @@ card *about* rate limiting cannot trip it) through an optional per-adapter probe
   idle kill also cool the run's bucket like a limit (the retried card then routes elsewhere; still no attempt);
   `stall_idle_blind on` applies the idle rule to harnesses with no log to read (agy, gemini, ...) using output growth,
   so only turn it on if their runs stream output while working.
+- **Done gate** (`ab add/edit --verify CMD`, per card, default none): when the agent calls `ab done`, the runner runs CMD in the
+  card's workdir; exit 0 accepts. Any other exit reopens the card, the next brief carrying the last 40 lines of output, at most
+  `verify_rounds` (default 2) times, then the card is failed with the output. `verify_timeout` (default 10m). Write CMD so it
+  checks the deliverable (a file exists, tests pass), not the agent's claim. Cannot be combined with `--cmd`. Needs `ab runner reload`.
 - **Resume after limit deaths** (opt-in, `limit_resume on`, default `off`): briefs tell the worker to commit at milestones and
   keep an uncommitted `.ab-progress.md` in the workdir. When the card's last run died on a provider limit, the retry brief
   carries the commits since the card started (+ diff stat), uncommitted changes, the progress file and the last note: continue,

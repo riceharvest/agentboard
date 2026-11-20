@@ -372,6 +372,45 @@ def limit_resume_text(conn, task, workdir):
     return "".join(parts) + checkpoint_rules(conn)
 
 
+VERIFY_TAIL_LINES = 40
+
+
+def verify_rounds(conn):
+    try:
+        return max(0, int(cfg(conn, "verify_rounds")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def run_verify(cmd, workdir, timeout_s):
+    """Run a card's --verify command in its workdir. Returns (ok, tail): the last VERIFY_TAIL_LINES lines of stdout+stderr."""
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=workdir or None, capture_output=True, text=True, errors="replace",
+                           timeout=timeout_s or None, stdin=subprocess.DEVNULL)
+        out, ok, head = (r.stdout or "") + (r.stderr or ""), r.returncode == 0, f"exit {r.returncode}"
+    except subprocess.TimeoutExpired as e:
+        raw = e.stdout or b""
+        out, ok, head = (raw.decode(errors="replace") if isinstance(raw, bytes) else raw), False, f"timed out after {timeout_s}s"
+    except OSError as e:
+        out, ok, head = str(e), False, "could not run"
+    tail = "\n".join(out.rstrip().splitlines()[-VERIFY_TAIL_LINES:])[-6000:]
+    return ok, f"{head}\n{tail}".strip() if not ok else tail
+
+
+def verify_text(conn, task):
+    """Brief section: the card's last verification failed; what the command printed and what rule applies next."""
+    if not task["verify"]:
+        return ""
+    last = conn.execute("SELECT id, outcome, detail FROM runs WHERE task_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+                        (task["id"],)).fetchone()
+    if not last or last["outcome"] != "verify_failed":
+        return f"\nDONE GATE: after you call `ab done`, the runner runs `{task['verify']}` in the workdir; it must exit 0 or the card reopens.\n"
+    n = conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='verify_failed'", (task["id"],)).fetchone()[0]
+    return (f"\nYOUR LAST `ab done` WAS REJECTED: the verify command `{task['verify']}` failed (round {n} of {verify_rounds(conn) + 1}; "
+            f"after {verify_rounds(conn) + 1} failures the card is failed). Fix the cause, run it yourself, then `ab done` again. "
+            f"Last {VERIFY_TAIL_LINES} lines of its output:\n{last['detail'] or '(no output)'}\n")
+
+
 def limit_skip_n(conn):
     """Limit deaths of one card on one route after which the route is skipped for it; 0 = off (needs limit_resume on)."""
     if not _resume_on(conn):
@@ -406,7 +445,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         actor=actor, board=task["board"], context=ctx, park=park_resume(conn, task),
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
-                        resume=limit_resume_text(conn, task, workdir),
+                        resume=limit_resume_text(conn, task, workdir) + verify_text(conn, task),
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 
@@ -1232,9 +1271,21 @@ class Runner:
                     res.error = f"killed by runner: {ch.stall_error}"
                     res.reset_at = ch.stall_reset_at
             model = res.model or ch.model
+            vfail = None  # (round, tail) when the card's --verify command rejected this run's `ab done`
+            t0 = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+            if (t0 is not None and t0["verify"] and not ch.kill_reason and res.error_kind not in ("auth", "limit", "unavailable")
+                    and ((t0["status"] == "done" and t0["run_id"] in (None, ch.run_id)) or
+                         (t0["status"] == "claimed" and t0["owner"] == ch.owner and res.ok))):
+                self.log(f"run {ch.run_id} ({ch.task_id}): verify: {t0['verify'][:120]}")
+                vok, vtail = run_verify(t0["verify"], ch.workdir, parse_dur(cfg(c, "verify_timeout") or "10m"))
+                if not vok:
+                    rounds = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='verify_failed'", (ch.task_id,)).fetchone()[0] + 1
+                    vfail = (rounds, vtail)
             with tx(c):
                 t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
                 mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
+                if vfail and not (t is not None and t["verify"] == t0["verify"] and (mine or t["status"] == "done")):
+                    vfail = None  # the card changed under the check (reopened, cancelled, verify edited): leave it alone
                 park = json.loads(t["park"]) if t is not None and t["park"] else None
                 parked_by_me = bool(park) and not park.get("woken_at") and park.get("run") == ch.run_id
                 if parked_by_me:
@@ -1284,6 +1335,25 @@ class Runner:
                         c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                         event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "run killed" if ch.kill_reason == "killed" else "runner stopped"})
                     outcome = ch.kill_reason
+                elif vfail:
+                    rounds, vtail = vfail
+                    limit = verify_rounds(c) + 1
+                    outcome = "verify_failed"
+                    c.execute("UPDATE tasks SET result=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                    if rounds >= limit:
+                        store.post_message(c, "runner", f"Verify command `{t['verify']}` failed on round {rounds} of {limit}; the card is failed. "
+                                           f"Last {VERIFY_TAIL_LINES} lines:\n```\n{vtail}\n```", thread=ch.task_id, check=False, _in_tx=True)
+                        why = f"verify `{t['verify']}` failed {rounds} times; last output:\n{vtail}"[-1500:]
+                        c.execute("UPDATE tasks SET status='dead', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
+                                  (why, now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "dead", {"why": why[:500], "after": "verify_failed", "rounds": rounds})
+                        store._report_back(c, t, "runner", f"DEAD: {why}")
+                    else:
+                        store.post_message(c, "runner", f"`ab done` rejected: verify command `{t['verify']}` failed (round {rounds} of {limit}); "
+                                           f"the card is reopened for the same agent route. Last {VERIFY_TAIL_LINES} lines:\n```\n{vtail}\n```",
+                                           thread=ch.task_id, check=False, _in_tx=True)
+                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, park=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "verify_failed", {"run": ch.run_id, "round": rounds, "of": limit})
                 elif mine:
                     if res.ok:
                         store.post_message(c, "runner", "Agent exited without `ab done`; its final answer is kept as the result.",
@@ -1305,7 +1375,7 @@ class Runner:
                 c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, session_id=?, model=?, input=?, output=?, cache_read=?, "
                           "cache_write=?, reasoning=?, cost_usd=?, detail=? WHERE id=?",
                           (now(), rc, outcome, res.session_id, model, res.input, res.output, res.cache_read, res.cache_write,
-                           res.reasoning, res.cost_usd, (res.error if not res.ok else res.text)[:2000], ch.run_id))
+                           res.reasoning, res.cost_usd, (vfail[1] if outcome == "verify_failed" else res.error if not res.ok else res.text)[:2000], ch.run_id))
                 usage.record_run_usage(c, ch.run_id, ch.harness, ch.bucket, model, ch.task_id, res,
                                        force=bool(hermes_home))
                 event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc,

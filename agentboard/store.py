@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
   tier TEXT DEFAULT 'medium', harness TEXT, model TEXT, workdir TEXT, runnable INTEGER DEFAULT 1,
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 3, timeout_s INTEGER,
-  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER, cmd TEXT, key TEXT,
+  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER, cmd TEXT, key TEXT, verify TEXT,
   created_by TEXT, created_at REAL, updated_at REAL);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, priority);
 CREATE TABLE IF NOT EXISTS plans(board TEXT, key TEXT, ids TEXT, created_by TEXT, created_at REAL, PRIMARY KEY(board, key));
@@ -98,6 +98,8 @@ DEFAULTS = {
     "stall_idle_blind": "off",  # opt-in: also apply the idle rule to harnesses with no log to read, using output growth (they may print only at exit)
     "limit_resume": "off",      # opt-in: workers checkpoint (commits + progress file); a retry after a limit death gets that state in its brief
     "limit_skip_after": "2",    # with limit_resume on: a card's route (bucket) with this many limit deaths is skipped for that card (0/off = never)
+    "verify_rounds": "2",       # cards with --verify CMD: failed verifications that reopen the card before it is failed (0 = the first failure fails it)
+    "verify_timeout": "10m",    # a verify command running longer than this counts as a failure
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
     "hermes_isolate": True,     # run Hermes in a per-run HERMES_HOME (strips bot tokens, stops ephemeral gateway on kill/exit)
@@ -199,6 +201,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE tasks ADD COLUMN cmd TEXT")
     if "key" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN key TEXT")
+    if "verify" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN verify TEXT")
     if "code_ver" not in _cols(conn, "runner"):
         conn.execute("ALTER TABLE runner ADD COLUMN code_ver TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_key ON tasks(board, key)")
@@ -615,7 +619,7 @@ def find_key(conn, board, key, live=False, skip=None):
 
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
              workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
-             board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None):
+             board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None, verify=None):
     """_info (dict) gets existed=True when `key` already named a card (nothing is created; its id is returned)."""
     def go():
         b = require_board(conn, board)
@@ -638,14 +642,15 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
         t = now()
         conn.execute(
             "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
-            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key,verify) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
              workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
-             json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None))
+             json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None, verify or None))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
         event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
-                                            **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {})})
+                                            **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
+                                            **({"verify": verify} if verify else {})})
         return tid
     if _in_tx:
         return go()
@@ -1175,7 +1180,7 @@ def retry(conn, tid, actor):
     return row["id"]
 
 
-EDITABLE = {"cmd", "title", "body", "channel", "priority", "tier", "harness", "model", "workdir", "runnable",
+EDITABLE = {"cmd", "verify", "title", "body", "channel", "priority", "tier", "harness", "model", "workdir", "runnable",
             "max_attempts", "timeout_s", "not_before", "board"}
 
 

@@ -23,6 +23,7 @@ DEF_START_TIMEOUT = 900      # s from start_cmd to healthy before the start coun
 DEF_IDLE_STOP = 300          # s without a board run before an owned server is stopped
 STOP_GRACE = 120             # s after the stop before SIGKILL to the process group
 FAIL_COOLDOWN = 1800         # s an endpoint is skipped after a failed start
+BUSY_RC, BUSY_COOLDOWN = 75, 300   # start_cmd exit 75 = "refused, device busy now": retry after 5 min, not 30
 HEALTH_TTL = 5               # s a health result is reused within one runner
 DEMAND_WINDOW = 30           # s: an endpoint a card asked for this recently is "wanted" and is not switched away from
 DEF_SWITCH_AFTER = 1800      # s a card may wait on a wanted group-mate before the runner switches anyway (when idle)
@@ -172,8 +173,10 @@ class Lifecycle:
                     return f"endpoint {name} start timed out", False
                 return f"endpoint {name} starting", True
             if status == "starting":
-                why = f"server exited {age:.0f}s after start, before it was healthy ({detail}); log {mine.get('log')}"
-                self._fail(name, why)
+                rc = self._rc(name)
+                why = (f"start_cmd refused with exit {rc} (busy), retry in {BUSY_COOLDOWN // 60} min" if rc == BUSY_RC else
+                       f"server exited (rc {rc}) {age:.0f}s after start, before it was healthy ({detail})") + f"; log {mine.get('log')}"
+                self._fail(name, why, cooldown=BUSY_COOLDOWN if rc == BUSY_RC else FAIL_COOLDOWN)
                 return f"endpoint {name} start failed", False
             self._put(name, None, "endpoint_exited")     # was up, died: start it again below
         grp = e.get("group")
@@ -224,13 +227,18 @@ class Lifecycle:
         self.log(f"endpoint {name}: started pid {proc.pid} ({e['start_cmd']})")
         return f"endpoint {name} starting", True
 
-    def _fail(self, name, why, stop=False):
+    def _rc(self, name):
+        p = self._proc.get(name)
+        return p.poll() if p is not None else None
+
+    def _fail(self, name, why, stop=False, cooldown=FAIL_COOLDOWN):
         if stop:
             self.stop(name, why)
         else:
             self._put(name, None)
         with tx(self.conn):
-            store.set_limit(self.conn, f"endpoint:{name}", "start_failed", now() + FAIL_COOLDOWN, why[:300])
+            store.set_limit(self.conn, f"endpoint:{name}", "busy" if cooldown == BUSY_COOLDOWN else "start_failed",
+                            now() + cooldown, why[:300])
             event(self.conn, None, "runner", "endpoint_failed", {"endpoint": name, "why": why[:300]})
         self.log(f"endpoint {name}: {why}")
 
@@ -285,7 +293,9 @@ class Lifecycle:
                     self._put(name, None, "endpoint_exited")
                     self.log(f"endpoint {name}: server exited on its own")
                 elif now() - mine.get("started_at", now()) > 60:
-                    self._fail(name, f"server exited before it was healthy; log {mine.get('log')}")
+                    rc = self._rc(name)
+                    self._fail(name, f"server exited (rc {rc}) before it was healthy; log {mine.get('log')}",
+                               cooldown=BUSY_COOLDOWN if rc == BUSY_RC else FAIL_COOLDOWN)
                 continue
             if e is None:
                 self.stop(name, "endpoint removed from the config")

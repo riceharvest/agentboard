@@ -257,7 +257,8 @@ stopped when no card has used it for a while:
 - Ready = HTTP 200 from `--health-url` (default `BASE_URL/models`, which must list at least one model) and, with
   `--health-match`, a body that matches the regex. Until then cards on that route wait instead of falling through to
   the next tier entry. A start that exits or isn't ready within `--start-timeout` (900 s) parks the endpoint for 30
-  minutes (`ab limits`) and cards fall through to the rest of their tier.
+  minutes (`ab limits`) and cards fall through to the rest of their tier. A start command that exits 75 means "busy,
+  try later" (GPU taken, not enough RAM): that parks it 5 minutes instead.
 - `--idle-stop N` stops it N seconds after its last board run ends (default 300, `-1` = never).
 - `--max-runs N` caps concurrent board runs on the endpoint (works on unmanaged endpoints too).
 - `--group G`: endpoints that share one device. Only one is up at a time; the runner switches when the one that is up

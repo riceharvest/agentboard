@@ -411,6 +411,57 @@ def cmd_note(c, a, out):
     out({"id": tid, "noted": True}, f"{tid} noted")
 
 
+def rm_root():
+    """The tree `ab rm` may delete in: this run's workdir ($AB_WORKDIR), else the git toplevel of the cwd."""
+    import subprocess
+    w = os.environ.get("AB_WORKDIR")
+    if not w:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        w = p.stdout.strip() if p.returncode == 0 else ""
+    if not w:
+        raise SystemExit("ab rm: no worktree (set AB_WORKDIR or run inside a git checkout)")
+    return os.path.realpath(w)
+
+
+def rm_check(path, root):
+    """Absolute path to delete, or raise ValueError. The parent is resolved (symlinks followed), the last component is not,
+    so a symlink inside the worktree is removed itself, never its target; .git and the root stay."""
+    ap = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(path))), os.path.basename(path.rstrip("/")))
+    if ap == root or not ap.startswith(root + os.sep):
+        raise ValueError(f"{path}: outside the worktree {root}, refused")
+    if ".git" in ap[len(root) + 1:].split(os.sep):
+        raise ValueError(f"{path}: inside .git, refused")
+    return ap
+
+
+def cmd_rm(c, a, out):
+    import shutil
+    root = rm_root()
+    done, bad = [], []
+    for p in a.paths:
+        try:
+            ap = rm_check(p, root)
+        except ValueError as e:
+            bad.append(str(e))
+            continue
+        if os.path.islink(ap) or os.path.isfile(ap):
+            os.unlink(ap)
+        elif os.path.isdir(ap):
+            if not a.recursive:
+                bad.append(f"{p}: is a directory (use -r)")
+                continue
+            shutil.rmtree(ap)
+        elif not a.force:
+            bad.append(f"{p}: no such file")
+            continue
+        done.append(ap)
+    for b in bad:
+        print("ab rm: " + b, file=sys.stderr)
+    out({"removed": done, "refused": bad}, "\n".join(f"removed {d}" for d in done))
+    if bad:
+        raise SystemExit(1)
+
+
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
@@ -1492,6 +1543,11 @@ def build_parser():
     s.add_argument("text", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--file", help="read the note from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data", help="JSON (or @file)")
+
+    s = sub("rm", cmd_rm, "delete files/dirs inside your own worktree (for harnesses whose shell refuses `rm -f`)")
+    s.add_argument("paths", nargs="+")
+    s.add_argument("-r", "--recursive", action="store_true")
+    s.add_argument("-f", "--force", action="store_true", help="a missing path is not an error")
 
     s = sub("done", cmd_done, "complete your task", ["complete"])
     s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")

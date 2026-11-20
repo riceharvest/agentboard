@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
   tier TEXT DEFAULT 'medium', harness TEXT, model TEXT, workdir TEXT, runnable INTEGER DEFAULT 1,
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 3, timeout_s INTEGER,
-  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER,
+  owner TEXT, lease_until REAL, not_before REAL, result TEXT, data TEXT, park TEXT, run_id INTEGER, cmd TEXT,
   created_by TEXT, created_at REAL, updated_at REAL);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, priority);
 CREATE TABLE IF NOT EXISTS deps(task_id TEXT, dep_id TEXT, PRIMARY KEY(task_id, dep_id));
@@ -174,6 +174,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT")
     if "park" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN park TEXT")
+    if "cmd" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN cmd TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
@@ -496,6 +498,7 @@ def task_dict(conn, row, full=False):
     d["labels"] = json.loads(d.get("labels") or "{}")
     d["data"] = json.loads(d["data"]) if d.get("data") else None
     d["park"] = json.loads(d["park"]) if d.get("park") else None
+    d["kind"] = "cmd" if d.get("cmd") else "agent"
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
     if full:
@@ -577,7 +580,7 @@ def would_cycle(conn, tid, dep):
 
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
              workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
-             board=DEFAULT_BOARD, _in_tx=False):
+             board=DEFAULT_BOARD, _in_tx=False, cmd=None):
     def go():
         b = require_board(conn, board)
         ch = channel or "main"
@@ -593,13 +596,14 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
         t = now()
         conn.execute(
             "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
-            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
              workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
-             json.dumps(data) if data is not None else None, actor, t, t))
+             json.dumps(data) if data is not None else None, actor, t, t, cmd or None))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
-        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {}})
+        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
+                                            **({"cmd": cmd} if cmd else {})})
         return tid
     if _in_tx:
         return go()
@@ -1054,7 +1058,7 @@ def retry(conn, tid, actor):
     return row["id"]
 
 
-EDITABLE = {"title", "body", "channel", "priority", "tier", "harness", "model", "workdir", "runnable",
+EDITABLE = {"cmd", "title", "body", "channel", "priority", "tier", "harness", "model", "workdir", "runnable",
             "max_attempts", "timeout_s", "not_before", "board"}
 
 

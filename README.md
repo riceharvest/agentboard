@@ -53,6 +53,7 @@ machine.
 
     ab add "Add a /health endpoint" --body "FastAPI app in ./api, add a test" --tier medium --workdir ~/code/api
     ab add "Review the /health change" --dep t_xxxxxxxx --tier high
+    ab add "Nightly export" --cmd "./export.sh" --after 02:00        # a command card: runs the script itself, no model
     ab runner start --slots 2
     ab ls --status all ; ab show t_xxxxxxxx ; ab usage
 

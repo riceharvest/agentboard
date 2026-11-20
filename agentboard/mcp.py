@@ -8,10 +8,11 @@ S, I, B, L, KV = "string", "integer", "boolean", "list", "kv"
 
 # tool: (description, subcommand, [positional args], {param: (flag, kind)}, [required])
 TOOLS = {
-    "ab_add": ("Create a task for agents. tier picks the intelligence (see ab_tiers); deps must finish first.", "add",
+    "ab_add": ("Create a task for agents. tier picks the intelligence (see ab_tiers); deps must finish first. cmd=SHELL COMMAND makes a command card: the runner runs it itself, no model.", "add",
                ["title"], {"body": ("--body", S), "channel": ("--channel", S), "labels": ("--label", KV), "priority": ("--priority", I),
                            "deps": ("--dep", L), "after": ("--after", S), "workdir": ("--workdir", S), "tier": ("--tier", S),
                            "harness": ("--harness", S), "model": ("--model", S), "manual": ("--manual", B),
+                           "cmd": ("--cmd", S), "result": ("--result", S),
                            "max_attempts": ("--max-attempts", I), "timeout": ("--timeout", S), "data": ("--data", S),
                            "reply_to": ("--reply-to", S)}, ["title"]),
     "ab_list": ("List tasks. Default open+claimed; ready=true for claimable now.", "ls", [],

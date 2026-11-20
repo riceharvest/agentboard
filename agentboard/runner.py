@@ -36,6 +36,8 @@ def ab_path_dirs():
 
 def _pythonpath(env):
     return f"{PKG_ROOT}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(PKG_ROOT)
+CMD_TAIL_LINES = 40          # command cards: output lines posted to the thread
+CMD_RELEASE_RC = 75         # command card exit code: "refused, try later" = release without using an attempt
 RUNNER_LEASE = 600          # the runner renews its children's claims every tick; this only matters if it dies
 STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "AI_AGENT", "HERMES_AGENT",
              "HERMES_KANBAN_TASK", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_SESSION_ID",
@@ -155,7 +157,7 @@ def runner_status(conn):
         poll = float(cfg(conn, "poll_s") or 5)
         d["running"] = bool(d["pid"] and alive(d["pid"], None) and d["heartbeat"] and now() - d["heartbeat"] < poll * 3 + 30)
     d["children"] = [dict(x) for x in conn.execute(
-        "SELECT r.id run, r.task_id, r.harness, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
+        "SELECT r.id run, r.task_id, r.harness, t.cmd, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
         "t.title, t.board, t.timeout_s FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
     default_to = parse_dur(cfg(conn, "timeout"))
     stalls = cfg(conn, "stall_state") or {}
@@ -613,6 +615,12 @@ class Runner:
                 note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
                 break
             workdir = t["workdir"] or str(store.HOME / "work" / t["id"])
+            if t["cmd"]:
+                # command card: no harness, no bucket, no quota gating or pacing; slots, RAM gate, deps and priority applied above
+                self.waiting.pop(t["id"], None)
+                if self.spawn_cmd(t, workdir):
+                    launched += 1
+                continue
             labels = json.loads(t["labels"] or "{}")
             free = self.lockfree(labels)
             wt = None
@@ -754,6 +762,130 @@ class Runner:
         self.children[run_id].hermes_home = hermes_home
         self.log(f"run {run_id}: {task['id']} -> {cand.label()} [{bucket}] pid {proc.pid}")
         return True
+
+    def spawn_cmd(self, task, workdir):
+        """Run a command card's shell command itself: a run row with harness 'cmd' and no bucket (so no usage row, no launch
+        budget, no pacer), claimed as cmd#<run>, AB_TASK/AB_ACTOR/AB_BOARD exported, stdout+stderr in one file."""
+        c = self.conn
+        with tx(c):
+            cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
+            if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
+                return False
+            t_start = now()
+            c.execute("INSERT INTO runs(task_id,harness,tier,started_at) VALUES(?,?,?,?)", (task["id"], "cmd", task["tier"], t_start))
+            run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            owner = f"cmd#{run_id}"
+            c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
+                      (owner, t_start + RUNNER_LEASE, run_id, t_start, task["id"]))
+            event(c, task["id"], "runner", "started", {"run": run_id, "harness": "cmd", "cmd": cur["cmd"]})
+        runs_dir = store.HOME / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
+        env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
+        home = str(store.HOME)
+        env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": home, "AB_RUN_HOME": home,
+                    "AB_BOARD": cur["board"], "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
+        try:
+            if not cur["workdir"]:
+                Path(workdir).mkdir(parents=True, exist_ok=True)
+            with open(out_path, "wb") as fo:
+                proc = subprocess.Popen(["/bin/sh", "-c", cur["cmd"]], cwd=workdir, stdout=fo, stderr=subprocess.STDOUT,
+                                        stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+        except OSError as e:  # bad cwd / no shell: the card's fault, one attempt
+            why = f"could not start the command: {e}"
+            with tx(c):
+                c.execute("UPDATE runs SET ended_at=?, outcome='spawn_failed', detail=? WHERE id=?", (now(), why, run_id))
+                t = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
+                store.post_message(c, "runner", f"Run {run_id} (command) failed: {why}", thread=task["id"], check=False, _in_tx=True)
+                store._fail_attempt(c, t, "runner", why, "failed")
+            self.log(f"cmd run {run_id}: {task['id']} {why}")
+            return False
+        start = pid_start(proc.pid)
+        with tx(c):
+            c.execute("UPDATE runs SET pid=?, pid_start=?, out_path=?, err_path=? WHERE id=?", (proc.pid, start, out_path, err_path, run_id))
+        timeout_s = cur["timeout_s"] or parse_dur(cfg(c, "timeout"))
+        ch = Child(run_id, task["id"], owner, "cmd", None, None, proc.pid, start, proc, timeout_s, workdir, out_path, err_path, now())
+        ch.holds_lock, ch.board, ch.endpoint, ch.provider = False, cur["board"], None, None
+        self.children[run_id] = ch
+        self.log(f"run {run_id}: {task['id']} -> cmd pid {proc.pid}")
+        return True
+
+    def watch_cmd_idle(self, ch):
+        """Same idle rule as agent runs (stall_idle_after, label stall=off|<dur>), reading the output file's mtime."""
+        _, idle_after = self.stall_policy(ch)
+        if not idle_after:
+            return
+        last = ch.started
+        for pth in (ch.out_path, ch.err_path):
+            try:
+                last = max(last, os.stat(pth).st_mtime)
+            except (OSError, TypeError):
+                pass
+        if now() - last > idle_after:
+            ch.stall_error = f"no output for {fmt_age(now() - last)} (stall_idle_after {fmt_age(idle_after)}; label stall=off for a quiet command)"
+            self.log(f"run {ch.run_id} ({ch.task_id}): {ch.stall_error}")
+            with tx(self.conn):
+                event(self.conn, ch.task_id, "runner", "stall", {"run": ch.run_id, "kind": "idle", "since": last})
+            self.kill(ch, "idle", ch.stall_error)
+
+    def finalize_cmd(self, ch, rc):
+        """Settle a command run by exit code: 0 done (result = --result or the last output line), 75 release with no attempt
+        (retried after the backoff), anything else fail with the output tail. Kills/timeouts/stalls as for agent runs."""
+        c = self.conn
+        try:
+            raw = Path(ch.out_path).read_text(errors="replace") if ch.out_path else ""
+        except OSError:
+            raw = ""
+        lines = [ln.rstrip() for ln in raw.splitlines()]
+        tail = "\n".join(lines[-CMD_TAIL_LINES:])[-6000:]
+        last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+        with tx(c):
+            t = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()
+            mine = t is not None and t["status"] == "claimed" and t["owner"] == ch.owner
+            fixed = (json.loads(t["data"]) if t is not None and t["data"] else {}) or {}
+            fixed = fixed.get("cmd_result") if isinstance(fixed, dict) else None
+            block = f"\n```\n{tail}\n```" if tail.strip() else " (no output)"
+            post = lambda msg: store.post_message(c, "runner", msg, thread=ch.task_id, check=False, _in_tx=True)
+            detail = None
+            if ch.kill_reason in ("stopped", "cancelled", "killed", "expired"):
+                outcome = ch.kill_reason
+                if mine:
+                    c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                    event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": "run killed" if ch.kill_reason == "killed" else "runner stopped"})
+            elif ch.kill_reason in ("timeout", "idle"):
+                outcome = ch.kill_reason
+                detail = f"killed by runner: {ch.stall_error or ch.kill_reason}" + (f" ({getattr(ch, 'kill_why', None)})" if not ch.stall_error and getattr(ch, "kill_why", None) else "")
+                if mine:
+                    post(f"Command run {ch.run_id} {detail}. Last output:{block}")
+                    store._fail_attempt(c, t, "runner", detail[:1500], outcome)
+            elif not mine:
+                outcome = f"agent_{t['status']}" if t else "task_gone"  # the command settled the card itself (ab done/release/...)
+            elif rc == 0:
+                outcome = "done"
+                result = (fixed or last or "finished, no output")[:8000]
+                post(f"Command exited 0. Last output:{block}")
+                c.execute("UPDATE tasks SET status='done', result=?, owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+                          (result, now(), ch.task_id))
+                event(c, ch.task_id, "runner", "done", {"run": ch.run_id, "auto": True, "cmd": True})
+                store._report_back(c, t, ch.owner, result)
+            elif rc == CMD_RELEASE_RC:
+                outcome = "released"
+                nb = now() + (parse_dur(cfg(c, "backoff")) or 0)
+                detail = f"exit {rc}: released, no attempt used"
+                post(f"Command exited {rc} (refused, try later): released without using an attempt, retry after {store.fmt_ts(nb)}. Last output:{block}")
+                c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, not_before=?, updated_at=? WHERE id=?",
+                          (nb, now(), ch.task_id))
+                event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": f"command exit {rc}", "retry_at": nb})
+            else:
+                outcome = "failed"
+                why = (f"command exited {rc}" if rc is not None else "command exit status lost") + (f": {last}" if last else "")
+                detail = why
+                post(f"Command run {ch.run_id} failed ({why[:200]}). Last output:{block}")
+                store._fail_attempt(c, t, "runner", (why + "\n" + tail)[-1500:], "failed")
+            c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, detail=? WHERE id=?",
+                      (now(), rc, outcome, (detail or last)[:2000], ch.run_id))
+            event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc})
+        self.log(f"run {ch.run_id} ({ch.task_id}, cmd) -> {outcome}" + (f": {detail[:160]}" if detail else ""))
 
     # -- watching
     def _stop_hermes_session(self, ch):
@@ -912,6 +1044,8 @@ class Runner:
         """One look at a live run. (1) Stuck in provider 429 retries longer than stall_retry_after: the bucket is
         rate-limited, whatever the process looks like -> kill as a LIMIT (cooldown, AIMD halving, reroute, no attempt).
         (2) No sign of life longer than stall_idle_after: kill, retried once, then held for the overseer."""
+        if ch.harness == "cmd":
+            return self.watch_cmd_idle(ch)
         a = H.ADAPTERS.get(ch.harness)
         if a is None:
             return
@@ -970,6 +1104,8 @@ class Runner:
                           (json.dumps(want),))
 
     def finalize(self, ch, rc):
+        if ch.harness == "cmd":
+            return self.finalize_cmd(ch, rc)
         c = self.conn
         a = H.ADAPTERS[ch.harness]
         hermes_home = getattr(ch, "hermes_home", None)

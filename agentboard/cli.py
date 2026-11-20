@@ -82,14 +82,14 @@ def tline(d):
         extra.append("deps " + ",".join(d["deps"]))
     if d.get("attempts"):
         extra.append(f"try {d['attempts']}/{d['max_attempts']}")
-    return (f"{d['id']}  {d['state']:<9} p{d['priority']:<3} {d['tier']:<6} {d['channel']:<12} {d['title'][:70]}"
+    return (f"{d['id']}  {d['state']:<9} p{d['priority']:<3} {'cmd' if d.get('cmd') else d['tier']:<6} {d['channel']:<12} {d['title'][:70]}"
             + (f"  [{lab}]" if lab else "") + (f"  ({'; '.join(extra)})" if extra else ""))
 
 
 def show_text(d):
     lines = [f"{d['id']}  {d['title']}",
              f"state={d['state']} status={d['status']} board={d['board']} channel={d['channel']} priority={d['priority']} tier={d['tier']}"
-             + (f" pin={d['harness']}:{d.get('model') or ''}" if d.get("harness") else "")
+             + (f" pin={d['harness']}:{d.get('model') or ''}" if d.get("harness") else "") + (" kind=cmd" if d.get("cmd") else "")
              + f" attempts={d['attempts']}/{d['max_attempts']} runnable={bool(d['runnable'])}",
              f"created {fmt_ts(d['created_at'])} by {d['created_by']}, updated {fmt_ts(d['updated_at'])}"
              + (f", owner {d['owner']} lease until {fmt_ts(d['lease_until'])}" if d.get("owner") else "")
@@ -117,9 +117,15 @@ def show_text(d):
     if d.get("notes"):
         lines.append("")
         lines += [f"[{fmt_ts(n['ts'])} m{n['id']} {n['author']}] {n['body']}" for n in d["notes"]]
+    if d.get("cmd"):
+        lines.insert(2, f"cmd: {d['cmd']}")
     if d.get("runs"):
         lines.append("")
         for r in d["runs"]:
+            if r["harness"] == "cmd":
+                lines.append(f"run {r['id']} cmd {fmt_ts(r['started_at'])} {fmt_dur((r['ended_at'] or now()) - r['started_at'])} -> "
+                             f"{r['outcome'] or 'running'}" + (f" exit={r['exit_code']}" if r.get("exit_code") is not None else ""))
+                continue
             lines.append(f"run {r['id']} {r['harness']}{'/' + r['provider'] if r.get('provider') else ''}{'@' + r['endpoint'] if r.get('endpoint') else ''}:{r['model'] or ''} [{r['bucket']}] {fmt_ts(r['started_at'])} "
                          f"{fmt_dur((r['ended_at'] or now()) - r['started_at'])} -> {r['outcome'] or 'running'} "
                          f"in={r['input']} out={r['output']} cache_r={r['cache_read']}"
@@ -228,6 +234,16 @@ def cmd_add(c, a, out):
     if workdir:
         workdir = str(Path(workdir).expanduser().resolve())
     check_harness_pin(a.harness)
+    data = jarg(a.data)
+    if a.cmd is not None:
+        if not a.cmd.strip():
+            raise ValueError("--cmd needs a command")
+        if a.manual or a.harness or a.model:
+            raise ValueError("--cmd cards run a command: no --manual/--harness/--model")
+        if a.result:
+            data = {**(data or {}), "cmd_result": a.result}
+    elif a.result:
+        raise ValueError("--result only applies to --cmd cards")
     labels = kv_list(a.label)
     if a.reply_to:
         store.resolve_thread(c, a.reply_to)
@@ -235,8 +251,8 @@ def cmd_add(c, a, out):
     tid = store.add_task(c, actor_of(a), a.title, body_arg(a), a.channel, labels, a.priority,
                          [store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])],
                          parse_time(a.after) if a.after else None, workdir, a.tier, a.harness, a.model,
-                         not a.manual, a.max_attempts, parse_dur(a.timeout) if a.timeout else None, jarg(a.data),
-                         board=board_of(a))
+                         not a.manual, a.max_attempts, parse_dur(a.timeout) if a.timeout else None, data,
+                         board=board_of(a), cmd=a.cmd)
     out({"id": tid}, tid)
 
 
@@ -787,7 +803,7 @@ def cmd_runner(c, a, out):
         if s.get("note"):
             lines.append("note: " + s["note"])
         for ch in s.get("children", []):
-            lines.append(f"  run {ch['run']} {ch['task_id']} {ch['harness']}:{ch['model'] or ''} [{ch['bucket']}] "
+            lines.append(f"  run {ch['run']} {ch['task_id']} " + (f"cmd: {(ch['cmd'] or '')[:40]}" if ch['harness'] == 'cmd' else f"{ch['harness']}:{ch['model'] or ''} [{ch['bucket']}]") + " "
                          f"{fmt_dur(now() - ch['started_at'])}"
                          + (f"  [{ch['stall']}]" if ch.get("stall") else "") + f"  {(ch['title'] or '')[:60]}")
         return "\n".join(lines)
@@ -1312,7 +1328,9 @@ def build_parser():
     s.add_argument("--priority", "-p", type=int, default=0)
     s.add_argument("--dep", "-d", action="append", help="task id that must be done first (repeatable)")
     s.add_argument("--after", help="not before: +2h | 14:30 | 2026-11-20 03:00")
-    s.add_argument("--workdir", "-w")
+    s.add_argument("--workdir", "-w", "--cwd", help="where the work runs (--cwd for command cards)")
+    s.add_argument("--cmd", help="command card: the runner runs this shell command itself (no model, no quota); exit 0=done, 75=release, else fail")
+    s.add_argument("--result", help="command card: fixed result text on exit 0 (default: last output line)")
     s.add_argument("--tier", "-t", help="intelligence tier (see `ab tiers`)")
     s.add_argument("--harness", help="pin a harness (skips tier routing); HARNESS@ENDPOINT or hermes/PROVIDER pins where it runs")
     s.add_argument("--model", help="pin a model (with --harness)")

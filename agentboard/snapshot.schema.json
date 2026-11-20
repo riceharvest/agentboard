@@ -78,6 +78,7 @@
         "runnable": {"type": "boolean", "description": "false = manual card: the runner never starts it"},
         "priority": {"type": "integer"},
         "tier": {"type": "string"},
+        "kind": {"enum": ["agent", "cmd"], "description": "cmd = command card: the runner runs its shell command, no model"},
         "harness": {"type": ["string", "null"], "description": "pinned harness, null = routed by tier"},
         "model": {"type": ["string", "null"]},
         "labels": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -119,7 +120,9 @@
       "properties": {
         "run": {"type": "integer"},
         "task_id": {"type": "string"},
-        "harness": {"type": "string"},
+        "harness": {"type": "string", "description": "'cmd' for a command card's run (no model, no bucket)"},
+        "kind": {"enum": ["agent", "cmd"]},
+        "cmd": {"type": ["string", "null"], "description": "the shell command of a command card"},
         "endpoint": {"type": ["string", "null"]},
         "model": {"type": ["string", "null"]},
         "effort": {"type": ["string", "null"]},

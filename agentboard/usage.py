@@ -232,7 +232,7 @@ def summarize(conn, since_s=None, by="bucket"):
 
 
 def by_task(conn, since_s=None, limit=30):
-    args, where = [], "WHERE r.ended_at IS NOT NULL"
+    args, where = [], "WHERE r.ended_at IS NOT NULL AND r.harness != 'cmd'"
     if since_s:
         where += " AND r.started_at >= ?"
         args.append(time.time() - since_s)
@@ -835,7 +835,7 @@ def buckets_report(conn):
     pstate = _load_pacer(conn)
     since = time.time() - 7 * 86400
     names = {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM usage WHERE ts >= ?", (since,))}
-    names |= {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM runs WHERE started_at >= ?", (since,))}
+    names |= {r[0] for r in conn.execute("SELECT DISTINCT bucket FROM runs WHERE bucket IS NOT NULL AND started_at >= ?", (since,))}
     names |= set(caps) | set(pstate) | {s.split(":", 1)[1] for s in lim if s.startswith("bucket:")}
     if claude_plan_pct is not _DEFAULT_CLAUDE_PLAN_PCT or stored_plan(conn)[0]:
         names.add("claude-sub")

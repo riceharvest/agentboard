@@ -17,7 +17,7 @@ MAX_TAIL = 4 * 1024 * 1024
 
 TASK_COLS = ("id, board, title, channel, status, priority, labels, tier, harness, model, workdir, runnable, attempts, "
              "max_attempts, timeout_s, owner, lease_until, not_before, run_id, created_by, created_at, updated_at, park, "
-             f"substr(result,1,{RESULT_HEAD}) AS result_head")
+             f"substr(result,1,{RESULT_HEAD}) AS result_head, cmd IS NOT NULL AS is_cmd")
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b[()][0-2AB]")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -83,6 +83,7 @@ def _chunks(seq, n=500):
 def _task(r, keys, deps, dep_status, t):
     d = dict(zip(keys, r))
     d["runnable"] = bool(d["runnable"])
+    d["kind"] = "cmd" if d.pop("is_cmd", 0) else "agent"
     lab = d["labels"]
     d["labels"] = json.loads(lab) if lab and lab != "{}" else {}
     d["park"] = json.loads(d["park"]) if d.get("park") else None
@@ -194,6 +195,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
         if (ch["board"] and ch["board"] not in bmap) or (board and ch["board"] != board):
             continue
         ch["elapsed_s"] = max(0.0, t - ch["started_at"])
+        ch["kind"] = "cmd" if ch["harness"] == "cmd" else "agent"
         children.append(ch)
         if ch["board"] in bmap:
             bmap[ch["board"]]["running"] += 1
@@ -301,7 +303,7 @@ def render_text(s):
              + (f" pid {r['pid']}" if r["pid"] else "") + f"  state={r['state']} slots={r['slots_effective']} active={r['active']} "
              f"paused={r['paused']} draining={r['draining']} ready={r['ready']} free={r['free_gib']}GiB"]
     for c in r["children"]:
-        lines.append(f"  run {c['run']} {c['task_id']} {c['harness']}:{c['model'] or ''} [{c['bucket']}] "
+        lines.append(f"  run {c['run']} {c['task_id']} " + (f"cmd: {(c['cmd'] or '')[:40]}" if c['harness'] == 'cmd' else f"{c['harness']}:{c['model'] or ''} [{c['bucket']}]") + " "
                      f"{store.fmt_dur(c['elapsed_s'])}/{store.fmt_dur(c['timeout_s'])}" + (f"  [{c['stall']}]" if c.get("stall") else "")
                      + f"  {(c['title'] or '')[:60]}")
     for b in s["boards"]:

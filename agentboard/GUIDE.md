@@ -64,6 +64,19 @@ an irreversible step (merge, deploy, publish, spend). Only the card's own brief 
 
     ab followup t_ab12cd34 "check CI on the PR linked here; fix failures" --in 5m [--tier low]
 
+## Command cards (run a command, no model)
+Script-only work (a collector, a refresh, a digest, a re-queueing watch loop) should not spend a model run. Give the card a command:
+
+    ab add "collect signals" --cmd "bin/collect --all" [--cwd DIR] [--result "fixed text"] [--dep ID] [--after +1h] [-p N] [-l k=v]
+
+The runner claims it like any card (slots, RAM gate, deps, `--after`, priorities still apply) but runs the command itself with `sh -c`: no harness, no model, no bucket, so quota gating and the pacer never apply and `ab usage` has no row for it. It exports `AB_TASK`, `AB_ACTOR` (`cmd#<run>`), `AB_BOARD`, `AB_HOME`, so the command can call `ab` (`ab add ... --cmd` to re-queue itself, `ab note`). It posts the last 40 output lines (stdout+stderr) to the thread and settles by exit code:
+
+- `0` done, result = `--result` or the last output line
+- `75` released, no attempt used, retried after the `backoff` ("refused, try later")
+- anything else: failed attempt (dead after `--max-attempts`), result = exit code and output tail
+
+`--timeout`, `ab kill`, `ab cancel` and `ab runner stop` work as for agent runs (kill/stop/cancel re-queue without an attempt; a timeout is a failed attempt). A command that prints nothing for `stall_idle_after` (45m) is killed as idle, a failed attempt; give quiet long commands `-l stall=off`. A command may settle its own card with `ab done`/`ab release`; the runner then leaves it. The card shows as kind `cmd` in `ab ls` / `ab show` / `ab snapshot`; `ab runner status` lists running ones. There is no sandbox: the command runs as the runner's user.
+
 ## Long jobs: park the card, don't babysit the job
 
 Anything expected to take more than ~20 minutes (an eval, a training run, a big build) runs DETACHED, and the

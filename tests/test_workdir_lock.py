@@ -42,6 +42,7 @@ def rig(abx, tmp_path):
         j("runner", "resume")
     j.start = start
     j.env = env
+    j.home = abx.home
     yield j
     try:
         j("runner", "stop", "--now")
@@ -96,6 +97,29 @@ def test_role_run_survives_reload(rig, tmp_path):
     pids = [int(p.name.rsplit(".", 1)[1]) for p in tmp_path.glob("args.*")]
     assert len(pids) == 1
     os.kill(pids[0], 0)  # the fake agent still runs; before the adopt fix the reload killed it as "expired"
+
+
+def test_role_run_survives_reload_with_runs_owner_column(rig, tmp_path):
+    """Regression : a runs.owner column (present on the live board) shadowed the joined tasks.owner in
+    adopt(), so every role run was re-adopted as harness#N, killed 'expired' with 0 tokens, and burned an attempt."""
+    import sqlite3
+    j = rig
+    db = sqlite3.connect(str(j.home / ("board" + ".db")))
+    db.execute("ALTER TABLE runs ADD COLUMN owner TEXT")
+    db.commit()
+    db.close()
+    a = j("add", "overseer sweep", "-l", "role=overseer")["id"]
+    j.start()
+    assert wait(lambda: status(j, a) == "claimed")
+    before = j("show", a)
+    assert before["owner"].startswith("overseer#")
+    assert j("runner", "reload")["action"] == "reload"
+    time.sleep(8)
+    after = j("show", a)
+    assert after["status"] == "claimed" and after["owner"] == before["owner"]
+    assert after["attempts"] == before["attempts"]
+    db = sqlite3.connect(str(j.home / ("board" + ".db")))
+    assert db.execute("SELECT count(*) FROM runs WHERE ended_at IS NOT NULL").fetchone()[0] == 0  # nothing was killed
 
 
 def test_manual_claim_holds_the_dir(rig, tmp_path):

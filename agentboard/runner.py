@@ -393,12 +393,14 @@ class Runner:
 
     def adopt(self):
         """Runs left by a previous runner: keep watching the live ones, settle the finished ones."""
-        for r in self.conn.execute("SELECT r.*, t.owner FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL").fetchall():
+        for r in self.conn.execute("SELECT r.*, t.owner AS task_owner FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL").fetchall():
             t = self.conn.execute("SELECT * FROM tasks WHERE id=?", (r["task_id"],)).fetchone()
             timeout_s = (t["timeout_s"] if t else None) or parse_dur(cfg(self.conn, "timeout"))
             # keep the owner the run was launched as (a role label makes it e.g. overseer#N, not harness#N); a
             # mismatch here makes poll_children kill the adopted run as "expired" right after every reload
-            owner = r["owner"] if r["owner"] and r["owner"].endswith(f"#{r['id']}") else f"{r['harness']}#{r['id']}"
+            # (alias: runs has its own, empty `owner` column; an unaliased t.owner is shadowed by it, so every adopted
+            # role run fell back to harness#N, mismatched the claim and was killed "expired" with 0 tokens)
+            owner = r["task_owner"] if r["task_owner"] and r["task_owner"].endswith(f"#{r['id']}") else f"{r['harness']}#{r['id']}"
             c = Child(r["id"], r["task_id"], owner, r["harness"], r["model"], r["bucket"], r["pid"],
                       r["pid_start"], None, timeout_s, None, r["out_path"], r["err_path"], r["started_at"])
             c.board = t["board"] if t else store.DEFAULT_BOARD

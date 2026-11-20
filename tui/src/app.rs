@@ -157,6 +157,13 @@ pub struct App {
     pub hits: Vec<(Rect, Hit)>,
     pub content: Rect,
     pub feed_area: Rect,
+    /// Decisions "options and default" pane: plain text of each drawn row, where it was drawn, and a mouse selection
+    /// (anchor, head) in (row, column) cells, tied to the card it was made on.
+    pub dec_lines: Vec<String>,
+    pub dec_area: Rect,
+    pub dec_sel: Option<((usize, usize), (usize, usize))>,
+    pub dec_sel_card: Option<String>,
+    dec_dragging: bool,
     pending: Vec<(PendingKind, String, Instant)>,
     transition_pending: bool,
     startup_pending: bool,
@@ -201,6 +208,11 @@ impl App {
             hits: vec![],
             content: Rect::default(),
             feed_area: Rect::default(),
+            dec_lines: vec![],
+            dec_area: Rect::default(),
+            dec_sel: None,
+            dec_sel_card: None,
+            dec_dragging: false,
             pending: vec![],
             transition_pending: false,
             startup_pending: true,
@@ -1013,6 +1025,7 @@ impl App {
             'n' | 'P' | 'T' | 'H' | 'D' | 'a' => self.do_prompt(c),
             'e' => self.do_suspend(true),
             's' => self.do_suspend(false),
+            'y' if self.screen == Screen::Decisions => self.copy_decision(),
             'm' if self.screen == Screen::Decisions => {
                 self.show_all_manual = !self.show_all_manual;
                 self.clamp_selection();
@@ -1057,7 +1070,96 @@ impl App {
         self.move_sel(d);
     }
 
+    /// Cell under the mouse inside the decision pane, as (row, column), clamped to the pane when `clamp`.
+    fn dec_cell(&self, m: &MouseEvent, clamp: bool) -> Option<(usize, usize)> {
+        let a = self.dec_area;
+        if a.width == 0 || a.height == 0 || self.screen != Screen::Decisions || !matches!(self.mode, Mode::Normal) {
+            return None;
+        }
+        let inside = m.column >= a.x && m.column < a.x + a.width && m.row >= a.y && m.row < a.y + a.height;
+        if !inside && !clamp {
+            return None;
+        }
+        let row = m.row.clamp(a.y, a.y + a.height - 1) - a.y;
+        let col = m.column.clamp(a.x, a.x + a.width - 1) - a.x;
+        Some((row as usize, col as usize))
+    }
+
+    /// Text under the current selection (rows joined with newlines, trailing blanks trimmed).
+    pub fn dec_selected_text(&self) -> String {
+        let Some((a, b)) = self.dec_sel else { return String::new() };
+        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+        let mut out = vec![];
+        for row in s.0..=e.0 {
+            let Some(line) = self.dec_lines.get(row) else { break };
+            let from = if row == s.0 { s.1 } else { 0 };
+            let to = if row == e.0 { e.1 + 1 } else { usize::MAX };
+            out.push(crate::util::cut_cols(line, from, to).trim_end().to_string());
+        }
+        out.join("\n").trim_matches('\n').to_string()
+    }
+
+    fn copy_text(&mut self, text: &str, what: &str) {
+        if text.trim().is_empty() {
+            self.toast("nothing to copy", true);
+            return;
+        }
+        let via = crate::clip::copy(text);
+        self.toast(format!("copied {what} ({} chars, {via})", text.chars().count()), false);
+    }
+
+    /// `y` on Decisions: the selection if there is one, else the whole card (title, body, notes).
+    fn copy_decision(&mut self) {
+        let sel = self.dec_selected_text();
+        if !sel.trim().is_empty() {
+            self.copy_text(&sel, "selection");
+            return;
+        }
+        let Some(id) = self.selected_id() else { return };
+        let title = self.task(&id).map(|t| t.title.clone()).unwrap_or_default();
+        let text = match self.detail.as_ref().filter(|(d, _, _)| *d == id) {
+            Some((_, d, _)) => {
+                let mut s = format!("{title}\n\n{}", d.body.trim_end());
+                for n in &d.notes {
+                    s.push_str(&format!("\n\n{}: {}", n.author, n.body));
+                }
+                s
+            }
+            None => title,
+        };
+        self.copy_text(&text, "card");
+    }
+
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        // drag to select inside the decision pane; copied on release
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(c) = self.dec_cell(&m, false) {
+                    self.dec_sel = Some((c, c));
+                    self.dec_sel_card = self.selected_id();
+                    self.dec_dragging = true;
+                    return;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dec_dragging => {
+                if let (Some(c), Some((a, _))) = (self.dec_cell(&m, true), self.dec_sel) {
+                    self.dec_sel = Some((a, c));
+                }
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.dec_dragging => {
+                self.dec_dragging = false;
+                match self.dec_sel {
+                    Some((a, b)) if a != b => {
+                        let text = self.dec_selected_text();
+                        self.copy_text(&text, "selection");
+                    }
+                    _ => self.dec_sel = None,
+                }
+                return;
+            }
+            _ => {}
+        }
         match m.kind {
             MouseEventKind::ScrollDown => self.move_sel(1),
             MouseEventKind::ScrollUp => self.move_sel(-1),

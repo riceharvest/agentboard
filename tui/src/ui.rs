@@ -2,7 +2,7 @@
 use crate::app::{App, Hit, Mode, Screen, LANES, OPS_SECTIONS};
 use crate::model::{value_id, Task};
 use crate::theme::{self, base, bold, dim, fg};
-use crate::util::{bar, fmt_clock, fmt_dur, fmt_hms, fmt_num, gauge_color, md_lines, pad, trunc};
+use crate::util::{bar, cut_cols, fmt_clock, fmt_dur, fmt_hms, fmt_num, gauge_color, md_lines, pad, text_width, trunc, wrap};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -231,7 +231,7 @@ fn hints(app: &App) -> &'static str {
         }
         Screen::Running => "↑↓ select run · Enter open card · K kill run · x cancel card · n note · e/s editor/shell · ? help",
         Screen::Card => "↑↓ scroll · r retry · x cancel · K kill · n note · P prio · T tier · H harness · D defer · a answer · e/s editor/shell",
-        Screen::Decisions => "↑↓ select · a answer · Enter open · n note · m all manual cards · ? help",
+        Screen::Decisions => "↑↓ select · a answer · Enter open · n note · m all manual cards · drag/y copy · ? help",
         Screen::Usage => "↑↓ scroll · b board · ? help",
         Screen::Feed => "↑↓ select · Enter open card · / filter · ? help",
         Screen::Ops => "←→ section · ↑↓ select · Enter toggle · p pause/resume · d drain · R reload · S stop · g start · +/- slots · P pacer · w worktree · J/K tiers",
@@ -782,8 +782,41 @@ fn decisions(app: &mut App, f: &mut Frame, area: Rect) {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(sp("press a to answer: your text is posted as a note and the card is closed", dim())));
+        lines.push(Line::from(sp("drag to select and copy · y copies the selection or the whole card", dim())));
     }
-    f.render_widget(Paragraph::new(lines).style(base()).wrap(Wrap { trim: false }), inner);
+    // wrap here instead of in the Paragraph, so every drawn row is known and a mouse selection maps back to text
+    let w = inner.width as usize;
+    let mut rows: Vec<Line> = vec![];
+    for l in lines {
+        let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+        if w == 0 || text_width(&text) <= w {
+            rows.push(l);
+        } else {
+            let st = l.style.patch(l.spans.first().map(|s| s.style).unwrap_or_default());
+            rows.extend(wrap(&text, w).into_iter().map(|part| Line::from(Span::styled(part, st))));
+        }
+    }
+    let cur = list.get(app.sel.dec).map(|t| t.id.clone());
+    if app.dec_sel.is_some() && app.dec_sel_card != cur {
+        app.dec_sel = None;
+    }
+    app.dec_lines = rows.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+    app.dec_area = inner;
+    if let Some((a, b)) = app.dec_sel {
+        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+        for r in s.0..=e.0.min(rows.len().saturating_sub(1)) {
+            let Some(text) = app.dec_lines.get(r) else { break };
+            let from = if r == s.0 { s.1 } else { 0 };
+            let to = if r == e.0 { e.1 + 1 } else { usize::MAX };
+            let st = rows[r].style.patch(rows[r].spans.first().map(|x| x.style).unwrap_or_default());
+            rows[r] = Line::from(vec![
+                Span::styled(cut_cols(text, 0, from), st),
+                Span::styled(cut_cols(text, from, to), theme::sel()),
+                Span::styled(cut_cols(text, to, usize::MAX), st),
+            ]);
+        }
+    }
+    f.render_widget(Paragraph::new(rows).style(base()), inner);
 }
 
 // ---------------------------------------------------------------------------------------------- usage
@@ -1170,6 +1203,7 @@ fn overlays(app: &mut App, f: &mut Frame, area: Rect) {
                 ("r  x  K", "retry / cancel (asks first) / kill the live run (asks first)"),
                 ("n  P  T  H  D", "note / priority / tier / harness / defer the selected card"),
                 ("a", "answer a decision card (note + done)"),
+                ("y / drag", "Decisions: copy the selection or the whole card"),
                 ("e  s", "open the card's workdir in $EDITOR / a shell (returns here after)"),
                 ("Ops screen", "p pause·resume  d drain  R reload  S stop  g start  +/- slots  P pacer  w worktree  J/K tiers"),
                 ("F5", "refresh now"),

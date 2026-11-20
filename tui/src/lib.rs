@@ -2,6 +2,7 @@
 //! Reads `ab snapshot --json`, acts through `ab` verbs; holds no board logic of its own.
 pub mod ab;
 pub mod app;
+pub mod clip;
 pub mod config;
 pub mod fx;
 pub mod model;

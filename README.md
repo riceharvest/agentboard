@@ -133,7 +133,7 @@ action is an `ab` verb, with a confirmation for the destructive ones.
 | 1 Board | kanban per board: ready / running / waiting / review / done / dead with counts and caps, coloured by `type` label and tier, `NEG` badge for intended negative outcomes (excluded from dead failure counts/glitches), "waits on" and workdir wait reasons | arrows, `b` board, `Enter` |
 | 2 Running | one row per run: harness:model, bucket, elapsed vs timeout bar, live tail of the selected run | `K` kill run |
 | 3 Card | body (simple markdown), worktree metadata (`worktree_branch` / `worktree_dir` / `worktree=off`) and wait reason, notes, run history with tokens, result, dependency tree | `r` retry, `x` cancel, `n` note, `P` `T` `H` priority/tier/harness, `D` defer, `e` `s` open workdir in `$EDITOR` / a shell |
-| 4 Decisions | open manual cards owned by you with their options and default | `a` answer (note + done) |
+| 4 Decisions | open manual cards owned by you with their options and default | `a` answer (note + done), drag to select and copy, `y` copy selection or card |
 | 5 Usage | per bucket 5h / 24h / 7d totals, pacer launch budgets (`pace`/`aimd`/`cap`) and cap/cooldown status with a 7-day sparkline, split per harness and model | |
 | 6 Feed | every event as it happens | `/` filter |
 | 7 Ops | runner (including `pacer` and `auto_worktree` toggles), boards, watchers, schedules, tiers, caps | `p` pause/resume, `d` drain, `R` reload, `S` stop, `+` `-` slots, `P` pacer, `w` auto_worktree, `Enter` toggle, `J` `K` reorder tiers |

@@ -217,6 +217,22 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// The part of `s` drawn in columns `from..to` (a wide char belongs to the column it starts in).
+pub fn cut_cols(s: &str, from: usize, to: usize) -> String {
+    let mut col = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        if col >= to {
+            break;
+        }
+        if col >= from {
+            out.push(ch);
+        }
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    out
+}
+
 fn width_of(s: &str) -> usize {
     width(s)
 }

@@ -272,6 +272,11 @@ stopped when no card has used it for a while:
   try later" (GPU taken, not enough RAM): that parks it 5 minutes instead.
 - `--idle-stop N` stops it N seconds after its last board run ends (default 300, `-1` = never).
 - `--max-runs N` caps concurrent board runs on the endpoint (works on unmanaged endpoints too).
+- `--yield-file PATH` (default off): while PATH exists the runner starts no new runs on that endpoint or its group, lets
+  the current runs finish, then stops the server (same path as an idle stop). Cards wanting it reroute to the next
+  tier entry without waiting or using an attempt. When PATH is gone, start-on-demand resumes. A file whose first word
+  is a pid that is no longer alive is stale: the runner removes it and ignores it. Use it to let an outside job
+  (e.g. a GPU experiment that touches the file before taking the device) win the device over the server.
 - `--group G`: endpoints that share one device. Only one is up at a time; the runner switches when the one that is up
   has no runs and no card is waiting for it (or a card has waited `--switch-after` seconds, default 1800).
 - A server that was already up when the runner looked (started by hand or another tool) is used as it is and never

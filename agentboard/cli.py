@@ -1325,7 +1325,7 @@ def cmd_endpoints(c, a, out):
                            "bucket": a.bucket}
             # managed lifecycle (opt-in): the runner starts the server when a card needs it and stops it when idle
             for k in ("start_cmd", "stop_cmd", "health_url", "health_match", "start_timeout", "idle_stop", "max_runs",
-                      "group", "start_dir", "switch_after"):
+                      "group", "start_dir", "switch_after", "yield_file"):
                 v = getattr(a, k, None)
                 if v is not None:
                     eps[a.name][k] = v
@@ -1363,6 +1363,8 @@ def cmd_endpoints(c, a, out):
         s = state.get(n) or {}
         bits = [f"max_runs={e['max_runs']}" if e.get("max_runs") else "", f"group={e['group']}" if e.get("group") else ""]
         if e.get("start_cmd"):
+            if e.get("yield_file"):
+                bits.append(f"yield_file={e['yield_file']}")
             bits.append(f"managed (idle_stop={e.get('idle_stop') if e.get('idle_stop') is not None else 300}s) "
                         + (f"{s['status']} pid {s.get('pid')}" if s else "not started by the board"))
         return " " + " ".join(b for b in bits if b)
@@ -1799,6 +1801,9 @@ def build_parser():
                                                  "-1 = never)")
     g.add_argument("--max-runs", type=int, help="at most this many board runs on the endpoint at once (also for unmanaged)")
     g.add_argument("--group", help="endpoints sharing one device: only one of the group is up; the runner switches when idle")
+    g.add_argument("--yield-file", help="while this path exists the runner starts no new runs on the endpoint (or its group), "
+                                        "lets current runs finish, then stops the server; cards reroute. A first word that "
+                                        "is a dead pid marks the file stale (removed, ignored)")
     g.add_argument("--switch-after", type=int, help="seconds a card waits for a group-mate other cards still want before "
                                                     "the runner switches anyway, once it is idle (default 1800)")
 

@@ -339,6 +339,11 @@ card *about* rate limiting cannot trip it) through an optional per-adapter probe
   no output growth). The run is killed and the card retried once, no attempt counted (outcome `idle`); a second idle run holds the
   card for the overseer: labels `stalled=overseer`, not auto-run, listed by `ab anomalies`. Re-queue it with
   `ab edit ID --auto -l stalled=`. Harnesses that print once at exit and have no log to read (agy, gemini, ...) are never called idle.
+- **Opt-in extras** (all default `off`): `stall_retry_count N` kills a run as a limit once its own log shows N provider
+  429 retries since its last good model call (without waiting `stall_retry_after`); `stall_idle_cooldown 30m` makes an
+  idle kill also cool the run's bucket like a limit (the retried card then routes elsewhere; still no attempt);
+  `stall_idle_blind on` applies the idle rule to harnesses with no log to read (agy, gemini, ...) using output growth,
+  so only turn it on if their runs stream output while working.
 - `ab runner status`, `ab snapshot` (`runner.children[].stall`) and the TUI mark such runs `retrying 429 (12m)` / `idle 40m`.
 - Cards that legitimately go quiet (a long tool call, waiting on a job): label `stall=off` (never killed) or `stall=90m` (idle
   threshold for this card). Cards that `ab park` are not watched. `ab config set stall_retry_after off` / `stall_idle_after off`

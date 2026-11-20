@@ -297,3 +297,53 @@ def test_keep_agent_log_is_size_capped(tmp_path):
     assert H.keep_hermes_agent_log(home, tmp_path / "o.log", cap=10) == 10
     assert (tmp_path / "o.log").read_bytes().endswith(b"TAIL")
     assert H.keep_hermes_agent_log(tmp_path / "none", tmp_path / "p.log") is None
+
+
+def test_retry_count_kills_before_the_time_rule(rig):
+    j = rig
+    j("config", "set", "stall_retry_after", "off")
+    j("config", "set", "stall_retry_count", "4")
+    t = j("add", "counted 429s", "--body", "work", "--workdir", str(j.tmp / "w"))["id"]
+    j.start()
+    assert wait(lambda: runs_of(j, t) and runs_of(j, t)[0]["outcome"] == "limit"), (runs_of(j, t), open(j.tmp / "runner.log").read())
+    sh = j("show", t)
+    assert sh["attempts"] == 0 and "stall_retry_count 4" in sh["runs"][0]["detail"], sh
+    assert "bucket:hermes-nous" in {x["scope"] for x in j("limits")}
+
+
+def test_idle_cooldown_puts_a_limit_on_the_bucket(rig):
+    j = rig
+    j.env["FAKE_MODE"] = "idle"
+    j("config", "set", "stall_idle_cooldown", "20m")
+    j("tiers", "set", "medium", "hermes/nous:example/free", "claude:haiku")
+    t = j("add", "silent card", "--body", "work", "--workdir", str(j.tmp / "w"))["id"]
+    j.start()
+    assert wait(lambda: runs_of(j, t) and runs_of(j, t)[0]["outcome"] == "idle"), (runs_of(j, t), open(j.tmp / "runner.log").read())
+    lim = {x["scope"]: x for x in j("limits")}
+    assert lim["bucket:hermes-nous"]["until"] - time.time() > 15 * 60, lim
+    assert wait(lambda: j("show", t)["status"] == "done"), j("show", t)
+    assert j("show", t)["attempts"] == 0
+
+
+def test_idle_blind_watches_output_growth_of_a_quiet_harness(rig, tmp_path):
+    j = rig
+    for name, body in (("agy", "#!/bin/sh\nsleep 120\n"),):
+        (tmp_path / "bin" / name).write_text(body)
+        (tmp_path / "bin" / name).chmod(0o755)
+    j("config", "set", "stall_idle_blind", "on")
+    j("tiers", "set", "medium", "agy")
+    t = j("add", "silent agy", "--body", "work", "--workdir", str(j.tmp / "w"))["id"]
+    j.start()
+    assert wait(lambda: runs_of(j, t) and runs_of(j, t)[0]["outcome"] == "idle", 30), (runs_of(j, t), open(j.tmp / "runner.log").read())
+
+
+def test_idle_blind_leaves_a_harness_that_keeps_writing(rig, tmp_path):
+    j = rig
+    (tmp_path / "bin" / "agy").write_text("#!/bin/sh\nfor i in $(seq 1 60); do echo working $i; sleep 0.5; done\nab done \"$AB_TASK\" ok\n")
+    (tmp_path / "bin" / "agy").chmod(0o755)
+    j("config", "set", "stall_idle_blind", "on")
+    j("tiers", "set", "medium", "agy")
+    t = j("add", "chatty agy", "--body", "work", "--workdir", str(j.tmp / "w"))["id"]
+    j.start()
+    assert wait(lambda: j("show", t)["status"] == "done", 45), (j("show", t), open(j.tmp / "runner.log").read())
+    assert [r["outcome"] for r in runs_of(j, t)][0] != "idle"

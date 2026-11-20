@@ -1079,21 +1079,26 @@ class Runner:
         state = None
         if pr and pr.get("retry_count") and pr.get("retry_since"):
             state = {"kind": "retry", "since": pr["retry_since"], "count": pr["retry_count"]}
-            if retry_after and t - pr["retry_since"] > retry_after:
+            v = cfg(self.conn, "stall_retry_count")
+            max_n = int(v) if str(v).strip().isdigit() else 0  # opt-in: M provider 429s since the last good call
+            if (retry_after and t - pr["retry_since"] > retry_after) or (max_n and pr["retry_count"] >= max_n):
                 cool = dur_or_off(cfg(self.conn, "stall_cooldown")) or 1800
                 until = max(pr.get("reset_at") or 0, t + cool)
                 ch.stall_reset_at = until
                 ch.stall_error = (f"stalled in provider rate-limit retries: {pr['retry_count']} x 429 over {fmt_age(t - pr['retry_since'])} "
-                                  f"with no successful model call (stall_retry_after {fmt_age(retry_after)})")
+                                  f"with no successful model call ("
+                                  + ", ".join(x for x in (f"stall_retry_after {fmt_age(retry_after)}" if retry_after else "",
+                                                          f"stall_retry_count {max_n}" if max_n else "") if x) + ")")
                 self.log(f"run {ch.run_id} ({ch.task_id}): {ch.stall_error}; cooling {ch.bucket} until {store.fmt_ts(until)}")
                 with tx(self.conn):
                     event(self.conn, ch.task_id, "runner", "stall", {"run": ch.run_id, "kind": "retry", "bucket": ch.bucket,
                                                                       "retries": pr["retry_count"], "since": pr["retry_since"]})
                 self.kill(ch, "limit", ch.stall_error)
                 return
-        if a.idle_signal and idle_after:
+        signal = a.idle_signal or ("out" if cfg(self.conn, "stall_idle_blind") not in (None, False, "", 0, "0", "off") else None)
+        if signal and idle_after:
             last = ch.started
-            if a.idle_signal == "out":
+            if signal == "out":
                 for pth in (ch.out_path, ch.err_path):
                     try:
                         last = max(last, os.stat(pth).st_mtime)
@@ -1182,6 +1187,10 @@ class Runner:
                     # a stall is not the card's fault: no attempt. The first one gets a fresh run, the second holds
                     # the card for the overseer instead of looping.
                     prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='idle' AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
+                    idle_cool = dur_or_off(cfg(c, "stall_idle_cooldown"))  # opt-in: a silent run also cools its route like a limit
+                    if idle_cool and ch.bucket:
+                        store.set_limit(c, f"bucket:{ch.bucket}", "limit", now() + idle_cool, (ch.stall_error or "idle stall")[:500])
+                        usage.pacer_on_limit(c, ch.bucket)
                     if mine:
                         if prior == 0:
                             c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))

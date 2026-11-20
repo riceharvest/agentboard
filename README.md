@@ -335,6 +335,10 @@ catches two cases without burning an attempt:
 - **no sign of life** longer than `stall_idle_after` (default `45m`): killed and retried once, then held for the overseer
   (`stalled=overseer`, listed by `ab anomalies`).
 
+Opt-in extras, default `off`: `stall_retry_count N` (kill as a limit after N provider 429 retries since the last good model
+call), `stall_idle_cooldown 30m` (an idle kill also cools the run's bucket like a limit, still no attempt),
+`stall_idle_blind on` (idle rule for harnesses with no log, judged by output growth).
+
 `ab runner status`, `ab snapshot` and the TUI show `retrying 429 (12m)` / `idle 40m` on the run. Cards that legitimately wait
 on a long job: label `stall=off` or `stall=90m`. Setting a threshold to `off` disables that watchdog. See `ab guide`
 ("Stall watchdog").

@@ -93,6 +93,9 @@ DEFAULTS = {
     "stall_retry_after": "10m", # a run stuck in provider 429 retries this long -> LIMIT on its bucket, killed, no attempt counted (0/off = never)
     "stall_idle_after": "45m",  # a run showing no sign of life this long -> killed + retried once, then the overseer (0/off = never; card label stall=off|90m)
     "stall_cooldown": "30m",    # bucket cooldown after a retry stall (a later provider reset hint wins)
+    "stall_retry_count": "off", # opt-in: kill as a limit once a run logged this many provider 429 retries since its last good model call (off = time rule only)
+    "stall_idle_cooldown": "off",  # opt-in: an idle kill also cools the run's bucket for this long, like a limit (off = no cooldown)
+    "stall_idle_blind": "off",  # opt-in: also apply the idle rule to harnesses with no log to read, using output growth (they may print only at exit)
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
     "hermes_isolate": True,     # run Hermes in a per-run HERMES_HOME (strips bot tokens, stops ephemeral gateway on kill/exit)

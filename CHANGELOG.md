@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stall watchdog opt-ins (default off): `stall_retry_count N` kills a run as a limit after N provider 429 retries since its last good model call; `stall_idle_cooldown DUR` makes an idle kill also cool the run's bucket (limit row + pacer halving, still no attempt); `stall_idle_blind on` applies the idle rule to harnesses without a log probe, judged by output growth. Runner change: `ab runner reload` needed.
+
 - `ab merge ID [--branch B] [--into DIR]`: merges the card's branch (`worktree_branch` label, else `ab/<id>`) into its workdir with plain `git merge`. A dirty main tree is no longer a reason to refuse; only git's own refusal counts (local changes overlap the merged files), and then the overlapping files are named and nothing is touched. Runner change: none needed.
 
 - Fix: inside a worker shell, `AB_HOME=/tmp/x AB_TASK=y ab ...` no longer silently drops `AB_TASK`/`AB_ACTOR`. With `AB_RUN_HOME` set and an explicit `AB_HOME` that differs, `_sanitize_worker_env` keeps the caller's `AB_TASK`/`AB_ACTOR` (still drops `AB_RUN`/`AB_BOARD`/`AB_RUN_HOME`); without an explicit `AB_HOME` all are dropped as before. Runner change: none needed.

@@ -166,6 +166,14 @@ def _worker_task(conn, actor):
     return r["task_id"] if r else None
 
 
+def _quiet_kinds(conn, task_id):
+    """Event kinds a task asked watchers to skip, via label watch_quiet=done[,cancelled...]."""
+    if not task_id:
+        return ()
+    r = conn.execute("SELECT json_extract(labels,'$.watch_quiet') q FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return tuple(k.strip() for k in (r["q"] or "").split(",") if k.strip()) if r else ()
+
+
 def run_watchers(conn):
     fired = []
     for w in conn.execute("SELECT * FROM watchers WHERE enabled=1").fetchall():
@@ -181,6 +189,8 @@ def run_watchers(conn):
                 continue  # never wake on our own echo
             if e["kind"] == "dead" and (e.get("payload") or {}).get("outcome") == "negative" and not spec.get("label"):
                 continue  # intended negative outcome, not an operational dead-card anomaly
+            if not spec.get("label") and e["kind"] in _quiet_kinds(conn, e.get("task_id")):
+                continue  # the task opted out of this event kind (label watch_quiet=done,cancelled)
             if match_event(e, kinds=spec.get("kinds"), channel=spec.get("channel"), thread=spec.get("thread"),
                            mention=spec.get("mention"), actor=spec.get("actor"), text=spec.get("text"), label=spec.get("label")):
                 hits.append(e)

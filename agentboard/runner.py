@@ -13,7 +13,7 @@ from . import store
 from ._lazy import Lazy
 from .store import cfg, event, now, parse_dur, tx
 
-automation, H, usage, S = Lazy("automation"), Lazy("harness"), Lazy("usage"), Lazy("snapshot")
+automation, H, usage, S, managed = Lazy("automation"), Lazy("harness"), Lazy("usage"), Lazy("snapshot"), Lazy("managed")
 # stdlib modules only the runner process itself needs: not worth their import time for `ab snapshot`
 fcntl, shutil, signal, socket, subprocess = (Lazy(n, absolute=True) for n in ("fcntl", "shutil", "signal", "socket", "subprocess"))
 
@@ -369,6 +369,7 @@ class Runner:
         self.last_harvest = 0
         self.log_f = log or sys.stderr
         self.lock_f = None
+        self.lifecycle = managed.Lifecycle(conn, self.log)   # managed endpoints: start on demand, stop when idle
 
     def log(self, msg):
         print(f"{datetime.now():%H:%M:%S} {msg}", file=self.log_f, flush=True)
@@ -434,6 +435,10 @@ class Runner:
                 self.log(f"tick error: {e!r}")
                 time.sleep(5)
             time.sleep(float(cfg(self.conn, "poll_s") or 5))
+        try:
+            self.lifecycle.stop_all("runner stopped")
+        except Exception as e:
+            self.log(f"endpoint stop error: {e!r}")
         self.heartbeat("stopped", 0)
         with tx(self.conn):
             store.cfg_set(self.conn, "stop", "", "runner")
@@ -445,7 +450,7 @@ class Runner:
         re-adopted from the db by the new process (same pid, so they are still our children)."""
         # Pre-flight: a broken edit on disk must not take the runner (and its agents) down.
         chk = subprocess.run([sys.executable, "-c", "import agentboard.cli, agentboard.runner, agentboard.harness, "
-                              "agentboard.usage, agentboard.store, agentboard.automation"],
+                              "agentboard.usage, agentboard.store, agentboard.automation, agentboard.managed"],
                              capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
         if chk.returncode:
             self.log(f"reload refused, new code does not import: {(chk.stderr or chk.stdout).strip()[-400:]}")
@@ -473,6 +478,10 @@ class Runner:
             if ch.task_id in expired_ids:
                 self.kill(ch, "expired", "task lease ran out (lease_until in the past while the run was still alive)")
         self.poll_children()
+        try:
+            self.lifecycle.tick(self.children)
+        except Exception as e:
+            self.log(f"endpoint lifecycle error: {e!r}")
         for tid, why in wake_parked(c):
             self.log(f"{tid} park woke: {why}")
         stop = cfg(c, "stop") or ""
@@ -559,6 +568,14 @@ class Runner:
             if pace:
                 reasons.append(f"{cand.label()}: {b} {pace}")
                 continue
+            if cand.endpoint:
+                gate = self.lifecycle.gate(cand.endpoint, self.children, limits)
+                if gate:
+                    why, hold = gate
+                    reasons.append(f"{cand.label()}: {why}")
+                    if hold:  # the server is starting/switching for this route: wait for it, don't fall through
+                        return None, None, "; ".join(reasons)
+                    continue
             return cand, b, None
         return None, None, "; ".join(reasons) or "tier has no candidates"
 

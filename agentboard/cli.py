@@ -1301,7 +1301,7 @@ def _ep_models(base_url, key):
 def cmd_endpoints(c, a, out):
     act = a.action or "ls"
     eps = store.cfg(c, "endpoints") or {}
-    if act in ("add", "rm"):
+    if act in ("add", "rm", "stop"):
         admin(c, a)
         if not a.name:
             raise ValueError(f"endpoints {act} NAME ...")
@@ -1310,6 +1310,18 @@ def cmd_endpoints(c, a, out):
                 raise ValueError("endpoints add NAME --base-url http://host:port/v1 [--api-key-env VAR] [--context N]")
             eps[a.name] = {"base_url": a.base_url.rstrip("/"), "api_key_env": a.api_key_env, "context": a.context,
                            "bucket": a.bucket}
+            # managed lifecycle (opt-in): the runner starts the server when a card needs it and stops it when idle
+            for k in ("start_cmd", "stop_cmd", "health_url", "health_match", "start_timeout", "idle_stop", "max_runs",
+                      "group", "start_dir", "switch_after"):
+                v = getattr(a, k, None)
+                if v is not None:
+                    eps[a.name][k] = v
+        elif act == "stop":
+            from . import managed
+            if not managed.Lifecycle(c, lambda m: None).stop(a.name, f"stopped by {actor_of(a)}"):
+                raise LookupError(f"endpoint {a.name} was not started by the runner (nothing to stop)")
+            out({"stopping": a.name}, lambda d: f"stopping {d['stopping']} (the runner finishes the stop)")
+            return 0
         else:
             if eps.pop(a.name, None) is None:
                 raise LookupError(f"no endpoint {a.name}")
@@ -1329,10 +1341,21 @@ def cmd_endpoints(c, a, out):
                                      for k, v in d.items()) or "(no endpoints)")
         return 0 if all(v["ok"] for v in res.values()) else 1
     capable = [n for n, ad in H.ADAPTERS.items() if type(ad).endpoint_command is not H.Adapter.endpoint_command]
-    res = {"endpoints": eps, "harnesses": capable}
+    state = store.cfg(c, "endpoint_state") or {}
+    res = {"endpoints": eps, "harnesses": capable, "state": state}
+
+    def _managed(n, e):
+        if not e.get("start_cmd") and not e.get("max_runs"):
+            return ""
+        s = state.get(n) or {}
+        bits = [f"max_runs={e['max_runs']}" if e.get("max_runs") else "", f"group={e['group']}" if e.get("group") else ""]
+        if e.get("start_cmd"):
+            bits.append(f"managed (idle_stop={e.get('idle_stop') if e.get('idle_stop') is not None else 300}s) "
+                        + (f"{s['status']} pid {s.get('pid')}" if s else "not started by the board"))
+        return " " + " ".join(b for b in bits if b)
     out(res, lambda d: "\n".join(f"{n}: {e['base_url']} context={e.get('context')}"
                                  + (f" key=${e['api_key_env']}" if e.get("api_key_env") else "")
-                                 + f" bucket={e.get('bucket') or 'ep:' + n}" for n, e in d["endpoints"].items())
+                                 + f" bucket={e.get('bucket') or 'ep:' + n}" + _managed(n, e) for n, e in d["endpoints"].items())
         + ("\n" if d["endpoints"] else "(no endpoints)\n") + "harnesses that can run on endpoints: " + ", ".join(d["harnesses"])
         + "\nuse in tiers / pins as  HARNESS@ENDPOINT:MODEL  e.g. pi@rtx3060:spark-1.7b")
 
@@ -1735,13 +1758,28 @@ def build_parser():
     s.add_argument("--resume", action="store_true")
     s.add_argument("--force", action="store_true")
 
-    s = sub("endpoints", cmd_endpoints, "OpenAI-compatible servers: ls | add NAME --base-url URL [--api-key-env VAR] [--context N] | rm NAME | check [NAME]")
-    s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "check"])
+    s = sub("endpoints", cmd_endpoints, "OpenAI-compatible servers: ls | add NAME --base-url URL [--api-key-env VAR] [--context N] "
+            "[--start-cmd CMD ...] | rm NAME | check [NAME] | stop NAME")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "check", "stop"])
     s.add_argument("name", nargs="?")
     s.add_argument("--base-url", help="e.g. http://127.0.0.1:8093/v1")
     s.add_argument("--api-key-env", help="name of the env var holding the key (the key itself is never stored)")
     s.add_argument("--context", type=int, default=65536, help="context window to tell the harness")
     s.add_argument("--bucket", help="quota bucket name (default ep:NAME)")
+    g = s.add_argument_group("managed server (opt-in): the runner starts it when a card needs it, stops it when idle")
+    g.add_argument("--start-cmd", help="shell command that runs the server in the FOREGROUND (stopping = SIGTERM to its "
+                                       "process group unless --stop-cmd is given)")
+    g.add_argument("--stop-cmd", help="shell command that stops the server (run before the SIGTERM)")
+    g.add_argument("--start-dir", help="working directory for --start-cmd (default AB_HOME)")
+    g.add_argument("--health-url", help="ready check URL (default BASE_URL/models: HTTP 200 with a non-empty model list)")
+    g.add_argument("--health-match", help="regex the health response must contain (e.g. the model id)")
+    g.add_argument("--start-timeout", type=int, help="seconds from start to healthy before the start fails (default 900)")
+    g.add_argument("--idle-stop", type=int, help="stop the server after this many seconds with no board run (default 300; "
+                                                 "-1 = never)")
+    g.add_argument("--max-runs", type=int, help="at most this many board runs on the endpoint at once (also for unmanaged)")
+    g.add_argument("--group", help="endpoints sharing one device: only one of the group is up; the runner switches when idle")
+    g.add_argument("--switch-after", type=int, help="seconds a card waits for a group-mate other cards still want before "
+                                                    "the runner switches anyway, once it is idle (default 1800)")
 
     sub("mcp", cmd_mcp, "serve the board as an MCP server on stdio")
     s = sub("tui", cmd_tui, "live terminal dashboard and control panel (runs the separate ab-tui binary)")

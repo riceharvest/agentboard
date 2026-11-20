@@ -241,6 +241,31 @@ Responses and Messages, so every endpoint-capable harness works against it. Runs
 quota bucket (`ep:NAME`) and their own cooldowns, so a logged-out account doesn't block endpoint runs of the same
 harness.
 
+### Servers the runner starts and stops (managed endpoints)
+
+A local model server you don't want running all the time can be started by the runner when a card needs it and
+stopped when no card has used it for a while:
+
+    ab endpoints add big --base-url http://127.0.0.1:8012/v1 --context 131072 \
+        --start-cmd "/path/to/serve-big.sh" --health-match '"big-model"' --idle-stop 300 --max-runs 1 --group gpu0
+    ab endpoints add small --base-url http://127.0.0.1:8012/v1 --context 131072 \
+        --start-cmd "/path/to/serve-small.sh" --health-match '"small-model"' --max-runs 4 --group gpu0
+    ab endpoints stop big        # stop it now (only works for a server the runner started)
+
+- `--start-cmd` runs the server in the foreground; the runner keeps its pid in the board. Stopping is SIGTERM to its
+  process group (after `--stop-cmd` if you give one), SIGKILL after 2 minutes.
+- Ready = HTTP 200 from `--health-url` (default `BASE_URL/models`, which must list at least one model) and, with
+  `--health-match`, a body that matches the regex. Until then cards on that route wait instead of falling through to
+  the next tier entry. A start that exits or isn't ready within `--start-timeout` (900 s) parks the endpoint for 30
+  minutes (`ab limits`) and cards fall through to the rest of their tier.
+- `--idle-stop N` stops it N seconds after its last board run ends (default 300, `-1` = never).
+- `--max-runs N` caps concurrent board runs on the endpoint (works on unmanaged endpoints too).
+- `--group G`: endpoints that share one device. Only one is up at a time; the runner switches when the one that is up
+  has no runs and no card is waiting for it (or a card has waited `--switch-after` seconds, default 1800).
+- A server that was already up when the runner looked (started by hand or another tool) is used as it is and never
+  stopped, and a group switch away from it is refused.
+- The servers survive `ab runner reload`; `ab runner stop` stops the ones the runner started.
+
 The default tiers are a starting point for one particular set of subscriptions. Run `ab tiers` and
 `ab models --refresh`, then set your own.
 

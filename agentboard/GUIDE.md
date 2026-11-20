@@ -249,6 +249,12 @@ Use `HARNESS@ENDPOINT:MODEL` anywhere a spec goes, e.g. `ab tiers add low "pi@rt
 Endpoint runs use the bucket `ep:NAME`. Auth cooldowns are per harness and endpoint, so a logged-out account
 doesn't block endpoint runs.
 
+Managed endpoints (opt-in): `--start-cmd CMD` makes the runner start the server when a card needs it and stop it
+after `--idle-stop` seconds without a board run (default 300). `--health-match REGEX` says when it is ready, `--max-runs N`
+caps concurrent runs, `--group G` marks endpoints on one device (one up at a time). While it starts, cards on that route
+wait; a failed start parks the endpoint 30 min and cards use the rest of their tier. `ab endpoints` shows the state,
+`ab endpoints stop NAME` stops one the runner started. Servers started outside the board are used but never stopped.
+
 ## Control verbs for UIs (all take `--json`)
 
     ab runner pause | resume | drain | reload | stop [--now] | slots N      # settings the runner reads every tick

@@ -1197,7 +1197,8 @@ def cmd_sync(c, a, out):
             raise ValueError("sync add NAME --github owner/repo")
         spec = {"repo": a.github, "label": None if a.all else (a.label or "agent"), "pulls": a.pulls, "channel": a.channel,
                 "tier": a.tier, "workdir": str(Path(a.workdir).expanduser().resolve()) if a.workdir else None,
-                "push": a.push, "close_on_done": a.close_on_done, "mirror_all": a.mirror_all, "manual": a.manual}
+                "push": a.push, "close_on_done": a.close_on_done, "mirror_all": a.mirror_all, "manual": a.manual,
+                "untrusted": a.untrusted}
         with store.tx(c):
             c.execute("INSERT INTO syncs(board,name,kind,spec,enabled,created_by,created_at) VALUES(?,?,'github',?,1,?,?) "
                       "ON CONFLICT(board,name) DO UPDATE SET spec=excluded.spec, enabled=1",
@@ -1755,6 +1756,7 @@ def build_parser():
     s.add_argument("--push", action="store_true", help="post results and --sync replies back to GitHub (off by default)")
     s.add_argument("--close-on-done", action="store_true", help="close the issue when its task is done (needs --push)")
     s.add_argument("--mirror-all", action="store_true", help="push every thread message, not just --sync ones")
+    s.add_argument("--untrusted", action="store_true", help="label imported cards untrusted=1: --push never posts for them (any card with label untrusted=1 is skipped)")
 
     s = sub("grants", cmd_grants, "access: ls | add --who GLOB --can PERMS [--channel C] [--grant-board B|*] | rm ID | explain [ACTOR] [PERM]")
     s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "explain"])

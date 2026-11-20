@@ -81,6 +81,7 @@ DEFAULTS = {
     "min_free_gib": 10,         # don't start an agent below this much free RAM
     "harvest_every_s": 60,
     "sync_every_s": 120,
+    "strip_invisible": True,    # drop zero-width / bidi / tag characters from card and message text on ingest (the event records how many)
     "channels": "",             # comma list the runner serves; empty = all
     "share_workdir": False,     # allow two runs in the same workdir at once
     "auto_worktree": True,      # busy git workdir -> run the card in its own `git worktree` (card label worktree=on|off overrides)
@@ -623,6 +624,23 @@ def find_key(conn, board, key, live=False, skip=None):
     return r["id"] if r else None
 
 
+_INVISIBLE_RE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180e\u200b\u200e\u200f\u202a-\u202e"
+                           "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\U000e0000-\U000e0fff]")
+
+
+def strip_invisible(conn, *texts):
+    """(cleaned texts, count removed). Zero-width, bidi controls and tag characters hide instructions from humans;
+    ZWJ/ZWNJ stay (emoji, some scripts). Off with `ab config set strip_invisible false`."""
+    if not cfg(conn, "strip_invisible"):
+        return list(texts), 0
+    out, n = [], 0
+    for t in texts:
+        c = _INVISIBLE_RE.sub("", t) if t else t
+        n += len(t) - len(c) if t else 0
+        out.append(c)
+    return out, n
+
+
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
              workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
              board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None, verify=None):
@@ -637,6 +655,8 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
                 if _info is not None:
                     _info["existed"] = True
                 return old
+        nonlocal title, body
+        (title, body), stripped = strip_invisible(conn, title, body)
         tid = new_id(conn)
         for d in deps:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
@@ -656,7 +676,8 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
         event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
-                                            **({"verify": verify} if verify else {})})
+                                            **({"verify": verify} if verify else {}),
+                                            **({"stripped_invisible": stripped} if stripped else {})})
         return tid
     if _in_tx:
         return go()
@@ -962,7 +983,7 @@ def resolve_thread(conn, thread):
 def post_message(conn, actor, body, board=None, channel=None, thread=None, data=None, check=True, _in_tx=False):
     """New thread (board+channel) or reply (thread). Returns (message id, thread id, event id)."""
     def go():
-        nonlocal board, channel, thread
+        nonlocal board, channel, thread, body
         if thread:
             board, channel, kind, thread = resolve_thread(conn, thread)
             if check:
@@ -974,6 +995,7 @@ def post_message(conn, actor, body, board=None, channel=None, thread=None, data=
             channel = channel or "main"
             if check:
                 require(conn, actor, "post", board, channel)
+        (body,), stripped = strip_invisible(conn, body)
         mentions = sorted({m.rstrip(".:") for m in MENTION_RE.findall(body or "")})
         cur = conn.execute("INSERT INTO messages(board,channel,thread,author,body,data,mentions,ts) VALUES(?,?,?,?,?,?,?,?)",
                            (board, channel, thread, actor, body, json.dumps(data) if data is not None else None,
@@ -986,7 +1008,8 @@ def post_message(conn, actor, body, board=None, channel=None, thread=None, data=
         if task_id:
             conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now(), task_id))
         eid = event(conn, task_id, actor, "message", {"msg": mid, "thread": thread, "mentions": mentions,
-                                                      "body": (body or "")[:400], "data": data}, board=board, channel=channel)
+                                                      "body": (body or "")[:400], "data": data,
+                                                      **({"stripped_invisible": stripped} if stripped else {})}, board=board, channel=channel)
         return mid, thread, eid
     if _in_tx:
         return go()

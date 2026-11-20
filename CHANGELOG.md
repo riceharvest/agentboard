@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Untrusted text hygiene: zero-width, bidi-control and Unicode tag characters (and soft hyphen, variation selectors; ZWJ/ZWNJ are kept) are stripped from card titles/bodies and messages on ingest, so synced GitHub issues, comments and watcher text cannot carry hidden instructions. The `created`/`message` event records `stripped_invisible: N`. Config `strip_invisible` (default true). `ab sync add --untrusted` labels imported cards `untrusted=1`; any card with that label is skipped by `--push` syncs (counted as `refused` in `ab sync run`). Runner change: `ab runner reload` needed.
+
 - `ab park ID --reply THREAD --note "..."`: park on a reply instead of holding a slot in `ab ask --wait`. The card wakes when someone other than the parking agent (and the runner) posts in THREAD after the agent's own last post there; the reply text goes in the next brief. Opt-in per call, `ask` is unchanged (note `ask --wait 0s` posts without blocking). MCP `ab_park` takes `reply`. Runner change: `ab runner reload` needed.
 
 - claude launches: repeated `--settings` (base `extra_args` + tier `extra_args_tier`) are merged into one `--settings` JSON (deep-merge, hooks lists concatenated), because claude keeps only the last. Grant refusals (`has no 'admin' on ...`) are no longer auto-retried: the card is held with label `needs_admin=overseer` and `ab anomalies` reports `needs-admin`. Runner change: `ab runner reload` needed.

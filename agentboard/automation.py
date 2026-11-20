@@ -250,7 +250,7 @@ def sync_github(conn, s):
     items = state.setdefault("items", {})
     repo, me = spec["repo"], f"sync:{s['name']}"
     channel = spec.get("channel") or "gh/" + repo.split("/")[-1]
-    stats = {"new": 0, "comments_in": 0, "pushed": 0, "closed": 0}
+    stats = {"new": 0, "comments_in": 0, "pushed": 0, "closed": 0, "refused": 0}
     kinds = ["issue"] + (["pr"] if spec.get("pulls") else [])
     seen = set()
     for kind in kinds:
@@ -266,7 +266,8 @@ def sync_github(conn, s):
                 tid = store.add_task(conn, me, f"{repo}#{it['number']}: {it['title']}",
                                      f"GitHub {kind}: {it['url']}\nopened by {((it.get('author') or {}).get('login'))}\n\n{(it.get('body') or '').strip()}",
                                      channel=channel, board=s["board"], tier=spec.get("tier"), workdir=spec.get("workdir"),
-                                     labels={"gh": f"{repo}#{it['number']}", "gh_kind": kind, "gh_url": it["url"]},
+                                     labels={"gh": f"{repo}#{it['number']}", "gh_kind": kind, "gh_url": it["url"],
+                                             **({"untrusted": "1"} if spec.get("untrusted") else {})},
                                      runnable=not spec.get("manual", False))
                 m = items[key] = {"task": tid, "updated": None, "comments": 0, "pushed": [], "done_pushed": False}
                 stats["new"] += 1
@@ -303,6 +304,9 @@ def sync_github(conn, s):
             if t is None:
                 continue
             kind, num = key.split("#")
+            if json.loads(t["labels"] or "{}").get("untrusted") not in (None, "", "0", "off", "false"):
+                stats["refused"] += 1  # the card reads untrusted text: nothing goes back out
+                continue
             out = []
             for msg in store.thread_messages(conn, t["id"]):
                 if msg["id"] in m["pushed"] or msg["author"].startswith("gh:"):

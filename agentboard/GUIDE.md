@@ -396,3 +396,11 @@ card *about* rate limiting cannot trip it) through an optional per-adapter probe
     ab sched add later --at +3h --do resume            # do: pause|resume|drain|stop|slots=N|set:key=value
     ab config ls | set KEY VALUE                        # slots, min_free_gib, timeout, channels, sync_every_s, cooldown.* ...
     ab runner service --enable                          # systemd user service: survives logout/reboot
+
+## Untrusted text hygiene
+
+Text from outside (GitHub issues and comments, watcher events) can hide instructions in characters a human cannot see.
+- On ingest, card titles/bodies and messages lose zero-width, bidi-control (incl. RLO) and Unicode tag characters. The event carries `stripped_invisible: N` so you can see it happened. Config `strip_invisible` (default `true`; `ab config set strip_invisible false` to turn off). ZWJ/ZWNJ stay (emoji).
+- `ab sync add NAME --github o/r --untrusted` labels imported cards `untrusted=1`. Any card with label `untrusted=1` is skipped by `--push` syncs: nothing is posted or closed on GitHub for it (`refused` in `ab sync run`).
+- This is hygiene, not a sandbox: a worker that reads untrusted text still has its normal tools.
+

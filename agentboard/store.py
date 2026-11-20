@@ -106,6 +106,7 @@ DEFAULTS = {
     "caps": {},                 # bucket -> {"window": "5h", "max_output": N, "max_cost": USD, "max_runs": N}
     "bucket_map": {},           # "harness/model-glob" -> bucket, overrides the built-in mapping
     "extra_args": {},           # harness -> [args] appended to every launch
+    "extra_args_tier": {},      # tier -> {harness -> [args]} appended after extra_args for entries of that tier
     "endpoints": {},            # name -> {"base_url", "api_key_env", "context", "bucket"}: OpenAI-compatible servers
     "kill_runs": [],            # run ids `ab kill` asked the runner to stop (the runner clears them)
 }

@@ -205,6 +205,21 @@ Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Ope
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:
 `ab edit ID --harness claude --model opus`.
 
+## Extra CLI flags per harness and per tier (off by default)
+
+Two config keys append extra command-line arguments to a launch. Both are empty by default, and an empty config
+builds exactly the command line it always did.
+
+    ab config set extra_args '{"claude": ["--some-flag"]}'                    # every claude launch
+    ab config set extra_args_tier '{"low": {"claude": ["--flag", "value"]}}'  # claude entries of the low tier only
+
+Order: `extra_args[harness]` first, then `extra_args_tier[tier][harness]`, after the model and effort flags. The
+tier is the one the tier *entry* sits in, so a `low` card that falls back to a `max` entry gets `max`'s args, not
+`low`'s. A task pinned to a harness gets only `extra_args`. The values are plain argv items (a JSON settings
+override is one item: `"--settings", "{...}"`). Use it to trim a harness's default context for cheap tiers, or to
+add flags to one tier; leave tiers you do not list untouched. Runner change: `ab runner reload` needed.
+Whether repeated flags (a second `--settings`) merge or the last wins is up to the harness; check it before relying on it.
+
 ## Endpoints (OpenAI-compatible servers: local llama.cpp/vLLM, gateways)
 
     ab endpoints add rtx3060 --base-url http://127.0.0.1:8093/v1 --context 65536 [--api-key-env VAR]

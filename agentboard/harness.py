@@ -1627,6 +1627,7 @@ class Candidate:
     spec: str = ""
     endpoint: str = None
     provider: str = None
+    tier: str = None        # the tier this entry came from (None for a pinned task); keys extra_args_tier
 
     def label(self):
         if self.spec:
@@ -1688,7 +1689,7 @@ def candidates_for(conn, task):
     tiers = store.cfg(conn, "tiers")
     order = store.cfg(conn, "tier_order") or list(tiers)
     tier = task["tier"] or store.cfg(conn, "default_tier")
-    primary = [parse_spec(s) for s in tiers.get(tier, [])]
+    primary = [_in_tier(parse_spec(s), tier) for s in tiers.get(tier, [])]
     fb = store.cfg(conn, "tier_fallback") or "none"
     extra = []
     if fb != "none" and tier in order:
@@ -1696,5 +1697,19 @@ def candidates_for(conn, task):
         ups, downs = order[i + 1:], list(reversed(order[:i]))
         seq = {"up": ups, "down": downs, "any": ups + downs}.get(fb, [])
         for t in seq:
-            extra += [parse_spec(s) for s in tiers.get(t, [])]
+            extra += [_in_tier(parse_spec(s), t) for s in tiers.get(t, [])]
     return primary, extra
+
+
+def _in_tier(cand, tier):
+    cand.tier = tier
+    return cand
+
+
+def extra_args_for(conn, cand):
+    """CLI args appended to a launch: `extra_args[harness]` first, then `extra_args_tier[tier][harness]` for the tier
+    the candidate's entry sits in (a fallback entry uses ITS tier, not the card's). Both empty by default -> []."""
+    out = list((store.cfg(conn, "extra_args") or {}).get(cand.harness) or [])
+    if cand.tier:
+        out += list(((store.cfg(conn, "extra_args_tier") or {}).get(cand.tier) or {}).get(cand.harness) or [])
+    return out

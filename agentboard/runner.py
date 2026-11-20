@@ -709,7 +709,7 @@ class Runner:
             brief = (f"ENVIRONMENT NOTE: your shell tools do NOT inherit the run's AB_* variables here. Set them in every shell "
                      f"command that calls `ab`: export AB_HOME={shlex.quote(str(store.HOME))} AB_TASK={task['id']} "
                      f"AB_ACTOR={shlex.quote(owner)} AB_RUN={run_id} AB_BOARD={shlex.quote(cur['board'])}\n\n") + brief
-        extra = (cfg(c, "extra_args") or {}).get(cand.harness, [])
+        extra = H.extra_args_for(c, cand)
         try:
             ep = H.get_endpoint(c, cand.endpoint) if cand.endpoint else None
             cmd, xenv = a.build(brief, cand, ep, extra)

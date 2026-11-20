@@ -576,6 +576,8 @@ def cmd_caps(c, a, out):
             v = getattr(a, k)
             if v is not None:
                 cap[k] = v
+        if getattr(a, "ignore_7d_until", None):
+            cap["ignore_7d_until"] = parse_time(a.ignore_7d_until)
         caps[a.bucket] = cap
     elif a.action == "clear":
         caps.pop(a.bucket, None)
@@ -1460,6 +1462,8 @@ def build_parser():
     s.add_argument("--max-7d-pct", type=float, help="pause the bucket at this %% of the provider's weekly limit (claude-sub only)")
     s.add_argument("--pace-lead-h", type=float, help="pace every provider-reported quota window (codex: read from ~/.codex/sessions) "
                    "so it is used up this many hours before its reset")
+    s.add_argument("--ignore-7d-until", help="pace/cap on the 5h window only until this time (e.g. +6d, ISO); "
+                   "the weekly window is ignored until then (claude-sub only)")
     s.add_argument("--pace-7d-lead-h", type=float, help="spread the weekly limit evenly per day so it is used up this many "
                    "hours before the weekly reset; unused days carry over (claude-sub only)")
 

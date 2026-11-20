@@ -289,6 +289,12 @@ def claude_plan_pct():
 _DEFAULT_CLAUDE_PLAN_PCT = claude_plan_pct
 
 
+def skip_7d(cap, now=None):
+    """True while `ignore_7d_until` (epoch) is in the future: the weekly window neither caps nor paces."""
+    u = cap.get("ignore_7d_until")
+    return u is not None and (now if now is not None else time.time()) < float(u)
+
+
 def uses_plan(cap):
     return any(cap.get(k) is not None for k in ("max_5h_pct", "max_7d_pct", "pace_7d_lead_h", "pace_lead_h"))
 
@@ -343,6 +349,8 @@ def plan_reason(cap, p):
     if not uses_plan(cap) or not p:
         return None
     for k, field, label in (("max_5h_pct", "five_hour", "5h"), ("max_7d_pct", "seven_day", "weekly")):
+        if k == "max_7d_pct" and skip_7d(cap):
+            continue
         if cap.get(k) is not None and p[field] >= float(cap[k]):
             return f"plan guard: {label} usage {p[field]:.0f}% >= {float(cap[k]):.0f}% (resets {p[field + '_resets']})"
     allowed = weekly_pace_pct(cap, p)
@@ -354,7 +362,7 @@ def plan_reason(cap, p):
 def weekly_pace_pct(cap, p, now=None):
     """Weekly % allowed by now when the week is spread evenly so it is used up `pace_7d_lead_h` hours before the
     reset (a daily allowance; unused days carry over). None when not configured or the reset time is unknown."""
-    if cap.get("pace_7d_lead_h") is None or not p.get("seven_day_resets"):
+    if cap.get("pace_7d_lead_h") is None or not p.get("seven_day_resets") or skip_7d(cap, now):
         return None
     try:
         reset = datetime.fromisoformat(p["seven_day_resets"].replace("Z", "+00:00")).timestamp()
@@ -518,7 +526,7 @@ def provider_windows(conn, bucket, cap=None, plan=_LIVE, now=None):
                 "lead_h": float(cap["pace_lead_h"]) if cap.get("pace_lead_h") is not None else 0.0,
                 "hard_pace": cap.get("pace_lead_h") is not None,
             })
-        if p.get("seven_day") is not None:
+        if p.get("seven_day") is not None and not skip_7d(cap, now):
             w_s = 7 * 86400.0
             lead_h = (float(cap["pace_7d_lead_h"]) if cap.get("pace_7d_lead_h") is not None
                       else float(cap["pace_lead_h"]) if cap.get("pace_lead_h") is not None else 0.0)

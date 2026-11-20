@@ -254,6 +254,12 @@ be read for 30 minutes the guard fails open. Runs already started are not interr
 the share of the week that has passed, so the whole limit is used up the given number of hours before the weekly reset.
 Days that used less carry over.
 
+    ab caps set claude-sub --max-5h-pct 97 --pace-lead-h 0.25 --pace-7d-lead-h 1 --ignore-7d-until +6d
+
+`--ignore-7d-until` drops the weekly window from both the flat cap and the pacing until the given time, so only the
+5-hour window paces the bucket (useful for a week where hitting the weekly limit is fine). The weekly flags stay in the
+cap and apply again on their own once that time has passed.
+
     ab caps set openai-codex --pace-lead-h 6
 
 `--pace-lead-h` paces every quota window the provider itself reports. For Codex (ChatGPT login) the windows are read

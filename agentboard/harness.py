@@ -1706,6 +1706,23 @@ def _in_tier(cand, tier):
     return cand
 
 
+def allowlist_args(labels, harness):
+    """Opt-in per-card trimming of what a run loads before its first request, from card labels (none set -> []):
+    tools=Bash,Read,Edit  only these built-in tools (claude --tools); skills=none  no skills/slash commands
+    (claude --disable-slash-commands); mcp=none  no MCP servers (claude --strict-mcp-config). Other harnesses: ignored."""
+    if harness != "claude" or not labels:
+        return []
+    out = []
+    tools = [t for t in re.split(r"[,+\s]+", str(labels.get("tools") or "")) if t]
+    if tools:
+        out += ["--tools", ",".join(tools)]
+    if str(labels.get("skills") or "").lower() == "none":
+        out.append("--disable-slash-commands")
+    if str(labels.get("mcp") or "").lower() == "none":
+        out.append("--strict-mcp-config")
+    return out
+
+
 def extra_args_for(conn, cand):
     """CLI args appended to a launch: `extra_args[harness]` first, then `extra_args_tier[tier][harness]` for the tier
     the candidate's entry sits in (a fallback entry uses ITS tier, not the card's). Both empty by default -> []."""

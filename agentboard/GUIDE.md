@@ -219,6 +219,16 @@ Claude aliases (`opus`, `sonnet`, `haiku`) always point at the newest model. Ope
 unless you run `ab config set require_free.opencode false`. To pin a task to a model:
 `ab edit ID --harness claude --model opus`.
 
+## Cache-stable brief and per-card load trimming
+
+ The brief starts with a block that is identical for every card and run (the `ab` command
+list and rules, no ids), then a `THIS RUN` part (ids, attempt, body, deps, notes, resume text). Provider prompt caches match the longest common
+prefix, so the fixed block can be a cache hit across runs; it is small (about 400 tokens), so expect little saving from it alone. For claude
+cards, opt-in labels trim what a run loads before its first request: `ab add ... --label tools=Bash,Read,Edit,Write,Grep,Glob` (only these
+built-in tools, `claude --tools`), `--label skills=none` (`--disable-slash-commands`), `--label mcp=none` (`--strict-mcp-config`). No label,
+no change; other harnesses ignore them. Measure with the run's first assistant `usage` in the harness transcript versus the `runs` row.
+Runner change: `ab runner reload` needed.
+
 ## Extra CLI flags per harness and per tier (off by default)
 
 Two config keys append extra command-line arguments to a launch. Both are empty by default, and an empty config

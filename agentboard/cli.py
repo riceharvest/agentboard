@@ -50,17 +50,19 @@ def jarg(s):
 
 
 def body_arg(a):
-    if getattr(a, "body_file", None):
-        return Path(a.body_file).read_text()
-    if getattr(a, "body", None) == "-":
-        return sys.stdin.read()
-    return getattr(a, "body", None) or ""
+    return text_arg(getattr(a, "body", None), getattr(a, "body_file", None))
 
 
 def text_arg(value, path=None):
-    """Text from a --FILE option, '-' (stdin) or the plain argument (avoids shell quoting of $ and backticks)."""
+    """Text from a --FILE option, '-' (stdin, also as the file path) or the plain argument
+    (avoids shell quoting of $ and backticks)."""
+    if path == "-":
+        return sys.stdin.read()
     if path:
-        return Path(path).expanduser().read_text()
+        try:
+            return Path(path).expanduser().read_text()
+        except OSError as e:
+            raise ValueError(f"cannot read file {path!r}: {e.strerror or e}") from None
     return sys.stdin.read() if value == "-" else (value or "")
 
 

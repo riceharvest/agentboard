@@ -640,6 +640,12 @@ def cmd_usage(c, a, out):
                                    + (f" ${r['cost_usd']:.2f}" if r['cost_usd'] else "") for r in xs) or "(no usage)")
 
 
+def cmd_outcomes(c, a, out):
+    from . import outcomes
+    rep = outcomes.ledger(c, parse_dur(a.since) if a.since else None, a.by)
+    out(rep, outcomes.render)
+
+
 def cmd_harvest(c, a, out):
     res = usage.harvest(c, a.only.split(",") if a.only else None)
     out(res, lambda d: " ".join(f"{k}={v}" for k, v in d.items()))
@@ -1565,6 +1571,10 @@ def build_parser():
     s.add_argument("--since", help="e.g. 5h, 1d, 7d")
     s.add_argument("--limit", type=int, default=30)
     s.add_argument("--no-harvest", action="store_true")
+
+    s = sub("outcomes", cmd_outcomes, "outcome ledger: runs, tokens, $ per accepted outcome and failure classes (read-only)")
+    s.add_argument("--since", help="e.g. 24h, 7d (runs started in that window)")
+    s.add_argument("--by", default="label:type,harness,tier", help="comma list of label:NAME, harness, tier, model, board, bucket")
 
     s = sub("harvest", cmd_harvest, "read new usage from harness logs now")
     s.add_argument("--only", help="claude,opencode,hermes,pi")

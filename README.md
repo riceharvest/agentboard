@@ -323,6 +323,16 @@ quota bucket has a launch budget per `pace_interval` (default 10m), shown in `ab
 
 Other buckets keep launching while one is held back. See `ab guide` ("Launch pacing").
 
+## Outcome ledger (`ab outcomes`)
+
+Read-only, zero tokens: what the runs of each group cost per *accepted* outcome. `ab outcomes [--since 7d] [--by label:type,harness,tier] [--json]`.
+Group keys: `label:NAME`, `harness`, `tier` (the tier the run used), `model`, `board`, `bucket`. Per group: runs, accepted outcomes, agent-hours,
+tokens, `$` (only runs whose harness reports `cost_usd`; `usd_known_runs` says how many), `$` and tokens per accepted outcome, and failure classes
+`limit`, `stall_killed`, `expired`, `failed`, `parked`, `no_op_done`, `reopened`, `review_fail`, `running`, `other` (e.g. cancelled).
+A run is accepted when it is the card's last done run, the card is still `done` with a non-empty result, it was not reopened (`ab retry`) afterwards
+and no review card (label `reviews=<id>`) finished with a result starting with `FAIL`. All runs of a group (failed attempts too) count against its
+accepted outcomes. `--json` prints `{since_s, by, totals, groups[]}`, a shape a UI can embed later.
+
 ## Stall watchdog
 
 Free models get rate limited, and a harness that retries 429s internally looks perfectly healthy: live process, timers running,

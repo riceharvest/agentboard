@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab outcomes [--since 7d] [--by label:type,harness,tier] [--json]`: read-only outcome ledger (runs, accepted outcomes, agent-hours, tokens, $ where known, $ and tokens per accepted outcome, failure classes) per group. New module `agentboard/outcomes.py`. Runner change: none needed.
+
 - Stall watchdog opt-ins (default off): `stall_retry_count N` kills a run as a limit after N provider 429 retries since its last good model call; `stall_idle_cooldown DUR` makes an idle kill also cool the run's bucket (limit row + pacer halving, still no attempt); `stall_idle_blind on` applies the idle rule to harnesses without a log probe, judged by output growth. Runner change: `ab runner reload` needed.
 
 - `ab merge ID [--branch B] [--into DIR]`: merges the card's branch (`worktree_branch` label, else `ab/<id>`) into its workdir with plain `git merge`. A dirty main tree is no longer a reason to refuse; only git's own refusal counts (local changes overlap the merged files), and then the overlapping files are named and nothing is touched. Runner change: none needed.

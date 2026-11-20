@@ -1589,6 +1589,11 @@ def build_parser():
     s.add_argument("--now", action="store_true")
     s.add_argument("--enable", action="store_true")
 
+    s = sub("merge", cmd_merge, "merge a card's branch (worktree ab/<id>) into its workdir; a dirty tree is fine unless git says local changes overlap")
+    s.add_argument("id")
+    s.add_argument("--branch")
+    s.add_argument("--into", help="checkout to merge into (default: the card's workdir)")
+
     s = sub("sched", cmd_sched, "schedules: ls | add NAME (--window A-B --slots N | --at T --do X | --daily HH:MM --do X) | rm|enable|disable NAME")
     s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "enable", "disable"])
     s.add_argument("name", nargs="?")
@@ -1761,6 +1766,42 @@ def run_tui(rest):
     except OSError as e:
         print(f"ab: cannot run {exe}: {e}", file=sys.stderr)
         return 127
+
+
+def git_merge(repo, branch):
+    """Merge `branch` into the checkout at `repo` and let git decide: a dirty tree is fine unless local changes overlap the
+    merged files, which is exactly when git refuses. Returns (ok, message, overlapping_files)."""
+    p = subprocess.run(["git", "-C", str(repo), "merge", "--no-edit", branch], capture_output=True, text=True)
+    text = (p.stdout + p.stderr).strip()
+    if p.returncode == 0:
+        return True, text, []
+    files, grab = [], False
+    for ln in text.splitlines():
+        if re.search(r"(local changes to the following files|untracked working tree files) would be overwritten", ln):
+            grab = True
+        elif grab and ln.startswith(("\t", " ")) and ln.strip():
+            files.append(ln.strip())
+        elif grab:
+            grab = False
+    return False, text, files
+
+
+def cmd_merge(c, a, out):
+    row = store.get_task(c, a.id)
+    if row is None:
+        raise LookupError(f"no task {a.id}")
+    labels = json.loads(row["labels"] or "{}")
+    branch = a.branch or labels.get("worktree_branch") or f"ab/{row['id']}"
+    repo = a.into or row["workdir"]
+    if not repo:
+        raise ValueError("no checkout to merge into: pass --into DIR")
+    ok, msg, files = git_merge(repo, branch)
+    out({"id": row["id"], "branch": branch, "into": str(repo), "merged": ok, "overlap": files, "git": msg},
+        lambda r: msg if ok else None)
+    if not ok:
+        print(f"ab merge: git refused to merge {branch} into {repo}"
+              + (f"; local changes overlap: {', '.join(files)}" if files else "") + f"\n{msg}", file=sys.stderr)
+        return 1
 
 
 def cmd_tui(c, a, out):  # only reached through `ab --json tui` style calls: main() handles plain `ab tui` before the db opens

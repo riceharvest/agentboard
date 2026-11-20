@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab merge ID [--branch B] [--into DIR]`: merges the card's branch (`worktree_branch` label, else `ab/<id>`) into its workdir with plain `git merge`. A dirty main tree is no longer a reason to refuse; only git's own refusal counts (local changes overlap the merged files), and then the overlapping files are named and nothing is touched. Runner change: none needed.
+
 - Fix: inside a worker shell, `AB_HOME=/tmp/x AB_TASK=y ab ...` no longer silently drops `AB_TASK`/`AB_ACTOR`. With `AB_RUN_HOME` set and an explicit `AB_HOME` that differs, `_sanitize_worker_env` keeps the caller's `AB_TASK`/`AB_ACTOR` (still drops `AB_RUN`/`AB_BOARD`/`AB_RUN_HOME`); without an explicit `AB_HOME` all are dropped as before. Runner change: none needed.
 
 - Stale runner warning: the runner records a fingerprint of the package code it started with (`runner.code_ver`, hash of the `.py` names/sizes/mtimes, auto-migrated column) in every heartbeat; `ab runner status` (and `--json`: `stale`) and `ab add` (stderr) print `runner code older than installed code: ab runner reload` when it differs from the installed code. Runner change: `ab runner reload` needed (a runner older than this change records no version and never warns).

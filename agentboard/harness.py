@@ -1712,4 +1712,61 @@ def extra_args_for(conn, cand):
     out = list((store.cfg(conn, "extra_args") or {}).get(cand.harness) or [])
     if cand.tier:
         out += list(((store.cfg(conn, "extra_args_tier") or {}).get(cand.tier) or {}).get(cand.harness) or [])
+    return merge_settings_args(out) if cand.harness == "claude" else out
+
+
+def _settings_obj(val):
+    """A `--settings` value (inline JSON or a path to a JSON file) as a dict, or None when it is neither."""
+    try:
+        o = json.loads(val)
+    except (TypeError, ValueError):
+        try:
+            o = json.loads(Path(val).expanduser().read_text())
+        except (OSError, ValueError, TypeError):
+            return None
+    return o if isinstance(o, dict) else None
+
+
+def _merge_settings(a, b):
+    """Deep-merge settings dicts: dicts merge key by key, lists concatenate (hooks per event), else b wins."""
+    out = dict(a)
+    for k, v in b.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _merge_settings(out[k], v)
+        elif k in out and isinstance(out[k], list) and isinstance(v, list):
+            out[k] = out[k] + [x for x in v if x not in out[k]]
+        else:
+            out[k] = v
     return out
+
+
+def merge_settings_args(args):
+    """claude keeps only the LAST of repeated `--settings`, so base + tier settings would drop the base hooks. Merge every
+    `--settings X` / `--settings=X` into one `--settings JSON`, placed where the first one was. Unparseable values stay as is."""
+    rest, objs, first = [], [], None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        val = None
+        if a == "--settings" and i + 1 < len(args):
+            val, step = args[i + 1], 2
+        elif isinstance(a, str) and a.startswith("--settings="):
+            val, step = a[len("--settings="):], 1
+        else:
+            rest.append(a)
+            i += 1
+            continue
+        o = _settings_obj(val)
+        if o is None:
+            rest += args[i:i + step]
+        else:
+            if first is None:
+                first = len(rest)
+            objs.append(o)
+        i += step
+    if len(objs) < 2:
+        return list(args)
+    merged = objs[0]
+    for o in objs[1:]:
+        merged = _merge_settings(merged, o)
+    return rest[:first] + ["--settings", json.dumps(merged, separators=(",", ":"))] + rest[first:]

@@ -733,9 +733,23 @@ def add_plan(conn, actor, specs, board=DEFAULT_BOARD, plan_key=None, key_live=Fa
         return {"ids": ids, "created": created, "existed": False}
 
 
+GRANT_REFUSAL_RE = re.compile(r"no admin grant|has no '\w+' on [\w.-]+:", re.I)
+
+
 def _fail_attempt(conn, row, actor, why, kind="failed"):
     """Count an attempt; dead after max_attempts, else back to open with backoff."""
     attempts = (row["attempts"] or 0) + 1
+    if kind == "failed" and GRANT_REFUSAL_RE.search(why or ""):
+        # ab itself refused the action for lack of a grant: another non-admin worker would hit the same wall.
+        # Hold the card for the overseer (label needs_admin=overseer, not auto-run) instead of retrying.
+        lb = json.loads(row["labels"] or "{}")
+        lb["needs_admin"] = "overseer"
+        conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, runnable=0, labels=?, updated_at=? WHERE id=?",
+                     (attempts, json.dumps(lb), now(), row["id"]))
+        event(conn, row["id"], actor, "needs_admin", {"why": why, "attempts": attempts})
+        post_message(conn, "runner", f"Refused by a grant ({(why or '')[:200]}). Not retried: held for the overseer (label needs_admin=overseer, "
+                     f"not auto-run). Grant what is needed, then: ab edit {row['id']} --auto -l needs_admin=", thread=row["id"], check=False, _in_tx=True)
+        return "open"
     if attempts >= (row["max_attempts"] or 3):
         conn.execute("UPDATE tasks SET status='dead', attempts=?, owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
                      (attempts, why, now(), row["id"]))
@@ -1262,6 +1276,11 @@ def anomalies(conn, actor="agent", board=None, since=None):
                 out.append({"kind": "blocked", "task_id": r["id"], "board": r["board"], "deps": bad,
                             "title": r["title"], "updated_at": r["updated_at"],
                             "message": f"blocked: {r['id']} <{r['board']}> waits on dead/cancelled {','.join(bad)}: {r['title'][:60]}"})
+    for r in conn.execute("SELECT * FROM tasks WHERE status='open' AND json_extract(labels,'$.needs_admin')='overseer'"):
+        if board and r["board"] != board or not can(conn, actor, "read", r["board"], r["channel"]):
+            continue
+        out.append({"kind": "needs-admin", "task_id": r["id"], "board": r["board"], "title": r["title"], "updated_at": r["updated_at"],
+                    "message": f"needs-admin: {r['id']} <{r['board']}> was refused by a grant, held for the overseer: {r['title'][:60]}"})
     for r in conn.execute("SELECT * FROM tasks WHERE status='open' AND json_extract(labels,'$.stalled')='overseer'"):
         if board and r["board"] != board or not can(conn, actor, "read", r["board"], r["channel"]):
             continue

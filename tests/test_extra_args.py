@@ -71,3 +71,29 @@ def test_pinned_task_gets_harness_args_not_tier_args(tmp_path):
     store.cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}})
     p, _ = H.candidates_for(conn, {"harness": "claude", "model": "haiku", "tier": "low"})
     assert H.extra_args_for(conn, p[0]) == ["--g"]
+
+
+def test_claude_settings_merge_into_one(tmp_path):
+    """base + tier both pass --settings: claude keeps only the last, so they must reach it as ONE merged JSON."""
+    import json
+    conn = _conn(tmp_path)
+    base = {"attribution": {"commit": ""}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "base-hook"}]}]}}
+    tier = {"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "tier-hook"}]}],
+                      "Stop": [{"hooks": [{"type": "command", "command": "stop-hook"}]}]}, "env": {"X": "1"}}
+    store.cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps(base), "--flag"]})
+    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps(tier), "--m"]}})
+    c = next(c for c in _cands(conn, "medium")[0] if c.harness == "claude")
+    cmd, _ = _cmd(conn, c)
+    assert cmd.count("--settings") == 1
+    merged = json.loads(cmd[cmd.index("--settings") + 1])
+    cmds = [h["hooks"][0]["command"] for h in merged["hooks"]["PreToolUse"]]
+    assert cmds == ["base-hook", "tier-hook"]
+    assert merged["hooks"]["Stop"] and merged["attribution"] == {"commit": ""} and merged["env"] == {"X": "1"}
+    assert "--flag" in cmd and "--m" in cmd
+
+
+def test_single_settings_untouched(tmp_path):
+    conn = _conn(tmp_path)
+    store.cfg_set(conn, "extra_args", {"claude": ["--settings", "{ \"a\": 1 }"]})
+    c = next(c for c in _cands(conn, "medium")[0] if c.harness == "claude")
+    assert H.extra_args_for(conn, c) == ["--settings", "{ \"a\": 1 }"]

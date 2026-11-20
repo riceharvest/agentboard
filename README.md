@@ -217,7 +217,14 @@ tier is the one the tier *entry* sits in, so a `low` card that falls back to a `
 `low`'s. A task pinned to a harness gets only `extra_args`. The values are plain argv items (a JSON settings
 override is one item: `"--settings", "{...}"`). Use it to trim a harness's default context for cheap tiers, or to
 add flags to one tier; leave tiers you do not list untouched. Runner change: `ab runner reload` needed.
-Whether repeated flags (a second `--settings`) merge or the last wins is up to the harness; check it before relying on it.
+claude keeps only the LAST of repeated `--settings`, so for claude launches agentboard merges every `--settings` (inline JSON or a
+JSON file path) from `extra_args` and `extra_args_tier` into ONE `--settings` JSON: objects deep-merge, lists (e.g. the hooks of one
+event) concatenate base first, other keys: the tier value wins. A single `--settings`, or a value that is not JSON, is passed unchanged.
+Other repeated flags are passed as written.
+
+**Grant refusals are not retried.** A run that fails because `ab` itself refused it for lack of a grant (`has no 'admin' on ...`)
+is not retried by another worker with the same rights: the card is held (label `needs_admin=overseer`, not auto-run), `ab anomalies`
+lists it as `needs-admin`, and a note says how to re-queue: `ab edit ID --auto -l needs_admin=` after granting. Runner change: `ab runner reload`.
 
 ## Endpoints: run any harness on your own model server
 

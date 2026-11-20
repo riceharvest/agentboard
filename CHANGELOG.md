@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: inside a worker shell, `AB_HOME=/tmp/x AB_TASK=y ab ...` no longer silently drops `AB_TASK`/`AB_ACTOR`. With `AB_RUN_HOME` set and an explicit `AB_HOME` that differs, `_sanitize_worker_env` keeps the caller's `AB_TASK`/`AB_ACTOR` (still drops `AB_RUN`/`AB_BOARD`/`AB_RUN_HOME`); without an explicit `AB_HOME` all are dropped as before. Runner change: none needed.
+
 - Stale runner warning: the runner records a fingerprint of the package code it started with (`runner.code_ver`, hash of the `.py` names/sizes/mtimes, auto-migrated column) in every heartbeat; `ab runner status` (and `--json`: `stale`) and `ab add` (stderr) print `runner code older than installed code: ab runner reload` when it differs from the installed code. Runner change: `ab runner reload` needed (a runner older than this change records no version and never warns).
 
 - Fix: a reload (or runner restart) no longer kills role-labelled runs as `expired` with 0 tokens and empty logs, and no longer burns their attempt. `adopt()` joined `r.*, t.owner` and `runs` carries its own `owner` column (null), which shadowed the task owner, so the adopted run got owner `claude#N` while the card was claimed by `overseer#N` and `poll_children` killed it. The task owner is now aliased. Runner change: `ab runner reload` needed.

@@ -1769,10 +1769,12 @@ def cmd_tui(c, a, out):  # only reached through `ab --json tui` style calls: mai
 
 def _sanitize_worker_env():
     """When a runner-launched worker invokes `ab` against a different AB_HOME (e.g. a throwaway test board),
-    don't carry over AB_RUN/AB_ACTOR/AB_BOARD/AB_TASK from the worker's own board."""
+    don't carry over AB_RUN/AB_BOARD/AB_RUN_HOME from the worker's own board. AB_TASK/AB_ACTOR are dropped too,
+    unless AB_HOME is set explicitly (`AB_HOME=/tmp/x AB_TASK=y ab ...`): then they are the caller's own, for that board."""
     run_home = os.environ.get("AB_RUN_HOME")
     if run_home and store.norm_dir(str(store.HOME)) != store.norm_dir(run_home):
-        for k in ("AB_RUN", "AB_ACTOR", "AB_BOARD", "AB_TASK", "AB_RUN_HOME"):
+        explicit = bool(os.environ.get("AB_HOME"))
+        for k in ("AB_RUN", "AB_BOARD", "AB_RUN_HOME") + (() if explicit else ("AB_ACTOR", "AB_TASK")):
             os.environ.pop(k, None)
 
 

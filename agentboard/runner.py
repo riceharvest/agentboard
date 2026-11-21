@@ -615,6 +615,28 @@ class Runner:
             event(self.conn, None, "runner", "runner_stop", {"pid": os.getpid()})
         self.log("runner stopped")
 
+    def check_reload_requests(self):
+        """`ab request-reload`: a worker asked for a reload once its card is finished (done or dead).
+        Requests of cards still running or reopened (released/failed to retry) stay pending."""
+        c = self.conn
+        ids = cfg(c, "reload_after")
+        if not isinstance(ids, list) or not ids:
+            return
+        keep, fire = [], []
+        for tid in ids:
+            row = c.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+            if row is None or row["status"] in ("done", "dead"):
+                fire.append(tid)
+            else:
+                keep.append(tid)
+        if not fire:
+            return
+        with tx(c):
+            store.cfg_set(c, "reload_after", keep, "runner")
+            if (cfg(c, "stop") or "") == "":
+                store.cfg_set(c, "stop", "reload", "runner")
+        self.log(f"reload requested by finished card(s): {', '.join(fire)}")
+
     def reload(self):
         """Re-exec this runner with the code on disk. Running harnesses live in their own sessions and are
         re-adopted from the db by the new process (same pid, so they are still our children)."""
@@ -654,6 +676,7 @@ class Runner:
             self.log(f"endpoint lifecycle error: {e!r}")
         for tid, why in wake_parked(c):
             self.log(f"{tid} park woke: {why}")
+        self.check_reload_requests()
         stop = cfg(c, "stop") or ""
         if stop == "reload":
             self.reload()

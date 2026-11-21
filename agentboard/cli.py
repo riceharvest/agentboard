@@ -462,6 +462,24 @@ def cmd_rm(c, a, out):
         raise SystemExit(1)
 
 
+def cmd_request_reload(c, a, out):
+    """Opt-in: a worker (no admin) asks the runner to reload once this card is done; the runner does it then."""
+    tid = a.id or os.environ.get("AB_TASK")
+    if not tid:
+        raise ValueError("give a task ID (or run inside a runner-started agent where AB_TASK is set)")
+    t = store.get_task(c, tid)
+    if not t:
+        raise ValueError(f"no such task {tid}")
+    tid = t["id"]
+    with store.tx(c):
+        cur = store.cfg(c, "reload_after")
+        cur = cur if isinstance(cur, list) else []
+        if tid not in cur:
+            cur.append(tid)
+        store.cfg_set(c, "reload_after", cur, actor_of(a))
+    out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done")
+
+
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
@@ -1566,6 +1584,9 @@ def build_parser():
     s = sub("anomalies", cmd_anomalies, "list dead cards (excluding outcome=negative) and open cards blocked on dead/cancelled deps")
     s.add_argument("--all-boards", action="store_true")
     s.add_argument("--since", help="only dead cards updated within this window, e.g. 6h, 1d")
+
+    s = sub("request-reload", cmd_request_reload, "opt-in, for workers without admin: the runner reloads once this card is done (ID defaults to $AB_TASK)")
+    s.add_argument("id", nargs="?")
 
     s = sub("release", cmd_release, "hand the task back without counting an attempt (to wait on time or data use `ab defer ID --until T --why ...`, not release: repeated quick releases trigger a relaunch backoff)")
     s.add_argument("id")

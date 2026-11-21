@@ -497,6 +497,18 @@ def _task_actor_ok(conn, row, actor, perm="manage"):
     require(conn, actor, perm, row["board"], row["channel"])
 
 
+def _created_by_current_task(conn, row):
+    """True when this card was created from the card the caller is running as (AB_TASK recorded as `by_task` on its created event)."""
+    me = os.environ.get("AB_TASK")
+    if not me:
+        return False
+    r = conn.execute("SELECT payload FROM events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1", (row["id"],)).fetchone()
+    try:
+        return bool(r) and json.loads(r["payload"] or "{}").get("by_task") == me
+    except (ValueError, TypeError):
+        return False
+
+
 def _can_mark_negative(conn, row, actor):
     """Owner, creator, system, or any actor with write access (`post`, `claim`, or `manage`) on the card."""
     if actor in (row["owner"], row["created_by"]) or is_system(actor):
@@ -718,7 +730,8 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
                                             **({"runnable": False} if not runnable else {}),
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
                                             **({"verify": verify} if verify else {}),
-                                            **({"stripped_invisible": stripped} if stripped else {})})
+                                            **({"stripped_invisible": stripped} if stripped else {}),
+                                            **({"by_task": os.environ["AB_TASK"]} if os.environ.get("AB_TASK") else {})})
         return tid
     if _in_tx:
         return go()
@@ -1489,8 +1502,16 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
         if not fields and not add_deps and not rm_deps and row["status"] == "dead" and labels == {"outcome": "negative"}:
             if not _can_mark_negative(conn, row, actor):
                 raise PermissionError(f"{actor} has no write access on {row['board']}:{row['channel']}")
+        elif (add_deps or rm_deps) and not fields and not labels and _created_by_current_task(conn, row):
+            pass  # provenance: the card this card created may be wired (same rule as `ab add --dep`)
         else:
-            _task_actor_ok(conn, row, actor)
+            if add_deps:
+                try:
+                    _task_actor_ok(conn, row, actor)
+                except PermissionError as e:
+                    raise PermissionError(f"adding a dependency on a card you did not create needs 'manage' ({e})")
+            else:
+                _task_actor_ok(conn, row, actor)
         if "tier" in fields and fields["tier"] not in cfg(conn, "tiers"):
             raise ValueError(f"unknown tier {fields['tier']!r}")
         if "board" in fields or "channel" in fields:

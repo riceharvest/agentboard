@@ -131,8 +131,8 @@ def show_text(d):
         lines.append(f"hold={d['hold']['reason']} since {fmt_ts(d['hold']['since'])}")
         if d["hold"].get("holder"):
             lines.append(f"held by {d['hold']['holder']}")
-        if clear_hint(d):
-            lines.append(clear_hint(d))
+    if clear_hint(d):
+        lines.append(clear_hint(d))
     if d.get("workdir"):
         lines.append(f"workdir {d['workdir']}")
     if d.get("labels"):

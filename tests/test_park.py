@@ -391,3 +391,45 @@ def test_park_resumed_accepts_claimed_or_done_between_polls(tmp_path, monkeypatc
     row = c.execute("SELECT status, park FROM tasks WHERE id=?", (tid,)).fetchone()
     assert row["status"] == "done" and row["park"] is None  # state alone shows nothing
     assert store.park_resumed(c, tid)
+
+
+def test_no_double_dispatch_while_a_run_is_live(abx):
+    """A card re-opened (parked / released) while its run is still alive is never given a second run."""
+    import subprocess
+    from agentboard import runner, store
+    tid = json.loads(abx("--json", "add", "x")[1])["id"]
+    p = subprocess.Popen(["sleep", "30"])
+    c = _conn(abx)
+    try:
+        c.execute("INSERT INTO runs(id,task_id,harness,pid,pid_start,started_at) VALUES(1,?,?,?,?,?)",
+                  (tid, "claude", p.pid, runner.pid_start(p.pid), store.now()))
+        r = runner.Runner(c)
+        assert store.ready_tasks(c) and r.has_live_run(tid)
+        assert r.fill(4) is None
+        assert c.execute("SELECT COUNT(*) FROM runs WHERE task_id=?", (tid,)).fetchone()[0] == 1
+        assert store.must_task(c, tid)["status"] == "open"
+    finally:
+        c.close()
+        p.kill()
+        p.wait()
+
+
+def test_tick_renews_a_live_childs_lease_instead_of_burning_an_attempt(abx):
+    """A slow tick must not let reap() fail the attempt of a card whose run the runner still holds."""
+    from agentboard import runner, store
+    tid = json.loads(abx("--json", "add", "x")[1])["id"]
+    abx("--json", "claim", tid)
+    c = _conn(abx)
+    try:
+        c.execute("UPDATE tasks SET owner='claude#1', lease_until=? WHERE id=?", (store.now() - 5, tid))
+        r = runner.Runner(c)
+        r.children[1] = ch = runner.Child(1, tid, "claude#1", "claude", None, "b", os.getpid(), None, None, 3600, "/", "", "", store.now())
+        ch.board = "main"
+        try:
+            r.tick()  # may fail later on (no harness); the renewal runs before reap
+        except Exception:
+            pass
+        t = store.must_task(c, tid)
+        assert t["attempts"] == 0 and t["status"] == "claimed" and t["lease_until"] > store.now()
+    finally:
+        c.close()

@@ -686,6 +686,12 @@ class Runner:
 
     def tick(self):
         c = self.conn
+        # A live child of ours holds its claim: renew before reaping. A slow tick must not let store.reap() fail the
+        # attempt and re-open the card while the run is alive (that re-opened card was then double-dispatched and the
+        # first run killed as "expired", burning an attempt).
+        for ch in list(self.children.values()):
+            c.execute("UPDATE tasks SET lease_until=? WHERE id=? AND owner=? AND status='claimed' AND lease_until < ?",
+                      (now() + RUNNER_LEASE, ch.task_id, ch.owner, now()))
         expired_ids = {r["id"] for r in c.execute(
             "SELECT id FROM tasks WHERE status='claimed' AND lease_until IS NOT NULL AND lease_until < ?", (now(),))}
         store.reap(c)
@@ -836,6 +842,15 @@ class Runner:
             self.log(f"{task['id']}: git worktree failed: {e}")
             return None
 
+    def has_live_run(self, task_id):
+        """True while any run of the task is still running: one of our children, or a runs row with no ended_at whose pid is alive."""
+        if any(ch.task_id == task_id for ch in self.children.values()):
+            return True
+        for r in self.conn.execute("SELECT pid, pid_start FROM runs WHERE task_id=? AND ended_at IS NULL", (task_id,)):
+            if r["pid"] and alive(r["pid"], r["pid_start"]):
+                return True
+        return False
+
     def fill(self, slots):
         c = self.conn
         if len(self.children) >= slots:
@@ -848,6 +863,8 @@ class Runner:
         launched = 0
         note = None
         for t in store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True):
+            if self.has_live_run(t["id"]):
+                continue  # a previous run of this card is still alive (e.g. parked while exiting): never race a second one
             if len(self.children) >= slots or (max_per_tick > 0 and launched >= max_per_tick):
                 break
             cap = caps.get(t["board"])
@@ -910,7 +927,7 @@ class Runner:
         a = H.ADAPTERS[cand.harness]
         with tx(c):
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
-            if cur["status"] != "open" or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
+            if cur["status"] != "open" or self.has_live_run(task["id"]) or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
             t_start = now()
             c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint,provider) VALUES(?,?,?,?,?,?,?,?,?)",

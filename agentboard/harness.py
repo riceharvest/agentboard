@@ -256,6 +256,11 @@ class Adapter:
             return self.command(brief, cand.model, cand.effort, extra), {}
         return self.endpoint_command(brief, cand.model, cand.effort, ep, extra)
 
+    def shell_env_args(self, abenv):
+        """Extra argv so the harness's own shell tool keeps these variables (some harnesses filter the env they hand to
+        the commands the model runs). Inserted before the final brief argument by the runner. Default: nothing."""
+        return []
+
     def endpoint_command(self, brief, model, effort, ep, extra):
         raise EndpointUnsupported(f"{self.name} can't run on a custom endpoint")
 
@@ -622,6 +627,11 @@ class Codex(Adapter):
         if effort:
             cmd += ["-c", f'model_reasoning_effort="{effort}"']
         return cmd + list(extra) + [brief]
+
+    def shell_env_args(self, abenv):
+        # codex builds the shell tool's env from a policy, not from its own environment: set the values explicitly.
+        body = ", ".join(f"{k}={json.dumps(v)}" for k, v in abenv.items())
+        return ["-c", f"shell_environment_policy.set={{{body}}}"]
 
     def endpoint_command(self, brief, model, effort, ep, extra):
         # Needs the Responses API at <base_url>/responses.

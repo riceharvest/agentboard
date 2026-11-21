@@ -964,6 +964,14 @@ class Runner:
                     "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"], "AB_WORKDIR": str(workdir),
                     "AB_PROGRESS": str(progress_path(task["id"])),
                     "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
+        abenv = {k: env[k] for k in ("AB_TASK", "AB_ACTOR", "AB_BOARD", "AB_RUN", "AB_HOME")}
+        # every worker shell: a per-run file bash sources (non-interactive shells read $BASH_ENV), and harness-specific args
+        env_file = runs_dir / f"{run_id}.env"
+        env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in abenv.items()))
+        env.setdefault("BASH_ENV", str(env_file))
+        sea = a.shell_env_args(abenv)
+        if sea and len(cmd) > 1:
+            cmd = list(cmd[:-1]) + sea + [cmd[-1]]
         try:
             with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
                 proc = subprocess.Popen(cmd, cwd=workdir, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL,

@@ -1151,6 +1151,7 @@ class Runner:
             return
         ch._hermes_session_stopped = True
         ok, detail = H.interrupt_hermes_session(sid)
+        ch.hermes_stop = f"hermes session {sid} stop {'ok' if ok else 'FAILED'}: {detail}"
         self.log(f"run {ch.run_id} ({ch.task_id}): hermes session {sid} stop: {detail}")
 
     def kill(self, ch, reason, why=None):
@@ -1375,6 +1376,8 @@ class Runner:
                 if ch.stall_error:
                     res.error = f"killed by runner: {ch.stall_error}"
                     res.reset_at = ch.stall_reset_at
+                if getattr(ch, "hermes_stop", None):
+                    res.error += f"; {ch.hermes_stop}"   # lands in runs.detail
             model = res.model or ch.model
             vfail = None  # (round, tail) when the card's --verify command rejected this run's `ab done`
             t0 = c.execute("SELECT * FROM tasks WHERE id=?", (ch.task_id,)).fetchone()

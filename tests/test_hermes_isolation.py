@@ -859,6 +859,9 @@ def test_non_isolated_kill_interrupts_gateway_session(abx, tmp_path, session_lin
         # The stop is recorded in the run log.
         log_text = runner_log.read_text()
         assert expected_sid in log_text and "interrupt" in log_text.lower(), log_text[-2000:]
+        # ... and in runs.detail, so the board shows the session was stopped
+        detail = j("show", tid)["runs"][0].get("detail") or ""
+        assert f"hermes session {expected_sid} stop ok" in detail and "interrupted" in detail, detail
     finally:
         j("runner", "stop", "--now")
         try:

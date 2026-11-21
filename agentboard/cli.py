@@ -480,8 +480,29 @@ def cmd_request_reload(c, a, out):
     out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done")
 
 
+def dirty_files(c, tid):
+    """Untracked or modified (non-ignored) files in the task's worktree: labels.worktree_dir, else $AB_WORKDIR. [] if none or not git."""
+    import subprocess
+    row = store.get_task(c, tid) if tid else None
+    d = ""
+    if row is not None:
+        d = (json.loads(row["labels"] or "{}")).get("worktree_dir") or ""
+    d = d or os.environ.get("AB_WORKDIR", "")
+    if not d or not os.path.isdir(d):
+        return []
+    p = subprocess.run(["git", "-C", d, "status", "--porcelain", "-uall"], capture_output=True, text=True)
+    return [ln for ln in p.stdout.splitlines() if ln.strip()] if p.returncode == 0 else []
+
+
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
+    if not a.allow_dirty and not a.force:
+        tid0 = a.id or os.environ.get("AB_TASK", "")
+        dirty = dirty_files(c, tid0)
+        if dirty:
+            shown = "\n".join("  " + ln for ln in dirty[:20]) + (f"\n  ... and {len(dirty) - 20} more" if len(dirty) > 20 else "")
+            raise ValueError(f"{tid0}: worktree has untracked or modified files, so the result cannot be reproduced from the branch; "
+                             f"commit them (or delete them) and retry, or pass --allow-dirty:\n{shown}")
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
     out({"id": tid, "status": "done"}, f"{tid} done")
 
@@ -1573,6 +1594,7 @@ def build_parser():
     s.add_argument("--summary-file", help="read the result from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--allow-dirty", action="store_true", help="close even if the worktree has untracked or modified files")
 
     s = sub("fail", cmd_fail, "give up this attempt (task retries until max attempts, then dead)")
     s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")

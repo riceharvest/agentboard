@@ -32,3 +32,16 @@ def test_real_429_provider_error_is_a_limit():
     assert r.error_kind == "limit" and "Nous 429" in r.error
     r = _parse(1, CODE_OUT + "Error: HTTP 429 too many requests\n", "")
     assert r.error_kind == "limit" and "HTTP 429" in r.error
+
+
+def test_429_in_code_is_not_a_limit_for_any_adapter():
+    diff = "+            if e.code in (429, 500, 502):\n"
+    for name, a in H.ADAPTERS.items():
+        for rc, out, err in ((1, diff, ""), (1, "", diff), (1, "I changed it\n" + diff, "boom\n")):
+            r = a.parse(rc, out, err)
+            assert r.error_kind != "limit", (name, rc, r.error_kind)
+
+
+def test_real_429_still_a_limit_for_cli_adapters():
+    r = H.ADAPTERS["codex"].parse(1, "", "Error: HTTP 429 Too Many Requests\n")
+    assert r.error_kind == "limit"

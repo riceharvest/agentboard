@@ -309,7 +309,7 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
             return Some(format!("  ⏸ parked on {}", p.what()));
         }
         if !t.deps_open.is_empty() {
-            return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| d.chars().skip(2).take(4).collect::<String>()).collect::<Vec<_>>().join(", ")));
+            return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| app.task(d).map(|x| x.title.clone()).unwrap_or_else(|| d.chars().skip(2).take(4).collect::<String>())).collect::<Vec<_>>().join(" · ")));
         }
         if let Some(nb) = t.not_before {
             return Some(format!("  ↳ starts in {}", fmt_dur(nb - app.now())));

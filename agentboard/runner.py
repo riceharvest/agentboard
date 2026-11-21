@@ -662,6 +662,43 @@ class Runner:
                 store.cfg_set(c, "stop", "reload", "runner")
         self.log(f"reload requested by finished card(s): {', '.join(fire)}")
 
+    def drain_op_requests(self):
+        """Apply at most ONE `ab op-request` per tick (called before anything is spawned). `reload` sets the same stop=reload
+        the admin command sets, so the re-exec below runs the same path; the row is `applying` before and `applied` after
+        (a re-exec cannot write after, so a leftover `applying` row older than one tick is closed as applied-with-warning
+        and never run again). `config` applies only the allowlist, recording before/after."""
+        c = self.conn
+        tick_s = float(cfg(c, "poll_s") or 5)
+        for r in c.execute("SELECT * FROM op_requests WHERE state='applying' AND applied_at<?", (now() - tick_s,)).fetchall():
+            with tx(c):
+                c.execute("UPDATE op_requests SET state='applied', result=? WHERE id=?",
+                          ("applied (warning: runner re-exec before the row was closed; not run again)", r["id"]))
+            self.log(f"op-request {r['id']} kind={r['kind']} actor={r['actor']}: WARNING leftover 'applying' row closed as applied, not re-executed")
+        r = c.execute("SELECT * FROM op_requests WHERE state='pending' ORDER BY id LIMIT 1").fetchone()
+        if r is None:
+            return
+        rid, kind, actor = r["id"], r["kind"], r["actor"]
+        if kind == "reload":
+            with tx(c):
+                c.execute("UPDATE op_requests SET state='applying', applied_at=? WHERE id=?", (now(), rid))
+                if (cfg(c, "stop") or "") == "":
+                    store.cfg_set(c, "stop", "reload", "runner")
+            self.log(f"op-request {rid} kind=reload actor={actor}: applying (runner reload) why: {r['why']}")
+            return
+        try:
+            if kind != "config":
+                raise ValueError(f"unknown kind {kind!r}")
+            with tx(c):
+                c.execute("UPDATE op_requests SET state='applying', applied_at=? WHERE id=?", (now(), rid))
+                before, after = store.op_config_apply(c, r["arg"], f"op-request:{actor}")
+                res = json.dumps({"before": before, "after": after})
+                c.execute("UPDATE op_requests SET state='applied', applied_at=?, result=? WHERE id=?", (now(), res, rid))
+            self.log(f"op-request {rid} kind=config actor={actor} arg={r['arg'].partition('=')[0]}: before={json.dumps(before)} after={json.dumps(after)}")
+        except Exception as e:
+            with tx(c):
+                c.execute("UPDATE op_requests SET state='rejected', applied_at=?, result=? WHERE id=?", (now(), str(e), rid))
+            self.log(f"op-request {rid} kind={kind} actor={actor}: rejected: {e}")
+
     def reload(self):
         """Re-exec this runner with the code on disk. Running harnesses live in their own sessions and are
         re-adopted from the db by the new process (same pid, so they are still our children)."""
@@ -708,6 +745,10 @@ class Runner:
         for tid, why in wake_parked(c):
             self.log(f"{tid} park woke: {why}")
         self.check_reload_requests()
+        try:
+            self.drain_op_requests()
+        except Exception as e:
+            self.log(f"op-request drain error: {e!r}")
         stop = cfg(c, "stop") or ""
         if stop == "reload":
             self.reload()

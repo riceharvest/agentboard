@@ -1,5 +1,6 @@
 """SQLite store: boards, tasks, deps, messages, events, grants, runs, usage, limits, control, schedules."""
 import fnmatch
+import copy
 import json
 import os
 import re
@@ -62,6 +63,8 @@ CREATE TABLE IF NOT EXISTS schedules(
   last_fired REAL, created_by TEXT, created_at REAL);
 CREATE TABLE IF NOT EXISTS runner(id INTEGER PRIMARY KEY CHECK(id=1), pid INTEGER, host TEXT,
   started_at REAL, heartbeat REAL, state TEXT, active INTEGER, slots INTEGER, note TEXT, code_ver TEXT);
+CREATE TABLE IF NOT EXISTS op_requests(id INTEGER PRIMARY KEY, kind TEXT, arg TEXT, why TEXT, actor TEXT, task_id TEXT,
+  created_at REAL, state TEXT DEFAULT 'pending', applied_at REAL, result TEXT);
 CREATE TABLE IF NOT EXISTS models(harness TEXT, model TEXT, label TEXT, seen_at REAL, PRIMARY KEY(harness, model));
 """
 
@@ -1649,3 +1652,86 @@ def verdict_first_token(text):
 
 def verdict_ok(text, tokens):
     return not tokens or verdict_first_token(text) in tokens
+
+
+# ---------------------------------------------------------------- operator requests (a non-admin actor ASKS, the runner tick applies)
+OP_KINDS = ("reload", "config")
+OP_CONFIG_ALLOW = ("extra_args", "extra_args_tier")
+OP_MAX_DEPTH = {"extra_args": 2, "extra_args_tier": 3}   # path segments incl. the key: extra_args.<harness>, extra_args_tier.<tier>.<harness>
+
+
+def op_parse_arg(arg):
+    """'extra_args.claude=["--x"]' -> (path list, value). Raises ValueError naming the allowed keys."""
+    if not arg or "=" not in arg:
+        raise ValueError(f"--arg must be '<key>=<value>' with a key in: {', '.join(OP_CONFIG_ALLOW)}")
+    key, _, raw = arg.partition("=")
+    path = [p for p in key.strip().split(".")]
+    if path[0] not in OP_CONFIG_ALLOW or not all(path):
+        raise ValueError(f"config key {key.strip()!r} is not allowed for op-request; allowed keys: {', '.join(OP_CONFIG_ALLOW)}")
+    if len(path) > OP_MAX_DEPTH[path[0]]:
+        raise ValueError(f"key {key.strip()!r} is too deep; allowed keys: {', '.join(OP_CONFIG_ALLOW)} "
+                         f"(extra_args[.HARNESS], extra_args_tier[.TIER[.HARNESS]])")
+    try:
+        val = json.loads(raw)
+    except ValueError:
+        raise ValueError(f"value for {key.strip()!r} must be JSON") from None
+    leaf = {"extra_args": 2, "extra_args_tier": 3}[path[0]]
+    if len(path) == leaf:
+        ok = isinstance(val, list) and all(isinstance(x, str) for x in val)
+    else:
+        ok = isinstance(val, dict)
+    if not ok:
+        raise ValueError(f"value for {key.strip()!r} has the wrong shape ({'a JSON list of strings' if len(path) == leaf else 'a JSON object'})")
+    return path, val
+
+
+def op_request_add(conn, kind, arg, why, actor, task_id=None):
+    if kind not in OP_KINDS:
+        raise ValueError(f"--kind must be one of: {', '.join(OP_KINDS)}")
+    if kind == "config":
+        op_parse_arg(arg)
+    elif arg:
+        raise ValueError("--arg is only for --kind config")
+    if not (why or "").strip():
+        raise ValueError("--why TEXT is required")
+    with tx(conn):
+        cur = conn.execute("INSERT INTO op_requests(kind,arg,why,actor,task_id,created_at,state) VALUES(?,?,?,?,?,?,'pending')",
+                           (kind, arg or None, why.strip(), actor, task_id or None, now()))
+        event(conn, task_id or None, actor, "op_request", {"id": cur.lastrowid, "kind": kind, "arg": arg})
+    return cur.lastrowid
+
+
+def op_requests(conn, state=None, older_s=None):
+    q, args = "SELECT * FROM op_requests", []
+    w = []
+    if state:
+        w.append("state=?"); args.append(state)
+    if older_s is not None:
+        w.append("created_at<?"); args.append(now() - older_s)
+    if w:
+        q += " WHERE " + " AND ".join(w)
+    return [dict(r) for r in conn.execute(q + " ORDER BY id", args)]
+
+
+def op_pending_summary(conn):
+    r = conn.execute("SELECT COUNT(*) n, MIN(created_at) oldest FROM op_requests WHERE state='pending'").fetchone()
+    return r["n"], (now() - r["oldest"]) if r["oldest"] else None
+
+
+def op_config_apply(conn, arg, actor):
+    """Apply one allowlisted config change; returns (before, after) of the touched path."""
+    path, val = op_parse_arg(arg)
+    top = copy.deepcopy(cfg(conn, path[0]) or {})
+    cur = top
+    for seg in path[1:-1]:
+        nxt = cur.get(seg)
+        if not isinstance(nxt, dict):
+            nxt = cur[seg] = {}
+        cur = nxt
+    before = copy.deepcopy(cur.get(path[-1])) if len(path) > 1 else copy.deepcopy(cfg(conn, path[0]))
+    if len(path) > 1:
+        cur[path[-1]] = val
+    else:
+        top = val
+    cfg_set(conn, path[0], top, actor)
+    return before, val

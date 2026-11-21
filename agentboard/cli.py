@@ -808,6 +808,9 @@ def cmd_whoami(c, a, out):
     me = actor_of(a)
     d = {"actor": me, "board": board_of(a), "task": os.environ.get("AB_TASK"), "run": os.environ.get("AB_RUN"),
          "db": str(store.DB_PATH), "admin": store.can(c, me, "admin", board_of(a))}
+    ctx, reason = infer_run(c)
+    d["inferred_run"] = ctx["run"] if ctx else None
+    d["inferred_reason"] = reason
     out(d, lambda d: " ".join(f"{k}={v}" for k, v in d.items()))
 
 

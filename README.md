@@ -454,3 +454,13 @@ A card can be `state=ready` and still never start because `runnable=0`. Every wr
     t_ab12cd34  ready  p0  medium main  [build] some card  (runnable=0 (hold=unknown))
 
 A `retry_backoff` hold clears by itself when the backoff ends. Release any hold with `ab edit ID --auto`.
+
+
+## Troubleshooting: who does `ab` think I am?
+
+`ab whoami` prints the env identity (`run` is `AB_RUN`) and, separately, the run inferred from the run home
+(`inferred_run`). When inference refuses, `inferred_reason` says why (no `ab-run.json`, marker for another
+`AB_HOME`, run ended, ...); it is `None` when the shell is simply not a run home.
+
+    $ ab whoami
+    actor=... board=main task=None run=None db=... admin=False inferred_run=None inferred_reason=None

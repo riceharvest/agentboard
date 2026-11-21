@@ -23,7 +23,7 @@ def _run(monkeypatch, tmp_path, home_set, **env):
 def test_sanitize_keeps_task_and_actor_with_explicit_ab_home(monkeypatch, tmp_path):
     _run(monkeypatch, tmp_path, True, AB_TASK="y", AB_ACTOR="me#1")
     assert os.environ["AB_TASK"] == "y" and os.environ["AB_ACTOR"] == "me#1"
-    assert "AB_RUN" not in os.environ and "AB_BOARD" not in os.environ and "AB_RUN_HOME" not in os.environ
+    assert "AB_RUN" not in os.environ and "AB_RUN_HOME" not in os.environ
 
 
 def test_sanitize_still_drops_all_without_explicit_ab_home(monkeypatch, tmp_path):
@@ -50,3 +50,15 @@ def test_sanitize_end_to_end(abx, tmp_path):
                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert p.returncode == 0, p.stderr
     assert "me#1" in p.stdout
+
+
+def test_sanitize_keeps_board_with_explicit_ab_home(monkeypatch, tmp_path):
+    _run(monkeypatch, tmp_path, True, AB_TASK="y", AB_BOARD="fixture")
+    assert os.environ["AB_BOARD"] == "fixture" and os.environ["AB_TASK"] == "y"
+    assert "AB_RUN" not in os.environ and "AB_RUN_HOME" not in os.environ
+
+
+def test_sanitize_warns_when_dropping(monkeypatch, tmp_path, capsys):
+    _run(monkeypatch, tmp_path, False, AB_TASK="y")
+    err = capsys.readouterr().err
+    assert "AB_TASK" in err and "AB_BOARD" in err and "ignoring" in err

@@ -372,6 +372,11 @@ def park_resume(conn, task):
 PROGRESS_FILE = ".ab-progress.md"
 
 
+def progress_path(task_id):
+    """Per-task progress file, outside the repo, so cards sharing one workdir cannot clobber each other's checkpoints."""
+    return store.HOME / "progress" / f"{task_id}.md"
+
+
 def _git(workdir, *args):
     try:
         r = subprocess.run(["git", "-C", workdir, *args], capture_output=True, text=True, timeout=20)
@@ -384,12 +389,14 @@ def _resume_on(conn):
     return str(cfg(conn, "limit_resume")).lower() in ("on", "true", "1", "yes")
 
 
-def checkpoint_rules(conn):
+def checkpoint_rules(conn, task_id=None):
     """Brief text for opt-in `limit_resume`: workers leave resumable state, since a provider limit can kill them any time."""
     if not _resume_on(conn):
         return ""
+    where = (f"`$AB_PROGRESS` ({progress_path(task_id)}; use it instead of any `{PROGRESS_FILE}` named elsewhere, other cards may share the workdir)"
+             if task_id else f"`{PROGRESS_FILE}` in the workdir")
     return (f"\nCHECKPOINTS (a provider limit can kill this run at any moment, and the retry resumes from what you leave): commit to your "
-            f"branch at each milestone (small commits, clear messages), and keep a short progress file `{PROGRESS_FILE}` in the workdir "
+            f"branch at each milestone (small commits, clear messages), and keep a short progress file {where} "
             f"(done so far / next step / open problems; do not commit it). Update it before every long step.\n")
 
 
@@ -400,7 +407,7 @@ def limit_resume_text(conn, task, workdir):
     last = conn.execute("SELECT id, harness, outcome FROM runs WHERE task_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1",
                         (task["id"],)).fetchone()
     if not last or last["outcome"] != "limit":
-        return checkpoint_rules(conn)
+        return checkpoint_rules(conn, task['id'])
     parts = [f"\nRESUMING AFTER A PROVIDER LIMIT: run {last['id']} ({last['harness']}) was killed by a limit, not by a fault in the task. "
              f"Do NOT start over: continue from the state below (verify it first).\n"]
     first = conn.execute("SELECT MIN(started_at) FROM runs WHERE task_id=?", (task["id"],)).fetchone()[0]
@@ -414,15 +421,19 @@ def limit_resume_text(conn, task, workdir):
     dirty = _git(workdir, "status", "--short")
     if dirty:
         parts.append("UNCOMMITTED CHANGES:\n" + dirty[:1000] + "\n")
-    try:
-        prog = (Path(workdir) / PROGRESS_FILE).read_text(errors="replace").strip()
-    except OSError:
-        prog = ""
+    prog = ""
+    for f in (progress_path(task["id"]), Path(workdir) / PROGRESS_FILE):
+        try:
+            prog = f.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if prog:
+            break
     parts.append(f"PROGRESS FILE ({PROGRESS_FILE}):\n" + (prog[-2500:] if prog else "(none written)") + "\n")
     n = conn.execute("SELECT author, body FROM messages WHERE thread=? AND author!='runner' ORDER BY id DESC LIMIT 1", (task["id"],)).fetchone()
     if n:
         parts.append(f"LAST NOTE ({n['author']}): {(n['body'] or '')[:1000]}\n")
-    return "".join(parts) + checkpoint_rules(conn)
+    return "".join(parts) + checkpoint_rules(conn, task["id"])
 
 
 VERIFY_TAIL_LINES = 40
@@ -917,8 +928,10 @@ class Runner:
             Path(hermes_home, "ab-run.json").write_text(json.dumps({"run": run_id, "task": task["id"], "actor": owner,
                                                                     "board": cur["board"], "ab_home": str(store.HOME)}))
         home = str(store.HOME)
+        progress_path(task["id"]).parent.mkdir(parents=True, exist_ok=True)
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id),
                     "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"], "AB_WORKDIR": str(workdir),
+                    "AB_PROGRESS": str(progress_path(task["id"])),
                     "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
         try:
             with open(out_path, "wb") as fo, open(err_path, "wb") as fe:

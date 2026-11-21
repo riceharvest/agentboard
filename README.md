@@ -451,9 +451,9 @@ A card can be `state=ready` and still never start because `runnable=0`. Every wr
 `ab ls --stuck` lists ready cards with `runnable=0` whose hold is not a deliberate one (`manual`, `needs_admin`):
 
     $ ab ls --stuck
-    t_ab12cd34  ready  p0  medium main  [build] some card  (runnable=0 (hold=unknown))
+    t_ab12cd34  ready  p0  medium main  [build] some card  (runnable=0 (hold=unknown); clear with: ab edit t_ab12cd34 --auto)
 
-A `retry_backoff` hold clears by itself when the backoff ends. Release any hold with `ab edit ID --auto`.
+A `retry_backoff` hold clears by itself when the backoff ends. Release any hold with `ab edit ID --auto` (same as `--runnable on`; `--runnable off` or `--manual` sets one). `ab show`, `ab ls` and `ab ls --stuck` print the exact `clear with:` command. A hold is never cleared on a timer: its owner releases it.
 
 
 ## Troubleshooting: who does `ab` think I am?

@@ -352,7 +352,9 @@ def cmd_ls(c, a, out):
     status = a.status
     bsel = None if a.all_boards else board_of(a)
     if a.ready:
-        rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=a.limit, board=bsel)
+        rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=a.limit + 1, board=bsel)
+        total = len(rows)
+        rows = rows[:a.limit]
     else:
         if bsel:
             where.append("board=?")
@@ -371,6 +373,7 @@ def cmd_ls(c, a, out):
             args += [f"$.{json.dumps(k)}", v]
         if where:
             sql += " WHERE " + " AND ".join(where)
+        total = c.execute("SELECT COUNT(*) FROM tasks" + sql[len("SELECT * FROM tasks"):], args).fetchone()[0]
         sql += " ORDER BY CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 ELSE 2 END, priority DESC, updated_at DESC LIMIT ?"
         rows = c.execute(sql, args + [a.limit]).fetchall()
     items = [store.task_dict(c, r) for r in visible(c, a, rows)]
@@ -381,6 +384,9 @@ def cmd_ls(c, a, out):
             if why:
                 d["wait_reason"] = why
     out(items, lambda xs: "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)")
+    if a.limit and total > a.limit:
+        more = "+" if a.ready else ""
+        print(f"ab ls: showing {a.limit} of {total}{more} (add --limit N for more)", file=sys.stderr)
 
 
 def cmd_show(c, a, out):

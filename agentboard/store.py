@@ -543,6 +543,7 @@ def task_dict(conn, row, full=False):
     d["kind"] = d.get("kind") or ("cmd" if d.get("cmd") else "agent")
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
+    d["runs"] = conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=?", (d["id"],)).fetchone()[0]  # run count; `show` swaps in the list below
     if full:
         d["notes"] = thread_messages(conn, d["id"])
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]

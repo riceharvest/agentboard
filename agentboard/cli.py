@@ -31,13 +31,29 @@ class Out:
                 print(t)
 
 
+_LABEL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+def split_labels(it):
+    """One -l argument -> [(k, v)]. 'worktree=on,lane=b' is two labels; a comma followed by a part that is not
+    'key=' stays in the value (watch_quiet=done,cancelled is one label)."""
+    if "=" not in it:
+        raise ValueError(f"expected key=value, got {it!r}")
+    out = []
+    for part in it.split(","):
+        k, eq, v = part.partition("=")
+        if out and not (eq and _LABEL_KEY.match(k.strip())):
+            out[-1][1] += "," + part
+        else:
+            out.append([k, v])
+    return [(k.strip(), v.strip()) for k, v in out]
+
+
 def kv_list(items):
     out = {}
     for it in items or []:
-        if "=" not in it:
-            raise ValueError(f"expected key=value, got {it!r}")
-        k, v = it.split("=", 1)
-        out[k.strip()] = v.strip()
+        for k, v in split_labels(it):
+            out[k] = v
     return out
 
 
@@ -73,6 +89,11 @@ def hold_txt(d, always=False):
     return f" (hold={(d.get('labels') or {}).get('hold') or (d.get('hold') or {}).get('reason') or 'unknown'})"
 
 
+def clear_hint(d):
+    """The command that releases a card held runnable=False, '' when the card is runnable."""
+    return "" if d.get("runnable", True) else f"clear with: ab edit {d['id']} --auto"
+
+
 def tline(d):
     lab = ",".join(f"{k}={v}" for k, v in (d.get("labels") or {}).items())
     extra = []
@@ -88,7 +109,7 @@ def tline(d):
     if (d.get("hold") or {}).get("holder"):
         extra.append("held_by " + d["hold"]["holder"])
     if not d.get("runnable", True) and d["state"] == "ready":
-        extra.append("runnable=0" + hold_txt(d).replace(" (", " (", 1))
+        extra.append("runnable=0" + hold_txt(d).replace(" (", " (", 1) + "; " + clear_hint(d))
     if d.get("deps"):
         extra.append("deps " + ",".join(d["deps"]))
     n = d["runs"] if isinstance(d.get("runs"), int) else len(d.get("runs") or [])
@@ -110,6 +131,8 @@ def show_text(d):
         lines.append(f"hold={d['hold']['reason']} since {fmt_ts(d['hold']['since'])}")
         if d["hold"].get("holder"):
             lines.append(f"held by {d['hold']['holder']}")
+        if clear_hint(d):
+            lines.append(clear_hint(d))
     if d.get("workdir"):
         lines.append(f"workdir {d['workdir']}")
     if d.get("labels"):
@@ -270,6 +293,10 @@ def _card_kwargs(title, body, labels, priority, after, workdir, tier, harness, m
         raise ValueError("--verify gates agent cards; a --cmd card already settles by its exit code")
     if verify is not None and not str(verify).strip():
         verify = None
+    if manual and os.environ.get("AB_TASK") and not (labels or {}).get("owner") \
+            and not re.search(r"@\w|owner|releas|un-?hold|--auto", body or "", re.I):
+        raise ValueError("a card held by its own creator needs a releasing actor: add -l owner=NAME, or say in the body who clears it "
+                         "(clear with: ab edit ID --auto)")
     if (labels or {}).get("kind") == "decision" and cmd is None:
         manual = True  # a decision waits for a person's answer; an agent run can only fail it
     return dict(title=title, body=body, channel=channel, labels=labels, priority=priority,
@@ -718,16 +745,19 @@ def cmd_edit(c, a, out):
         f["not_before"] = parse_time(a.after) if a.after else None
     if a.timeout is not None:
         f["timeout_s"] = parse_dur(a.timeout) if a.timeout else None
-    if a.manual:
+    if a.manual or a.runnable == "off":
         f["runnable"] = 0
-    if a.auto:
+        if a.runnable == "off" and not a.manual:
+            a.label = [*(a.label or []), "hold=runnable_off"]  # named hold: listed by `ls --stuck`, cleared by --auto
+    if a.auto or a.runnable == "on":
         f["runnable"] = 1
     if a.harness == "":
         f["model"] = None
     labels = {}
     for it in a.label or []:
-        k, _, v = it.partition("=")
-        labels[k] = v
+        if "=" not in it:
+            raise ValueError(f"expected key=value or key=, got {it!r}")
+        labels.update(split_labels(it))
     check_harness_pin(f.get("harness"))
 
     def tid_of(x):
@@ -1722,7 +1752,7 @@ def build_parser():
     s.add_argument("--tier", "-t", help="intelligence tier (see `ab tiers`)")
     s.add_argument("--harness", help="pin a harness (skips tier routing); HARNESS@ENDPOINT or hermes/PROVIDER pins where it runs")
     s.add_argument("--model", help="pin a model (with --harness)")
-    s.add_argument("--manual", action="store_true", help="runner won't start it; an agent claims it by hand")
+    s.add_argument("--manual", action="store_true", help="create the card HELD (runnable=False, hold manual:<you>): the runner won't start it; an agent claims it by hand. Release it with: ab edit ID --auto (or --runnable on). Name who releases it: -l owner=NAME or say so in the body")
     s.add_argument("--max-attempts", type=int, default=3)
     s.add_argument("--timeout", help="per-run wall clock, e.g. 45m")
     s.add_argument("--data", help="JSON (or @file)")
@@ -1843,8 +1873,9 @@ def build_parser():
     s.add_argument("--label", "-l", action="append", help="key=value, or key= to remove")
     s.add_argument("--dep", action="append")
     s.add_argument("--rm-dep", action="append")
-    s.add_argument("--manual", action="store_true")
-    s.add_argument("--auto", action="store_true")
+    s.add_argument("--manual", action="store_true", help="hold the card: the runner won't start it")
+    s.add_argument("--auto", action="store_true", help="clear a hold (opposite of --manual): the card becomes runnable")
+    s.add_argument("--runnable", choices=("on", "off"), help="on = same as --auto (clear the hold), off = same as --manual")
     s.add_argument("--move-to", help="move the task to another board")
 
     s = sub("log", cmd_log, "event log (all, or one task)")

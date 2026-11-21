@@ -752,6 +752,10 @@ class Runner:
         note = None
         if not paused and not draining:
             note = self.fill(slots)
+            try:
+                store.record_holds(c, self.waiting, self.busy_dirs())
+            except Exception as e:
+                self.log(f"hold scan error: {e!r}")
         self.heartbeat(state, slots, note if note else ("schedule window" if windowed else None))
         return False
 

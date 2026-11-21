@@ -544,6 +544,7 @@ def task_dict(conn, row, full=False):
     d["kind"] = d.get("kind") or ("cmd" if d.get("cmd") else "agent")
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
+    d["hold"] = current_hold(conn, d["id"]) if d["status"] == "open" else None
     d["runs"] = conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=?", (d["id"],)).fetchone()[0]  # run count; `show` swaps in the list below
     if full:
         d["notes"] = thread_messages(conn, d["id"])
@@ -999,6 +1000,92 @@ def workdir_wait_reason(conn, task, held=None):
     if not want_worktree(conn, lb):
         return "workdir busy (auto worktree off)"
     return None
+
+
+HOLD_REFRESH_S = 300
+DELIBERATE_HOLDS = ("manual", "needs_admin")
+
+
+def hold_reason(conn, row, waiting=None, held=None):
+    """Machine reason why an open card is not being launched, or None. Diagnostic only: never changes eligibility."""
+    lb = json.loads(row["labels"] or "{}")
+    if not row["runnable"]:
+        if lb.get("hold") in DELIBERATE_HOLDS:
+            return None
+        if lb.get("hold"):
+            return None  # a named hold (retry_backoff, reopen, ...) already explains itself
+        return f"runnable_flag_zero:{row['created_by'] or 'unknown'}"
+    if row["not_before"] and row["not_before"] > now():
+        return "not_before_future"
+    if conn.execute("SELECT 1 FROM deps x LEFT JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=? AND (p.status IS NULL OR p.status!='done') LIMIT 1",
+                    (row["id"],)).fetchone():
+        return "deps_pending"
+    wd = row["workdir"]
+    if wd and not Path(os.path.expanduser(wd)).is_dir():
+        return "workdir_missing"
+    if wd and not lockfree(conn, lb):
+        nd = norm_dir(wd)
+        for o in conn.execute("SELECT workdir, labels FROM tasks WHERE status='claimed' AND id!=?", (row["id"],)):
+            olb = json.loads(o["labels"] or "{}")
+            for d in filter(None, [olb.get("worktree_dir"), None if olb.get("worktree_dir") or lockfree(conn, olb) else o["workdir"]]):
+                dd = norm_dir(d)
+                if nd == dd or nd.startswith(dd.rstrip("/") + "/"):
+                    return f"workdir_locked:{dd}"
+        if held and nd in held:
+            return f"workdir_locked:{nd}"
+    w = (waiting or {}).get(row["id"]) or ""
+    if "tier has no candidates" in w:
+        return "no_tier_bucket"
+    if "not installed" in w:
+        return "no_harness"
+    return None
+
+
+def current_hold(conn, tid):
+    """{'reason', 'since', 'last'} when the newest hold/hold_cleared event of the card is a hold, else None."""
+    rows = conn.execute("SELECT ts, kind, payload FROM events WHERE task_id=? AND kind IN ('hold','hold_cleared') ORDER BY id DESC LIMIT 50",
+                        (tid,)).fetchall()
+    if not rows or rows[0]["kind"] != "hold":
+        return None
+    reason = json.loads(rows[0]["payload"] or "{}").get("reason")
+    since = rows[0]["ts"]
+    for r in rows[1:]:
+        if r["kind"] != "hold" or json.loads(r["payload"] or "{}").get("reason") != reason:
+            break
+        since = r["ts"]
+    return {"reason": reason, "since": since, "last": rows[0]["ts"]}
+
+
+def record_holds(conn, waiting=None, held=None):
+    """One `hold` event per card+reason (refreshed at most every HOLD_REFRESH_S), `hold_cleared` when the cause is gone."""
+    t = now()
+    seen = set()
+    rows = conn.execute("SELECT t.* FROM tasks t JOIN boards b ON b.name=t.board WHERE t.status='open' AND b.paused=0 AND "
+                        "(t.park IS NULL OR json_extract(t.park,'$.woken_at') IS NOT NULL)").fetchall()
+    for r in rows:
+        why = hold_reason(conn, r, waiting, held)
+        if not why:
+            continue
+        seen.add(r["id"])
+        cur = current_hold(conn, r["id"])
+        if cur and cur["reason"] == why and t - cur["last"] < HOLD_REFRESH_S:
+            continue
+        text = {"workdir_missing": "workdir does not exist", "no_tier_bucket": "no candidate harness/bucket for the card's tier",
+                "no_harness": "no installed harness for the card", "deps_pending": "dependencies not done",
+                "not_before_future": "not_before is in the future"}.get(why.split(":")[0])
+        if text is None:
+            text = ("workdir overlaps a claimed card's checkout: " if why.startswith("workdir_locked") else
+                    "runnable flag is 0 with no named hold, set by ") + why.split(":", 1)[1]
+        with tx(conn):
+            event(conn, r["id"], "runner", "hold", {"reason": why, "why": text})
+    for r in conn.execute("SELECT id FROM tasks WHERE status IN ('open','claimed')").fetchall():
+        tid = r["id"]
+        if tid in seen:
+            continue
+        cur = current_hold(conn, tid)
+        if cur:
+            with tx(conn):
+                event(conn, tid, "runner", "hold_cleared", {"reason": cur["reason"], "since": cur["since"]})
 
 
 def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD):

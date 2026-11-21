@@ -70,7 +70,7 @@ def hold_txt(d, always=False):
     """' (hold=X)' when the card is not runnable (the stored reason), '' otherwise."""
     if d.get("runnable"):
         return ""
-    return f" (hold={(d.get('labels') or {}).get('hold') or 'unknown'})"
+    return f" (hold={(d.get('labels') or {}).get('hold') or (d.get('hold') or {}).get('reason') or 'unknown'})"
 
 
 def tline(d):
@@ -104,6 +104,8 @@ def show_text(d):
              f"created {fmt_ts(d['created_at'])} by {d['created_by']}, updated {fmt_ts(d['updated_at'])}"
              + (f", owner {d['owner']} lease until {fmt_ts(d['lease_until'])}" if d.get("owner") else "")
              + (f", not before {fmt_ts(d['not_before'])}" if d.get("not_before") else "")]
+    if d.get("hold"):
+        lines.append(f"hold={d['hold']['reason']} since {fmt_ts(d['hold']['since'])}")
     if d.get("workdir"):
         lines.append(f"workdir {d['workdir']}")
     if d.get("labels"):
@@ -362,7 +364,8 @@ def cmd_ls(c, a, out):
     bsel = None if a.all_boards else board_of(a)
     if a.stuck:
         rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=100000, board=bsel)
-                if not r["runnable"] and json.loads(r["labels"] or "{}").get("hold") not in ("manual", "needs_admin")]
+                if (not r["runnable"] and json.loads(r["labels"] or "{}").get("hold") not in ("manual", "needs_admin"))
+                or store.current_hold(c, r["id"])]
         total = len(rows)
         rows = rows[:a.limit]
     elif a.ready:
@@ -397,7 +400,16 @@ def cmd_ls(c, a, out):
             why = store.workdir_wait_reason(c, d, held)
             if why:
                 d["wait_reason"] = why
-    out(items, lambda xs: "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)")
+    def ls_text(xs):
+        text = "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)"
+        if a.stuck and xs:
+            counts = {}
+            for x in xs:
+                r = (x.get("hold") or {}).get("reason") or (x.get("labels") or {}).get("hold") or "unknown"
+                counts[r] = counts.get(r, 0) + 1
+            text += "\nholds by reason:\n" + "\n".join(f"  {r}: {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        return text
+    out(items, ls_text)
     if a.limit and total > a.limit:
         more = "+" if a.ready else ""
         print(f"ab ls: showing {a.limit} of {total}{more} (add --limit N for more)", file=sys.stderr)

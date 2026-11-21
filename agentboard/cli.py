@@ -486,7 +486,7 @@ def cmd_request_reload(c, a, out):
         if tid not in cur:
             cur.append(tid)
         store.cfg_set(c, "reload_after", cur, actor_of(a))
-    out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done")
+    out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done" + ("" if len(cur) == 1 else f" (queued: {', '.join(cur)})"))
 
 
 def dirty_files(c, tid, skipped=None):
@@ -972,7 +972,12 @@ def cmd_runner(c, a, out):
     act = a.action or "status"
     actor = actor_of(a)
     if act != "status":
-        admin(c, a)
+        try:
+            admin(c, a)
+        except PermissionError as e:
+            if act == "reload":
+                raise PermissionError(f"{str(e).strip(chr(39)+chr(34))}\nreload needs elevated grants; queue it with: ab request-reload [ID]  (runs once that card is done)") from None
+            raise
     if act == "run":
         log = None
         R.Runner(c, log).run()

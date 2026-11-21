@@ -406,6 +406,10 @@ def cmd_claim(c, a, out):
     if not tid:
         out({"task": None, "why": why}, f"nothing claimed: {why}")
         return 3
+    try:
+        dirty_snapshot(c, tid)
+    except Exception:
+        pass
     out(store.task_dict(c, store.get_task(c, tid), full=True), show_text)
 
 
@@ -489,6 +493,36 @@ def cmd_request_reload(c, a, out):
     out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done" + ("" if len(cur) == 1 else f" (queued: {', '.join(cur)})"))
 
 
+def _porcelain_path(ln):
+    return ln[3:].split(" -> ")[-1].strip().strip('"')
+
+
+def _hash_path(d, path):
+    import subprocess
+    fp = os.path.join(d, path)
+    if not os.path.isfile(fp):
+        return "-"
+    p = subprocess.run(["git", "-C", d, "hash-object", "--", path], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else "-"
+
+
+def dirty_snapshot(c, tid):
+    """At claim time record {path: hash} of the checkout's dirty files (shared checkout only), so `ab done` can tell what this task changed."""
+    import subprocess
+    row = store.get_task(c, tid)
+    d = os.environ.get("AB_WORKDIR", "")
+    if row is None or not d or not os.path.isdir(d) or (json.loads(row["labels"] or "{}")).get("worktree_dir"):
+        return
+    p = subprocess.run(["git", "-C", d, "status", "--porcelain", "-uall"], capture_output=True, text=True)
+    if p.returncode != 0:
+        return
+    files = {}
+    for ln in p.stdout.splitlines():
+        if ln.strip():
+            files[_porcelain_path(ln)] = _hash_path(d, _porcelain_path(ln))
+    store.event(c, tid, row["owner"] or "", "dirty_snapshot", {"files": files})
+
+
 def dirty_files(c, tid, skipped=None):
     """Untracked or modified (non-ignored) files this task is answerable for: in its own worktree (labels.worktree_dir) all of them;
     in a shared checkout ($AB_WORKDIR) only paths touched since the task was last claimed, the rest are appended to `skipped`. [] if none or not git."""
@@ -508,13 +542,27 @@ def dirty_files(c, tid, skipped=None):
     ev = c.execute("SELECT MAX(ts) FROM events WHERE task_id=? AND kind='claimed'", (tid,)).fetchone()[0]
     if ev is None:
         return lines
+    snap = None
+    sr = c.execute("SELECT payload FROM events WHERE task_id=? AND kind='dirty_snapshot' AND ts>=? ORDER BY id DESC LIMIT 1", (tid, ev)).fetchone()
+    if sr and sr[0]:
+        snap = (json.loads(sr[0]) or {}).get("files") or {}
+    concurrent = False
+    if snap is not None:  # another card's claim overlapping this one: a path new since claim cannot be attributed
+        concurrent = c.execute("SELECT 1 FROM events e JOIN tasks t ON t.id=e.task_id WHERE e.kind='claimed' AND e.task_id!=? AND e.actor!=? "
+                               "AND (e.ts>=? OR t.status='claimed') LIMIT 1", (tid, row["owner"] or "", ev)).fetchone() is not None
     mine = []
     for ln in lines:
-        path = ln[3:].split(" -> ")[-1].strip().strip('"')
-        try:
-            touched = os.stat(os.path.join(d, path)).st_mtime >= ev
-        except OSError:
-            touched = False  # deleted: cannot be attributed in a shared checkout
+        path = _porcelain_path(ln)
+        if snap is not None:
+            if path in snap:
+                touched = _hash_path(d, path) != snap[path]
+            else:
+                touched = not concurrent
+        else:
+            try:
+                touched = os.stat(os.path.join(d, path)).st_mtime >= ev
+            except OSError:
+                touched = False  # deleted: cannot be attributed in a shared checkout
         (mine if touched else (skipped if skipped is not None else [])).append(ln)
     return mine
 

@@ -207,6 +207,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE tasks ADD COLUMN park TEXT")
     if "cmd" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN cmd TEXT")
+    if "kind" not in _cols(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT")
     if "key" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN key TEXT")
     if "verify" not in _cols(conn, "tasks"):
@@ -538,7 +540,7 @@ def task_dict(conn, row, full=False):
     d["labels"] = json.loads(d.get("labels") or "{}")
     d["data"] = json.loads(d["data"]) if d.get("data") else None
     d["park"] = json.loads(d["park"]) if d.get("park") else None
-    d["kind"] = "cmd" if d.get("cmd") else "agent"
+    d["kind"] = d.get("kind") or ("cmd" if d.get("cmd") else "agent")
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
     if full:
@@ -673,10 +675,10 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
         t = now()
         conn.execute(
             "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
-            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key,verify) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key,verify,kind) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
              workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
-             json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None, verify or None))
+             json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None, verify or None, "cmd" if cmd else "agent"))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
         event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
@@ -805,6 +807,18 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
         event(conn, row["id"], actor, "escalated", {"from": row["tier"] or cfg(conn, "default_tier"), "to": up})
     event(conn, row["id"], actor, kind, {"why": why, "attempts": attempts, "retry_at": nb})
     return "open"
+
+
+def refuse_unknown_kind(conn, row, known, actor="runner"):
+    """A card whose kind this runner does not understand is never launched (a fallback would run it as a model):
+    mark it dead with the kind named, no run row, and tell the thread. Retrying cannot help until the runner is reloaded."""
+    why = (f"unknown card kind {row['kind']!r}: this runner understands {sorted(known)}; "
+           f"reload the runner (ab runner reload), then ab retry {row['id']}")
+    conn.execute("UPDATE tasks SET status='dead', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
+                 (why, now(), row["id"]))
+    event(conn, row["id"], actor, "dead", {"why": why, "after": "unknown_kind", "kind": row["kind"]})
+    post_message(conn, actor, "Refused, not run: " + why, thread=row["id"], check=False, _in_tx=True)
+    return why
 
 
 def reap(conn):

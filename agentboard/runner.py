@@ -1060,7 +1060,12 @@ class Runner:
             brief = (f"ENVIRONMENT NOTE: your shell tools do NOT inherit the run's AB_* variables here. Set them in every shell "
                      f"command that calls `ab`: export AB_HOME={shlex.quote(str(store.HOME))} AB_TASK={task['id']} "
                      f"AB_ACTOR={shlex.quote(owner)} AB_RUN={run_id} AB_BOARD={shlex.quote(cur['board'])}\n\n") + brief
-        extra = H.extra_args_for(c, cand) + H.allowlist_args(json.loads(cur["labels"] or "{}"), cand.harness)
+        extra_base, arg_warns = H.extra_args_resolved(c, cand)
+        if arg_warns:
+            with tx(c):
+                for w in arg_warns:
+                    event(c, task["id"], "runner", "launch_warning", {"run": run_id, "warning": w})
+        extra = extra_base + H.allowlist_args(json.loads(cur["labels"] or "{}"), cand.harness)
         try:
             ep = H.get_endpoint(c, cand.endpoint) if cand.endpoint else None
             cmd, xenv = a.build(brief, cand, ep, extra)

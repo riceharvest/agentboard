@@ -97,3 +97,55 @@ def test_single_settings_untouched(tmp_path):
     store.cfg_set(conn, "extra_args", {"claude": ["--settings", "{ \"a\": 1 }"]})
     c = next(c for c in _cands(conn, "medium")[0] if c.harness == "claude")
     assert H.extra_args_for(conn, c) == ["--settings", "{ \"a\": 1 }"]
+
+
+def _claude(conn, tier="medium"):
+    return next(c for c in _cands(conn, tier)[0] if c.harness == "claude")
+
+
+def test_collision_settings_merge_one_flag(tmp_path):
+    import json
+    conn = _conn(tmp_path)
+    store.cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps({"base_only": 1, "both": "b"})]})
+    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps({"both": "t", "tier_only": 2})]}})
+    cmd, _ = _cmd(conn, _claude(conn))
+    assert cmd.count("--settings") == 1
+    d = json.loads(cmd[cmd.index("--settings") + 1])
+    assert d == {"base_only": 1, "both": "t", "tier_only": 2}
+    assert H.extra_args_resolved(conn, _claude(conn))[1] == []
+
+
+def test_collision_boolean_flag_keeps_base_and_warns(tmp_path):
+    conn = _conn(tmp_path)
+    store.cfg_set(conn, "extra_args", {"claude": ["--lean"]})
+    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--lean", "--m"]}})
+    args, warns = H.extra_args_resolved(conn, _claude(conn))
+    assert args == ["--lean", "--m"] and args.count("--lean") == 1
+    assert len(warns) == 1 and all(x in warns[0] for x in ("claude", "medium", "--lean"))
+    store.cfg_set(conn, "extra_args", {"claude": ["--k", "base"]})
+    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--k", "tier"]}})
+    args, warns = H.extra_args_resolved(conn, _claude(conn))
+    assert args == ["--k", "base"] and "'base'" in warns[0] and "'tier'" in warns[0]
+
+
+def test_no_collision_unchanged_no_warning(tmp_path):
+    conn = _conn(tmp_path)
+    store.cfg_set(conn, "extra_args", {"claude": ["--g", "1"]})
+    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--m"]}})
+    args, warns = H.extra_args_resolved(conn, _claude(conn))
+    assert args == ["--g", "1", "--m"] and warns == []
+
+
+def test_config_show_warnings_section_and_set_time(abx):
+    abx("init")
+    abx("config", "set", "extra_args", '{"claude": ["--lean"]}', env={"AB_ACTOR": "admin"})
+    _, out, _ = abx("config", "show")
+    assert "warnings" not in out
+    rc, out, err = abx("config", "set", "extra_args_tier", '{"low": {"claude": ["--lean"]}}')
+    print(rc, out, err)
+    assert "warning" in out and "--lean" in out
+    _, out, _ = abx("config", "show")
+    assert "warnings = " in out and "--lean" in out
+    abx("config", "set", "extra_args_tier", '{"low": {"claude": ["--other"]}}')
+    _, out, _ = abx("config", "show")
+    assert "warnings" not in out

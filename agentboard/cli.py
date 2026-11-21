@@ -1312,7 +1312,10 @@ def cmd_config(c, a, out):
         val = store.coerce(a.value)
         with store.tx(c):
             store.cfg_set(c, a.key, val, actor_of(a))
-        out({a.key: val}, f"{a.key} = {json.dumps(val)}")
+        warns = H.config_arg_warnings(store.cfg(c, "extra_args"), store.cfg(c, "extra_args_tier")) \
+            if a.key in ("extra_args", "extra_args_tier") else []
+        res = {a.key: val, **({"warnings": warns} if warns else {})}
+        out(res, f"{a.key} = {json.dumps(val)}" + "".join(f"\nwarning: {w}" for w in warns))
     elif act == "unset":
         with store.tx(c):
             store.cfg_unset(c, a.key, actor_of(a))
@@ -1321,6 +1324,9 @@ def cmd_config(c, a, out):
         out({a.key: store.cfg(c, a.key)}, json.dumps(store.cfg(c, a.key)))
     else:
         allc = {k: v for k, v in store.cfg_all(c).items() if not k.startswith("_")}
+        warns = H.config_arg_warnings(allc.get("extra_args"), allc.get("extra_args_tier"))
+        if warns:
+            allc["warnings"] = warns
         out(allc, lambda d: "\n".join(f"{k} = {json.dumps(v)}" for k, v in d.items()))
 
 
@@ -2004,8 +2010,8 @@ def build_parser():
     s.add_argument("--slots", type=int)
     s.add_argument("--do", help="pause|resume|drain|stop|slots=N|set:key=value")
 
-    s = sub("config", cmd_config, "runtime settings: ls | get KEY | set KEY VALUE | unset KEY")
-    s.add_argument("action", nargs="?", choices=["ls", "get", "set", "unset"])
+    s = sub("config", cmd_config, "runtime settings: ls | show | get KEY | set KEY VALUE | unset KEY")
+    s.add_argument("action", nargs="?", choices=["ls", "show", "get", "set", "unset"])
     s.add_argument("key", nargs="?")
     s.add_argument("value", nargs="?")
 

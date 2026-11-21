@@ -1744,13 +1744,81 @@ def allowlist_args(labels, harness):
     return out
 
 
-def extra_args_for(conn, cand):
-    """CLI args appended to a launch: `extra_args[harness]` first, then `extra_args_tier[tier][harness]` for the tier
-    the candidate's entry sits in (a fallback entry uses ITS tier, not the card's). Both empty by default -> []."""
-    out = list((store.cfg(conn, "extra_args") or {}).get(cand.harness) or [])
+def _flag_groups(args):
+    """Split an argv fragment into [(flag, tokens, value)] groups: `--f v`, `--f=v`, `--f` (value None) and bare leading
+    tokens (flag None). A token after a flag that does not start with `-` is that flag's value."""
+    groups, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if isinstance(a, str) and a.startswith("--") and len(a) > 2:
+            if "=" in a:
+                f, v = a.split("=", 1)
+                groups.append((f, [a], v))
+                i += 1
+            elif i + 1 < len(args) and not (isinstance(args[i + 1], str) and args[i + 1].startswith("-")):
+                groups.append((a, [a, args[i + 1]], args[i + 1]))
+                i += 2
+            else:
+                groups.append((a, [a], None))
+                i += 1
+        else:
+            groups.append((None, [a], None))
+            i += 1
+    return groups
+
+
+def resolve_args(harness, tier, base, tier_args):
+    """base then tier args -> (argv, warnings). A flag in both: `--settings` objects deep-merge (tier wins per key, one
+    `--settings JSON` at the base's position); any other flag keeps the base value, drops the tier copy, and warns naming
+    harness, tier, flag and both values. No collision -> plain concatenation."""
+    base, tier_args = list(base or []), list(tier_args or [])
+    bg, tg = _flag_groups(base), _flag_groups(tier_args)
+    bflags = {f: v for f, _, v in bg if f}
+    warnings, keep = [], []
+    merged = {}
+    for f, toks, v in tg:
+        if f and f in bflags:
+            if f == "--settings":
+                bo, to = _settings_obj(bflags[f]), _settings_obj(v)
+                if bo is not None and to is not None:
+                    merged[f] = _merge_settings(bo, to)
+                    continue
+            warnings.append(f"{harness} tier {tier}: flag {f} is set in both extra_args ({bflags[f]!r}) and extra_args_tier "
+                            f"({v!r}); keeping the extra_args value, dropping the tier one")
+            continue
+        keep += toks
+    out = []
+    for f, toks, v in bg:
+        if f in merged:
+            out += ["--settings", json.dumps(merged.pop(f), separators=(",", ":"))]
+        else:
+            out += toks
+    return out + keep, warnings
+
+
+def extra_args_resolved(conn, cand):
+    """(argv, warnings) for a candidate: `extra_args[harness]` then `extra_args_tier[tier][harness]` (a fallback entry uses
+    ITS tier), collisions resolved by resolve_args."""
+    base = list((store.cfg(conn, "extra_args") or {}).get(cand.harness) or [])
+    tier = []
     if cand.tier:
-        out += list(((store.cfg(conn, "extra_args_tier") or {}).get(cand.tier) or {}).get(cand.harness) or [])
-    return merge_settings_args(out) if cand.harness == "claude" else out
+        tier = list(((store.cfg(conn, "extra_args_tier") or {}).get(cand.tier) or {}).get(cand.harness) or [])
+    out, warns = resolve_args(cand.harness, cand.tier, base, tier)
+    return (merge_settings_args(out) if cand.harness == "claude" else out), warns
+
+
+def extra_args_for(conn, cand):
+    """CLI args appended to a launch (see extra_args_resolved). Both sources empty by default -> []."""
+    return extra_args_resolved(conn, cand)[0]
+
+
+def config_arg_warnings(extra_args, extra_args_tier):
+    """Collisions between extra_args and extra_args_tier in a config (given as the two dicts), as warning strings."""
+    out = []
+    for tier, per in sorted((extra_args_tier or {}).items()):
+        for harness, targs in sorted((per or {}).items()):
+            out += resolve_args(harness, tier, (extra_args or {}).get(harness), targs)[1]
+    return out
 
 
 def _settings_obj(val):

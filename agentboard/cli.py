@@ -590,6 +590,15 @@ def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
     tid0 = a.id or os.environ.get("AB_TASK", "")
     note = ""
+    row = store.get_task(c, tid0) if tid0 else None
+    toks = store.verdict_tokens(c, row["board"] if row else board_of(a))
+    if toks and not a.force:
+        if a.no_verdict_check:
+            store.event(c, tid0, actor_of(a), "message", {"body": "verdict check bypassed (--no-verdict-check)"})
+        elif not store.verdict_ok(text, toks):
+            raise ValueError(f"{tid0}: the result must START with a verdict token; allowed: {', '.join(toks)}. "
+                             f"Got: {text[:80]!r}. Retry with the token first (e.g. '{toks[0]}: ...'), or pass --no-verdict-check "
+                             f"(records a note), or give up with `ab fail`. The card stays claimed.")
     if a.allow_dirty and not a.force:
         dirty = dirty_files(c, tid0)
         if dirty:
@@ -1212,7 +1221,7 @@ def cmd_config(c, a, out):
     if act in ("set", "unset"):
         admin(c, a)
     if act == "set":
-        if a.key not in store.DEFAULTS and not a.key.startswith("cooldown."):
+        if a.key not in store.DEFAULTS and not a.key.startswith(("cooldown.", "verdict_tokens.")):
             raise ValueError(f"unknown key {a.key!r}; see `ab config ls`")
         val = store.coerce(a.value)
         with store.tx(c):
@@ -1740,6 +1749,7 @@ def build_parser():
     s.add_argument("--data")
     s.add_argument("--force", action="store_true")
     s.add_argument("--allow-dirty", action="store_true", help="close even if the worktree has untracked or modified files")
+    s.add_argument("--no-verdict-check", action="store_true", help="skip the board's verdict_tokens check (records a note)")
 
     s = sub("fail", cmd_fail, "give up this attempt (task retries until max attempts, then dead)")
     s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")

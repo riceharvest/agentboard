@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab done` can enforce a board's verdict vocabulary: `ab config set verdict_tokens GO,NO-GO` (or `verdict_tokens.BOARD`); a result whose first token is not listed is refused and the card stays claimed. `--no-verdict-check` bypasses it (noted). Unset = no check.
+
 - Runner no longer double-dispatches a card whose previous run is still alive (`fill`/`spawn` skip it), and `tick` renews a live child's lease before `reap`, so a slow tick cannot re-open the card, burn an attempt and get the first run killed as "expired" (exit 143). Runner change: `ab runner reload` needed.
 
 - Hermes gateway death mid-turn ("Gateway disconnected; turn outcome is unknown") no longer fails the run and burns an attempt: the runner requeues the card (run outcome `gateway_lost`, session id noted in the thread), up to 3 times per card, then falls back to a normal failure. Runner change: `ab runner reload`.

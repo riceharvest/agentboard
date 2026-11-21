@@ -104,6 +104,7 @@ DEFAULTS = {
     "release_loop_minutes": "3",  # what counts as a short run for the rule above
     "release_loop_backoff": "10m",  # first backoff; doubles with every further short released run, capped at release_loop_max
     "release_loop_max": "6h",
+    "verdict_tokens": None,     # comma list (or JSON list): `ab done` must start its result with one of these tokens (unset = no check); verdict_tokens.BOARD overrides per board
     "verify_timeout": "10m",    # a verify command running longer than this counts as a failure
     "backoff": "2m",            # wait before retrying a failed task (times attempt number)
     "require_free.opencode": True,  # opencode only on :free / -free models
@@ -1452,3 +1453,32 @@ def park_replies(conn, spec):
     (not the parking agent itself, not the runner)."""
     return conn.execute("SELECT * FROM messages WHERE thread=? AND id>? AND author NOT IN (?, 'runner') ORDER BY id",
                         (spec["reply_thread"], spec.get("reply_after") or 0, spec.get("reply_by") or "")).fetchall()
+
+
+def verdict_tokens(conn, board=None):
+    """Allowed leading result tokens for a board (uppercased list), or [] when no check is configured."""
+    v = None
+    if board:
+        v = cfg(conn, f"verdict_tokens.{board}")
+    if v in (None, "", []):
+        v = cfg(conn, "verdict_tokens")
+    if v is None or v is False:
+        return []
+    if isinstance(v, str):
+        v = v.split(",")
+    return [str(x).strip().upper() for x in v if str(x).strip()]
+
+
+_VERDICT_STRIP = " \t\r\n#>`*_"
+
+
+def verdict_first_token(text):
+    """First token of a result after leading whitespace/markup, uppercased; split on whitespace, ':' and '|'."""
+    t = (text or "").lstrip(_VERDICT_STRIP)
+    m = re.match(r"[^\s:|]+", t)
+    tok = m.group(0) if m else ""
+    return tok.rstrip("*`_.,;!)").upper()
+
+
+def verdict_ok(text, tokens):
+    return not tokens or verdict_first_token(text) in tokens

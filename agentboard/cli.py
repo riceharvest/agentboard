@@ -80,8 +80,9 @@ def tline(d):
         extra.append(d["wait_reason"])
     if d.get("deps"):
         extra.append("deps " + ",".join(d["deps"]))
-    if d.get("attempts"):
-        extra.append(f"try {d['attempts']}/{d['max_attempts']}")
+    n = d["runs"] if isinstance(d.get("runs"), int) else len(d.get("runs") or [])
+    if d.get("attempts") or n:
+        extra.append(f"runs={n} try {d['attempts']}/{d['max_attempts']}")
     return (f"{d['id']}  {d['state']:<9} p{d['priority']:<3} {'cmd' if d.get('cmd') else d['tier']:<6} {d['channel']:<12} {d['title'][:70]}"
             + (f"  [{lab}]" if lab else "") + (f"  ({'; '.join(extra)})" if extra else ""))
 
@@ -90,7 +91,7 @@ def show_text(d):
     lines = [f"{d['id']}  {d['title']}",
              f"state={d['state']} status={d['status']} board={d['board']} channel={d['channel']} priority={d['priority']} tier={d['tier']}"
              + (f" pin={d['harness']}:{d.get('model') or ''}" if d.get("harness") else "") + (" kind=cmd" if d.get("cmd") else "")
-             + f" attempts={d['attempts']}/{d['max_attempts']} runnable={bool(d['runnable'])}",
+             + f" runs={len(d.get('runs') or [])} attempts={d['attempts']}/{d['max_attempts']} runnable={bool(d['runnable'])}",
              f"created {fmt_ts(d['created_at'])} by {d['created_by']}, updated {fmt_ts(d['updated_at'])}"
              + (f", owner {d['owner']} lease until {fmt_ts(d['lease_until'])}" if d.get("owner") else "")
              + (f", not before {fmt_ts(d['not_before'])}" if d.get("not_before") else "")]

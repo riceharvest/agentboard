@@ -295,6 +295,59 @@ fn task_line(t: &Task, w: usize, selected: bool, focused: bool) -> Line<'static>
     Line::from(spans)
 }
 
+fn dep_title(app: &App, id: &str) -> String {
+    app.task(id).map(|x| x.title.clone()).unwrap_or_else(|| id.chars().skip(2).take(4).collect::<String>())
+}
+
+/// What a card is itself waiting on, in a few words (used for the second card in a wait chain).
+fn why_short(app: &App, t: &Task) -> String {
+    match t.state.as_str() {
+        "running" | "claimed" => match t.park.as_ref().filter(|p| p.active()) {
+            Some(p) => format!("running as {}", p.what()),
+            None => "running now".into(),
+        },
+        "ready" => t.wait_reason.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "ready, queued".into()),
+        "stuck" => "a dependency is dead".into(),
+        "dead" | "cancelled" => "dead".into(),
+        "waiting" => {
+            if !t.deps_open.is_empty() {
+                format!("waits on {}", t.deps_open.iter().map(|d| dep_title(app, d)).collect::<Vec<_>>().join(" · "))
+            } else if let Some(nb) = t.not_before {
+                format!("starts in {}", fmt_dur((nb - app.now()).max(0.0)))
+            } else {
+                "waiting".into()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Extra lines under a waiting card: each card it waits on, then what that card is itself waiting on.
+fn wait_chain(app: &App, t: &Task) -> Vec<String> {
+    fn walk(app: &App, t: &Task, depth: usize, seen: &mut Vec<String>, out: &mut Vec<String>) {
+        let ind = format!("  {}", "  ".repeat(depth));
+        for d in t.deps_open.iter().take(3) {
+            if seen.contains(d) {
+                continue;
+            }
+            seen.push(d.clone());
+            let Some(dt) = app.task(d) else {
+                out.push(format!("{ind}{} {}", if depth == 0 { "↳ waits on" } else { "⤷ waits on" }, dep_title(app, d)));
+                continue;
+            };
+            out.push(format!("{ind}{} {}", if depth == 0 { "↳ waits on" } else { "⤷ waits on" }, dt.title));
+            if !dt.deps_open.is_empty() && depth < 2 {
+                walk(app, dt, depth + 1, seen, out);
+            } else {
+                out.push(format!("{ind}  ⤷ {}", why_short(app, dt)));
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(app, t, 0, &mut vec![t.id.clone()], &mut out);
+    out
+}
+
 fn second_line(app: &App, t: &Task) -> Option<String> {
     if t.state == "stuck" {
         return Some("  ✖ a dependency is dead".into());
@@ -309,7 +362,7 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
             return Some(format!("  ⏸ parked on {}", p.what()));
         }
         if !t.deps_open.is_empty() {
-            return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| app.task(d).map(|x| x.title.clone()).unwrap_or_else(|| d.chars().skip(2).take(4).collect::<String>())).collect::<Vec<_>>().join(" · ")));
+            return Some(format!("  ↳ waits on {}", t.deps_open.iter().map(|d| dep_title(app, d)).collect::<Vec<_>>().join(" · ")));
         }
         if let Some(nb) = t.not_before {
             return Some(format!("  ↳ starts in {}", fmt_dur(nb - app.now())));
@@ -416,19 +469,25 @@ fn board(app: &mut App, f: &mut Frame, area: Rect) {
             recorded.push((t.id.clone(), rect));
             hits.push((rect, Hit::Lane(li, i)));
             y += 1;
-            if let Some(extra) = second_line(app, t) {
-                if y < inner.bottom() {
-                    let dead = (t.state == "dead" && !t.is_negative()) || t.state == "stuck";
-                    let st = if dead {
-                        fg(theme::BAD)
-                    } else if t.state == "ready" && t.wait_reason.as_deref().is_some_and(|s| !s.is_empty()) {
-                        fg(theme::WARN)
-                    } else {
-                        dim()
-                    };
-                    f.render_widget(Paragraph::new(sp(trunc(&extra, w), st)), Rect { x: inner.x, y, width: inner.width, height: 1 });
-                    y += 1;
+            let extras: Vec<String> = if t.state == "waiting" && !t.deps_open.is_empty() && t.park.as_ref().map_or(true, |p| !p.active()) {
+                wait_chain(app, t)
+            } else {
+                second_line(app, t).into_iter().collect()
+            };
+            let dead = (t.state == "dead" && !t.is_negative()) || t.state == "stuck";
+            let st = if dead {
+                fg(theme::BAD)
+            } else if t.state == "ready" && t.wait_reason.as_deref().is_some_and(|s| !s.is_empty()) {
+                fg(theme::WARN)
+            } else {
+                dim()
+            };
+            for extra in extras {
+                if y >= inner.bottom() {
+                    break;
                 }
+                f.render_widget(Paragraph::new(sp(trunc(&extra, w), st)), Rect { x: inner.x, y, width: inner.width, height: 1 });
+                y += 1;
             }
         }
         if tasks.is_empty() {

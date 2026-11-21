@@ -1662,7 +1662,7 @@ def build_parser():
     s.add_argument("--no-harvest", action="store_true")
 
     s = sub("outcomes", cmd_outcomes, "outcome ledger: runs, tokens, $ per accepted outcome and failure classes (read-only)")
-    s.add_argument("--since", help="e.g. 24h, 7d (runs started in that window)")
+    s.add_argument("--since", help="e.g. 24h, 7d (runs started in that window; first_run is the earliest run inside that window, so --since can move it)")
     s.add_argument("--by", default="label:type,harness,tier", help="comma list of label:NAME, harness, tier, model, board, bucket")
 
     s = sub("harvest", cmd_harvest, "read new usage from harness logs now")

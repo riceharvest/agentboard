@@ -10,6 +10,7 @@ accepted outcomes (failed attempts are what an accepted outcome really cost). On
 `usd_known_runs` says how many runs in the group had one, so a $ figure never hides missing data.
 """
 import json
+from datetime import datetime, timezone
 
 from . import store
 
@@ -57,9 +58,12 @@ def ledger(conn, since_s=None, by=DEFAULT_BY, t=None):
             if tgt:
                 bad_review.add(tgt)
     groups = {}
+    first_ts = None
     for r in runs:
         if r["started_at"] is not None and r["started_at"] < cutoff:
             continue
+        if r["started_at"] is not None and (first_ts is None or r["started_at"] < first_ts):
+            first_ts = r["started_at"]
         labels = json.loads(r["labels"] or "{}")
         row = dict(r)
         g = tuple(_key(k, row, labels) for k in keys)
@@ -115,7 +119,11 @@ def ledger(conn, since_s=None, by=DEFAULT_BY, t=None):
     tot["agent_h"] = round(tot["agent_h"], 2)
     tot["usd"] = round(tot["usd"], 2)
     tot["failures"] = {c: n for c, n in tot["failures"].items() if n}
-    return {"since_s": since_s, "by": keys, "generated_at": t, "totals": tot, "groups": rows}
+    first_run = datetime.fromtimestamp(first_ts, timezone.utc).isoformat(timespec="seconds") if first_ts is not None else None
+    tot["first_run"] = first_run
+    tot["runs_in_scope"] = tot["runs"]
+    return {"since_s": since_s, "by": keys, "generated_at": t, "first_run": first_run, "runs_in_scope": tot["runs"],
+            "totals": tot, "groups": rows}
 
 
 def _n(n):
@@ -138,4 +146,5 @@ def render(rep):
                  _n(t["tokens"]), f"{t['usd']:.2f}", "", "", " ".join(f"{c}={n}" for c, n in t["failures"].items())])
     w = [max(len(str(x[i])) for x in lines + [head]) for i in range(len(head) - 1)]
     fmt = lambda x: "  ".join(str(v).ljust(w[i]) for i, v in enumerate(x[:-1])) + "  " + x[-1]
-    return "\n".join([fmt(head)] + [fmt(x) for x in lines])
+    first = f"first run: {rep['first_run'] or '-'} ({rep['runs_in_scope']} runs in scope)"
+    return "\n".join([fmt(head)] + [fmt(x) for x in lines] + [first])

@@ -57,3 +57,23 @@ def test_cli_outcomes_json(abx):
     assert json.loads(out)["groups"] == []
     code, _, err = abx("outcomes", "--by", "nonsense")
     assert code != 0
+
+
+def test_first_run(tmp_path):
+    c = store.connect(tmp_path / "f.db")
+    rep = outcomes.ledger(c, t=T)
+    assert rep["first_run"] is None and rep["runs_in_scope"] == 0
+    assert "first run: -" in outcomes.render(rep)
+    a = _card(c, "a", "done", "x", {"type": "build"})
+    b = _card(c, "b", "done", "y", {"type": "build"})
+    c.execute("UPDATE tasks SET board='other' WHERE id=?", (b,))
+    _run(c, a, "claude", "low", "agent_done", start=T - 5 * 86400)
+    _run(c, b, "claude", "low", "agent_done", start=T - 2 * 86400)
+    _run(c, a, "claude", "low", "agent_done", start=T - 3600)
+    rep = outcomes.ledger(c, t=T)  # spans every board
+    assert rep["runs_in_scope"] == 3 and rep["totals"]["first_run"] == rep["first_run"]
+    assert rep["first_run"].startswith("1970-01-07")  # T-5d
+    # --since narrows the window: first_run is the earliest run INSIDE it
+    w = outcomes.ledger(c, since_s=3 * 86400, t=T)
+    assert w["runs_in_scope"] == 2 and w["first_run"].startswith("1970-01-10")
+    assert "first run: 1970-01-10" in outcomes.render(w)

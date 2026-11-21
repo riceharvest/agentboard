@@ -58,6 +58,7 @@ machine.
     ab add --plan chain.json --key chain:v2                            # a whole chain of cards (deps by key) in one transaction
     ab runner start --slots 2
     ab ls --status all ; ab show t_xxxxxxxx ; ab usage
+    # a short `ab ls` can be a --limit cut (default 50; stderr says "showing N of M"), not an empty board
 
 The runner gives each agent a brief with the task, the results of its dependencies, the thread so far and
 the board commands. After you change agentboard itself, `ab runner reload` makes the runner re-exec with the new

@@ -149,6 +149,7 @@ to it instead of creating a new task. A watcher never wakes on its own activity.
     ab add "Migrate X" --body-file plan.md --tier high --workdir ~/repo -l kind=migration [-B web]
     ab add "Review migration" --dep t_ab12cd34 --tier max --reply-to m42
     ab ls [--ready] [--status all] [-c channel] [--all-boards] ; ab show ID ; ab log [ID]
+    # `ab ls` shows at most --limit (50) rows; a cut prints `showing N of M` on stderr: a short list is a limit cut, not an empty board
 
 ## Boards
 

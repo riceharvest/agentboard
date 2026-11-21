@@ -1253,6 +1253,18 @@ def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60
     return row["id"], spec
 
 
+def park_resumed(conn, tid):
+    """True once a parked card has been picked up again: a `claimed` or `done` event is newer than its newest
+    `parked` event. A resume run can claim and finish in under a poll interval, so the transient `claimed`
+    state (or the cleared park spec) can be missed; the event log cannot. A card whose `parked` event is
+    still the newest state is never resumed, woken or not."""
+    last = conn.execute("SELECT MAX(id) m FROM events WHERE task_id=? AND kind='parked'", (tid,)).fetchone()["m"]
+    if last is None:
+        return False
+    return conn.execute("SELECT 1 FROM events WHERE task_id=? AND id>? AND kind IN ('claimed','done') LIMIT 1",
+                        (tid, last)).fetchone() is not None
+
+
 def park_wake(conn, tid, why, actor="runner"):
     """Mark a park woken (inside a tx): the card becomes ready again; the note and wake reason stay in the
     park spec so the next agent's brief can carry them, until a new run starts."""

@@ -513,6 +513,11 @@ def dirty_files(c, tid, skipped=None):
     return mine
 
 
+def _build_tag():
+    i = install_info()
+    return f"install {i['install_path']}, code version {i['code_version']}" + (f", checkout HEAD {i['checkout_head']}" if i["checkout_head"] else "")
+
+
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
     tid0 = a.id or os.environ.get("AB_TASK", "")
@@ -527,7 +532,9 @@ def cmd_done(c, a, out):
         if dirty:
             shown = "\n".join("  " + ln for ln in dirty[:20]) + (f"\n  ... and {len(dirty) - 20} more" if len(dirty) > 20 else "")
             raise ValueError(f"{tid0}: worktree has untracked or modified files, so the result cannot be reproduced from the branch; "
-                             f"commit them (or delete them) and retry, or pass --allow-dirty:\n{shown}")
+                             f"commit them (or delete them) and retry, or pass --allow-dirty:\n{shown}\n"
+                             f"(this ab: {_build_tag()}; if the path-scoped dirty guard should have ignored these files, "
+                             f"this install may predate it: see `ab version`)")
         if skipped:
             note = f" (ignored {len(skipped)} dirty path(s) this task did not change: {', '.join(ln[3:] for ln in skipped[:3])}{', ...' if len(skipped) > 3 else ''})"
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
@@ -717,6 +724,28 @@ def cmd_whoami(c, a, out):
     d = {"actor": me, "board": board_of(a), "task": os.environ.get("AB_TASK"), "run": os.environ.get("AB_RUN"),
          "db": str(store.DB_PATH), "admin": store.can(c, me, "admin", board_of(a))}
     out(d, lambda d: " ".join(f"{k}={v}" for k, v in d.items()))
+
+
+def install_info():
+    """Where this ab runs from: code version, install path, and the HEAD of the git checkout it lives in (None if not one)."""
+    import subprocess
+    pkg = os.path.dirname(os.path.realpath(store.__file__))
+    root = os.path.dirname(pkg)
+    head = None
+    try:
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            head = r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"code_version": store.code_version(), "install_path": os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else root,
+            "package_path": pkg, "checkout_head": head}
+
+
+def cmd_version(c, a, out):
+    i = install_info()
+    out(i, f"code_version: {i['code_version']}\ninstall_path: {i['install_path']}\npackage_path: {i['package_path']}\n"
+           f"checkout_head: {i['checkout_head'] or 'unknown (not a git checkout)'}")
 
 
 def cmd_guide(c, a, out):
@@ -1710,6 +1739,7 @@ def build_parser():
 
     sub("whoami", cmd_whoami, "your actor name and task")
     sub("guide", cmd_guide, "print the agent instructions")
+    sub("version", cmd_version, "print the code version, install path and checkout HEAD of this ab")
 
     s = sub("usage", cmd_usage, "token usage by bucket (5h/24h/7d), harness, model, source or task")
     s.add_argument("--by", choices=["bucket", "harness", "model", "source", "task"], default="bucket")

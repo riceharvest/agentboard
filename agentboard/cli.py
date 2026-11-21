@@ -1725,7 +1725,7 @@ def build_parser():
     s = sub("ls", cmd_ls, "list tasks (default: open+claimed)", ["list"])
     s.add_argument("--status", "-s", help="open,claimed,done,dead,cancelled or all")
     s.add_argument("--ready", "-r", action="store_true", help="only claimable now")
-    s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin)")
+    s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=50)

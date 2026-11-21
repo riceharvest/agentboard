@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Runner names why a ready card is not launched: a `hold` event (`workdir_locked:<path>`, `workdir_missing`, `no_tier_bucket`, `no_harness`, `deps_pending`, `not_before_future`, `runnable_flag_zero:<creator>`; one row per card+reason, refreshed every 5 min) and `hold_cleared` when it ends. `ab show` prints `hold=<reason> since <ts>`; `ab ls --stuck` groups by reason. Runner change: `ab runner reload` needed.
+
 - `ab done` can enforce a board's verdict vocabulary: `ab config set verdict_tokens GO,NO-GO` (or `verdict_tokens.BOARD`); a result whose first token is not listed is refused and the card stays claimed. `--no-verdict-check` bypasses it (noted). Unset = no check.
 
 - Runner no longer double-dispatches a card whose previous run is still alive (`fill`/`spawn` skip it), and `tick` renews a live child's lease before `reap`, so a slow tick cannot re-open the card, burn an attempt and get the first run killed as "expired" (exit 143). Runner change: `ab runner reload` needed.

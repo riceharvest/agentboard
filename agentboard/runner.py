@@ -1482,6 +1482,25 @@ class Runner:
                                            thread=ch.task_id, check=False, _in_tx=True)
                         c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, park=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                         event(c, ch.task_id, "runner", "verify_failed", {"run": ch.run_id, "round": rounds, "of": limit})
+                elif mine and not res.ok and ch.harness == "hermes" and GATEWAY_LOST_RE.search(err or ""):
+                    # The gateway died mid-turn: the client cannot tell whether the turn finished, and says not to resend
+                    # the work. That is infrastructure, not the card's fault: no attempt, requeue (the next run sees the
+                    # session id in the thread). Bounded so a gateway that keeps dying cannot loop forever.
+                    prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='gateway_lost' AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
+                    sid = H.hermes_session_id_from_log(err) or res.session_id
+                    if prior < GATEWAY_LOST_MAX:
+                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "gateway_lost", {"run": ch.run_id, "session": sid, "n": prior + 1})
+                        store.post_message(c, "runner", f"Run {ch.run_id} on hermes lost its gateway mid-turn (outcome unknown, session {sid or '?'}); "
+                                           f"requeued without burning an attempt. Check the work already in the worktree/branch before redoing it.",
+                                           thread=ch.task_id, check=False, _in_tx=True)
+                        outcome = "gateway_lost"
+                    else:
+                        why = (res.error or "gateway disconnected")[:1500]
+                        store.post_message(c, "runner", f"Run {ch.run_id} on hermes lost its gateway again ({prior + 1} times): {why}",
+                                           thread=ch.task_id, check=False, _in_tx=True)
+                        outcome = "failed"
+                        store._fail_attempt(c, t, "runner", why, outcome)
                 elif mine:
                     if res.ok:
                         store.post_message(c, "runner", "Agent exited without `ab done`; its final answer is kept as the result.",
@@ -1517,6 +1536,10 @@ class Runner:
                 H.export_hermes_session(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-session.jsonl")
                 H.keep_hermes_agent_log(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-agent.log")
                 shutil.rmtree(hermes_home, ignore_errors=True)
+
+
+GATEWAY_LOST_RE = re.compile(r"Gateway disconnected")
+GATEWAY_LOST_MAX = 3
 
 
 def start_detached():

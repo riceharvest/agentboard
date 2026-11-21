@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hermes gateway death mid-turn ("Gateway disconnected; turn outcome is unknown") no longer fails the run and burns an attempt: the runner requeues the card (run outcome `gateway_lost`, session id noted in the thread), up to 3 times per card, then falls back to a normal failure. Runner change: `ab runner reload`.
+
 - A card's own worktree branches from the repo's mainline (`main`, else `master`) when the shared checkout sits on another card's `ab/*` branch, instead of from that stale HEAD, so done branches merge cleanly. `AB_WORKTREE_BASE=<rev>` overrides. Runner change: `ab runner reload` needed.
 
 - `--after`/`--until`/`--at` accept `now`; a same-minute `HH:MM` means today (it used to roll to tomorrow). In `--json` mode, errors now also print `error: ...` to stderr, so wrappers that show only stderr no longer print an empty failure line.

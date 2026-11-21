@@ -157,10 +157,19 @@ def _provider_error_text(out, err):
     return "\n".join(keep)[-4000:]
 
 
+_CODEISH = re.compile(r"\b(?:in|==|!=|>=|<=|=|:)\s*[(\[]?\s*(?:\d{3}\s*,\s*)*\d{3}\s*[)\],:]|\b(?:if|elif|while|return|assert|case)\b.*\b\d{3}\b.*[:{;)]\s*$|\w\.(?:code|status|status_code)\b")
+
+
+def _strip_agent_code(text):
+    """Drop diff/boxed/code-shaped lines: code an agent wrote or echoed (`e.code in (429, 500)`) is never a provider error."""
+    return "\n".join(l for l in (text or "").splitlines() if not (_BOXED.match(l) or _CODEISH.search(l)))
+
+
 def _finish(r, rc, out, err, scan=None):
     """Shared post-processing: classify failures, find reset times. `scan`, when given, is the only text classified."""
     if not r.ok:
-        blob = scan if scan is not None else "\n".join(x for x in (r.error, r.text if not r.ok else "", _tail(err, 4000)) if x)
+        blob = scan if scan is not None else _strip_agent_code(
+            "\n".join(x for x in (r.error, r.text if not r.ok else "", _tail(err, 4000)) if x))
         if not r.error_kind:
             r.error_kind = classify(blob) or "failed"
         if r.error_kind in ("auth", "limit", "unavailable"):

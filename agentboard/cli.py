@@ -31,13 +31,29 @@ class Out:
                 print(t)
 
 
+_LABEL_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+def split_labels(it):
+    """One -l argument -> [(k, v)]. 'worktree=on,lane=b' is two labels; a comma followed by a part that is not
+    'key=' stays in the value (watch_quiet=done,cancelled is one label)."""
+    if "=" not in it:
+        raise ValueError(f"expected key=value, got {it!r}")
+    out = []
+    for part in it.split(","):
+        k, eq, v = part.partition("=")
+        if out and not (eq and _LABEL_KEY.match(k.strip())):
+            out[-1][1] += "," + part
+        else:
+            out.append([k, v])
+    return [(k.strip(), v.strip()) for k, v in out]
+
+
 def kv_list(items):
     out = {}
     for it in items or []:
-        if "=" not in it:
-            raise ValueError(f"expected key=value, got {it!r}")
-        k, v = it.split("=", 1)
-        out[k.strip()] = v.strip()
+        for k, v in split_labels(it):
+            out[k] = v
     return out
 
 
@@ -722,8 +738,9 @@ def cmd_edit(c, a, out):
         f["model"] = None
     labels = {}
     for it in a.label or []:
-        k, _, v = it.partition("=")
-        labels[k] = v
+        if "=" not in it:
+            raise ValueError(f"expected key=value or key=, got {it!r}")
+        labels.update(split_labels(it))
     check_harness_pin(f.get("harness"))
 
     def tid_of(x):

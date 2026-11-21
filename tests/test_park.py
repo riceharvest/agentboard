@@ -355,3 +355,15 @@ def test_mcp_exposes_park():
     assert "ab_park" in mcp.TOOLS
     argv = mcp.to_argv("ab_park", {"id": "t_1", "pid": 42, "note": "n"})
     assert argv[:2] == ["--json", "park"] and "--pid" in argv and "42" in argv
+
+
+def test_retry_brief_shows_earlier_notes(abx, tmp_path):
+    from agentboard import runner, store
+    tid = json.loads(abx("--json", "add", "retry me")[1])["id"]
+    abx("note", tid, "attempt 1: tried X")
+    c = _conn(abx)
+    try:
+        brief = runner.build_brief(c, store.must_task(c, tid), str(tmp_path), 2, "claude#9")
+        assert "NOTES SO FAR" in brief and "attempt 1: tried X" in brief
+    finally:
+        c.close()

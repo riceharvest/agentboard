@@ -495,7 +495,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
     if deps:
         dtxt = "\nRESULTS OF THE TASKS THIS ONE DEPENDS ON:\n" + "\n".join(
             f"- {d['id']} {d['title']}: {(d['result'] or '').strip()[:1500]}" for d in deps) + "\n"
-    notes = conn.execute("SELECT author, body, ts FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 12", (task["id"],)).fetchall()
+    notes = list(reversed(store.thread_messages(conn, task["id"], limit=12)))  # newest first, like the old query
     ntxt = ""
     if notes:
         ntxt = "\nNOTES SO FAR (earlier attempts and other agents, oldest first):\n" + "\n".join(

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A card's own worktree branches from the repo's mainline (`main`, else `master`) when the shared checkout sits on another card's `ab/*` branch, instead of from that stale HEAD, so done branches merge cleanly. `AB_WORKTREE_BASE=<rev>` overrides. Runner change: `ab runner reload` needed.
+
 - `--after`/`--until`/`--at` accept `now`; a same-minute `HH:MM` means today (it used to roll to tomorrow). In `--json` mode, errors now also print `error: ...` to stderr, so wrappers that show only stderr no longer print an empty failure line.
 
 - Untrusted text hygiene: zero-width, bidi-control and Unicode tag characters (and soft hyphen, variation selectors; ZWJ/ZWNJ are kept) are stripped from card titles/bodies and messages on ingest, so synced GitHub issues, comments and watcher text cannot carry hidden instructions. The `created`/`message` event records `stripped_invisible: N`. Config `strip_invisible` (default true). `ab sync add --untrusted` labels imported cards `untrusted=1`; any card with that label is skipped by `--push` syncs (counted as `refused` in `ab sync run`). Runner change: `ab runner reload` needed.

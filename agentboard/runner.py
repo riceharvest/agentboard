@@ -520,6 +520,26 @@ norm_dir = store.norm_dir
 
 
 # ---------------------------------------------------------------- runner
+def worktree_base(top):
+    """Revision a card's own worktree branches from. Normally HEAD of the shared checkout. When that checkout sits on
+    another card's branch (ab/t_*) HEAD is a stale side line, and a done branch cut from it cannot merge cleanly into the
+    mainline: then use the repo's mainline branch (main, else master) if it exists. AB_WORKTREE_BASE overrides (any rev)."""
+    forced = os.environ.get("AB_WORKTREE_BASE", "").strip()
+    try:
+        def git(*a):
+            return subprocess.run(["git", "-C", top, *a], capture_output=True, text=True, timeout=30)
+        if forced:
+            return forced if git("rev-parse", "--verify", "-q", forced + "^{commit}").returncode == 0 else "HEAD"
+        cur = git("symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+        if cur.startswith("ab/"):
+            for b in ("main", "master"):
+                if git("rev-parse", "--verify", "-q", "refs/heads/" + b).returncode == 0:
+                    return b
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "HEAD"
+
+
 class Child:
     def __init__(self, run_id, task_id, owner, harness, model, bucket, pid, start, proc, timeout_s, workdir, out_path, err_path, started):
         self.__dict__.update(locals())
@@ -794,7 +814,7 @@ class Runner:
         return held
 
     def make_worktree(self, task, workdir):
-        """`git worktree add -b ab/<task> <dir> HEAD` next to the busy repo. Returns the new dir or None."""
+        """`git worktree add -b ab/<task> <dir> <base>` next to the busy repo, base = worktree_base(). Returns the new dir or None."""
         try:
             top = subprocess.run(["git", "-C", workdir, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=30)
             if top.returncode:
@@ -803,7 +823,7 @@ class Runner:
             branch = f"ab/{task['id']}"
             if not wt.exists():
                 wt.parent.mkdir(parents=True, exist_ok=True)
-                r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", "-b", branch, str(wt), "HEAD"],
+                r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", "-b", branch, str(wt), worktree_base(top.stdout.strip())],
                                    capture_output=True, text=True, timeout=120)
                 if r.returncode:  # branch left over from an earlier attempt: reuse it
                     r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", str(wt), branch],

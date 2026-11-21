@@ -367,3 +367,27 @@ def test_retry_brief_shows_earlier_notes(abx, tmp_path):
         assert "NOTES SO FAR" in brief and "attempt 1: tried X" in brief
     finally:
         c.close()
+
+
+def test_park_resumed_accepts_claimed_or_done_between_polls(tmp_path, monkeypatch):
+    """hermes#162 race: a woken card can be claimed and finished between two polls, leaving status=done and no park
+    spec. The wake check must still count it as resumed (claimed OR done after the park), and never while the
+    park is the newest state."""
+    monkeypatch.setenv("AB_HOME", str(tmp_path))
+    import subprocess
+    from agentboard import store, runner
+    c = store.connect()
+    tid = store.add_task(c, "me", "t", "b")
+    tid = tid if isinstance(tid, str) else tid[0]
+    store.claim(c, "me", tid=tid)
+    p = subprocess.Popen(["sleep", "0.2"])
+    store.park(c, tid, "me", "x", pid=p.pid)
+    assert not store.park_resumed(c, tid)
+    p.wait()
+    assert runner.wake_parked(c) and not store.park_resumed(c, tid)  # woken is not resumed yet
+    store.claim(c, "r", tid=tid)
+    assert store.park_resumed(c, tid)  # claimed
+    store.complete(c, tid, "r", "ok")  # finished before any poll
+    row = c.execute("SELECT status, park FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert row["status"] == "done" and row["park"] is None  # state alone shows nothing
+    assert store.park_resumed(c, tid)

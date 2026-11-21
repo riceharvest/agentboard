@@ -290,6 +290,19 @@ impl App {
             }
             lanes[Self::lane_of(t)].push(t);
         }
+        // waiting: cards waiting on other cards first (oldest first), then timers, soonest first, then the rest
+        lanes[2].sort_by(|a, b| {
+            let key = |t: &Task| {
+                if !t.deps_open.is_empty() {
+                    (0u8, t.created_at.unwrap_or(0.0))
+                } else if let Some(nb) = t.not_before {
+                    (1, nb)
+                } else {
+                    (2, t.created_at.unwrap_or(0.0))
+                }
+            };
+            key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+        });
         for l in [4, 5] {
             lanes[l].sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
         }

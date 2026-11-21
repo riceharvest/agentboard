@@ -442,9 +442,11 @@ fn board(app: &mut App, f: &mut Frame, area: Rect) {
 // ---------------------------------------------------------------------------------------------- running
 fn running(app: &mut App, f: &mut Frame, area: Rect) {
     let kids = &app.snap.runner.children;
-    let top_h = (kids.len() as u16 + 3).clamp(4, area.height / 2);
+    let jobs = app.snap.runner.jobs.clone();
+    let job_rows = if jobs.is_empty() { 0 } else { jobs.len() as u16 + 1 };
+    let top_h = (kids.len() as u16 + job_rows + 3).clamp(4, area.height / 2);
     let parts = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(top_h), Constraint::Min(4)]).split(area);
-    let blk = block(&format!("running {}/{}", kids.len(), app.snap.runner.slots_effective), true);
+    let blk = block(&format!("running {} agents / {} slots, {} background jobs", kids.len(), app.snap.runner.slots_effective, jobs.len()), true);
     let inner = blk.inner(parts[0]);
     f.render_widget(blk, parts[0]);
     let w = inner.width as usize;
@@ -482,8 +484,27 @@ fn running(app: &mut App, f: &mut Frame, area: Rect) {
         }
         lines.push(line);
     }
-    if kids.is_empty() {
+    if kids.is_empty() && jobs.is_empty() {
         lines.push(Line::from(sp("  nothing is running", dim())));
+    }
+    if !jobs.is_empty() {
+        lines.push(Line::from(sp(format!(" {:<4} {:<8} {:<26} parked cards, work runs in the background", "", "task", "job"), dim())));
+        let now = app.now();
+        for j in &jobs {
+            let what = match (j.pid, &j.file) {
+                (Some(p), _) => format!("pid {p}"),
+                (_, Some(f)) => format!("file {}", f.rsplit('/').next().unwrap_or(f)),
+                _ => "a job".into(),
+            };
+            let el = j.since.map(|t| fmt_dur((now - t).max(0.0))).unwrap_or_default();
+            lines.push(Line::from(vec![
+                sp(format!(" {:<4} ", "⏸"), dim()),
+                sp(format!("{:<8} ", j.task_id.chars().take(8).collect::<String>()), base()),
+                sp(format!("{} ", pad(&what, 26)), base()),
+                sp(format!("{:>8}  ", el), base()),
+                sp(trunc(j.title.as_deref().unwrap_or(""), w.saturating_sub(60).max(10)), base()),
+            ]));
+        }
     }
     f.render_widget(Paragraph::new(lines).style(base()), inner);
     app.hits.extend(hits);
@@ -529,7 +550,7 @@ fn state_color(state: &str) -> Color {
     match state {
         "done" => theme::GOOD,
         "dead" | "stuck" | "cancelled" => theme::BAD,
-        "claimed" => theme::ACCENT,
+        "claimed" | "running" => theme::ACCENT,
         "waiting" => theme::WARN,
         _ => theme::FG,
     }

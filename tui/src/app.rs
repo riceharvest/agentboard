@@ -274,7 +274,7 @@ impl App {
         match t.state.as_str() {
             "ready" if t.runnable => 0,
             "ready" => 3,
-            "claimed" => 1,
+            "claimed" | "running" => 1,
             "done" => 4,
             "dead" | "cancelled" => 5,
             _ => 2,
@@ -327,7 +327,7 @@ impl App {
     }
 
     pub fn running_children(&self) -> usize {
-        self.snap.runner.children.len()
+        self.snap.runner.children.len() + self.snap.runner.jobs.len()
     }
 
     // ------------------------------------------------------------------ messages from workers

@@ -92,6 +92,8 @@ def _task(r, keys, deps, dep_status, t):
     d["deps_open"] = [x for x in ds if dep_status.get(x) != "done"]
     if d["status"] != "open":
         d["state"] = d["status"]
+    elif store.park_running(d["park"]):
+        d["state"] = "running"
     elif store.park_active(d["park"]):
         d["state"] = "waiting"
     elif any(dep_status.get(x) in ("dead", "cancelled") for x in ds):
@@ -199,6 +201,13 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
         children.append(ch)
         if ch["board"] in bmap:
             bmap[ch["board"]]["running"] += 1
+    live = {ch["task_id"] for ch in children}
+    jobs = [{"task_id": d["id"], "board": d["board"], "title": d["title"], "pid": (d["park"] or {}).get("pid"),
+             "file": (d["park"] or {}).get("file"), "since": (d["park"] or {}).get("at"), "note": (d["park"] or {}).get("note")}
+            for d in tasks if d["state"] == "running" and d["id"] not in live and (not board or d["board"] == board)]
+    for j in jobs:
+        if j["board"] in bmap:
+            bmap[j["board"]]["running"] += 1
     ready_runnable = sum(1 for d in tasks if d["state"] == "ready" and d["runnable"] and not bmap.get(d["board"], {}).get("paused"))
     hb = st.get("heartbeat")
     runner = {"running": bool(st.get("running")), "pid": st.get("pid"), "host": st.get("host"), "started_at": st.get("started_at"),
@@ -209,7 +218,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
               "free_gib": round(R.free_gib(), 2), "min_free_gib": float(ctl["min_free_gib"] or 0), "ready": ready_runnable,
               "launch_per_tick": int(ctl.get("launch_per_tick") or 0), "pace_interval": usage.pace_interval(conn)[0],
               "pacer": bool(ctl.get("pacer", True)), "auto_worktree": bool(ctl.get("auto_worktree", True)),
-              "windowed": override is not None, "children": children}
+              "windowed": override is not None, "children": children, "jobs": jobs}
 
     # ---- limits, caps, plan, usage
     limits = [{"scope": r["scope"], "kind": r["kind"], "until": r["until"], "reason": r["reason"], "set_at": r["set_at"],
@@ -306,6 +315,8 @@ def render_text(s):
         lines.append(f"  run {c['run']} {c['task_id']} " + (f"cmd: {(c['cmd'] or '')[:40]}" if c['harness'] == 'cmd' else f"{c['harness']}:{c['model'] or ''} [{c['bucket']}]") + " "
                      f"{store.fmt_dur(c['elapsed_s'])}/{store.fmt_dur(c['timeout_s'])}" + (f"  [{c['stall']}]" if c.get("stall") else "")
                      + f"  {(c['title'] or '')[:60]}")
+    for j in r.get("jobs", []):
+        lines.append(f"  job {j['task_id']} " + (f"pid {j['pid']}" if j["pid"] else f"file {j['file']}") + f"  (parked card, work runs in the background)  {(j['title'] or '')[:60]}")
     for b in s["boards"]:
         lines.append(f"board {b['name']:<12} {'PAUSED ' if b['paused'] else ''}running={b['running']} max_slots={b['max_slots']} "
                      + " ".join(f"{k}={v}" for k, v in sorted(b["counts"].items())))

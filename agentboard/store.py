@@ -559,6 +559,13 @@ def park_active(park):
     return bool(park) and not park.get("woken_at")
 
 
+def park_running(park):
+    """True when an active park waits on a background job (a pid or a file it writes): the work is live, so the card is running."""
+    if isinstance(park, str):
+        park = json.loads(park) if park else None
+    return park_active(park) and bool(park.get("pid") or park.get("file"))
+
+
 def park_cond(park):
     """Human text for what a parked card waits on."""
     if isinstance(park, str):
@@ -575,9 +582,11 @@ def park_cond(park):
 
 
 def derived_state(conn, d):
-    """open tasks are 'ready', 'waiting' (deps/not_before/park) or 'stuck' (a dep is dead/cancelled)."""
+    """open tasks are 'ready', 'running' (parked on a live background job), 'waiting' (deps/not_before/park) or 'stuck' (a dep is dead/cancelled)."""
     if d["status"] != "open":
         return d["status"]
+    if park_running(d.get("park")):
+        return "running"
     if park_active(d.get("park")):
         return "waiting"
     bad = conn.execute("SELECT 1 FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=? AND p.status IN ('dead','cancelled')",

@@ -84,3 +84,23 @@ def test_limit_deaths_resume_then_skip_route(abx, tmp_path):
     log = (tmp_path / "runner.log").read_text()
     print("RUNNER LOG:\n" + log)
     assert "route skipped" in log or (tmp_path / "fake.log").exists()
+
+
+def test_progress_path_is_per_task(tmp_path, monkeypatch):
+    """Two cards in one workdir get distinct AB_PROGRESS paths, outside the repo; the brief names the path."""
+    from agentboard import runner, store
+    monkeypatch.setattr(store, "HOME", tmp_path)
+    a, b = runner.progress_path("t_aaaa1111"), runner.progress_path("t_bbbb2222")
+    assert a != b and a.parent == b.parent == tmp_path / "progress"
+    a.parent.mkdir()
+    a.write_text("A\n")
+    b.write_text("B\n")
+    assert a.read_text() == "A\n" and b.read_text() == "B\n"
+
+    class C:
+        def execute(self, *a):
+            return self
+        def fetchone(self):
+            return None
+    monkeypatch.setattr(runner, "cfg", lambda c, k: "on")
+    assert "$AB_PROGRESS" in runner.checkpoint_rules(C(), "t_aaaa1111") and str(a) in runner.checkpoint_rules(C(), "t_aaaa1111")

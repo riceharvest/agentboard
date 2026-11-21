@@ -1088,7 +1088,46 @@ def record_holds(conn, waiting=None, held=None):
                 event(conn, tid, "runner", "hold_cleared", {"reason": cur["reason"], "since": cur["since"]})
 
 
-def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD):
+def _fam_match(a, b):
+    """harness:model families match when harness is equal and the models are equal or one names the other (alias 'sonnet' vs 'claude-sonnet-5-5')."""
+    ha, _, ma = (a or "").partition(":")
+    hb, _, mb = (b or "").partition(":")
+    if not ha or ha != hb:
+        return False
+    ma, mb = ma.strip().lower(), mb.strip().lower()
+    return not ma or not mb or ma == mb or ma in mb or mb in ma
+
+
+def family_guard(labels, harness, model, allow_why=None):
+    """Pure claim guard for same-family reviews. labels: the card's labels dict. -> (ok, message).
+    Refuses when label exclude_family=<harness:model> equals the claimer's harness:model, unless the card already carries
+    same_family_ok=<why> or the claimer passes allow_why (the caller then appends the same_family_ok label)."""
+    ex = (labels or {}).get("exclude_family")
+    if not ex or not _fam_match(ex, f"{harness}:{model or ''}"):
+        return True, None
+    if (labels or {}).get("same_family_ok") or (allow_why or "").strip():
+        return True, None
+    return False, (f"same-family review refused: label exclude_family={ex} equals your family {harness}:{model or '?'}; "
+                   f"claim with `ab claim --allow-same-family \"<why>\"` (appends label same_family_ok=<why>)")
+
+
+def author_family(conn, tid):
+    """harness:model of the last run of card tid, or None when it has no run."""
+    r = conn.execute("SELECT harness, model FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+    return f"{r['harness']}:{r['model']}" if r and r["harness"] and r["model"] else None
+
+
+def effective_labels(conn, row):
+    """The card's labels; a review card (reviews=T) without exclude_family derives it from T's last run."""
+    lab = dict(json.loads(row["labels"] or "{}"))
+    if not lab.get("exclude_family") and lab.get("reviews"):
+        fam = author_family(conn, lab["reviews"])
+        if fam:
+            lab["exclude_family"] = fam
+    return lab
+
+
+def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD, allow_same_family=None):
     lease_s = lease_s or parse_dur(cfg(conn, "lease"))
     reap(conn)
     with tx(conn):
@@ -1102,13 +1141,33 @@ def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=
                     if can(conn, actor, "claim", r["board"], r["channel"])]
             if not rows:
                 return None, "nothing ready"
-            row = rows[0]
+            row = next((r for r in rows if _family_ok(conn, actor, r, allow_same_family)[0]), None)
+            if row is None:
+                return None, "nothing ready (same-family review cards skipped; ab claim --allow-same-family \"<why>\")"
+        if tid:
+            ok, why = _family_ok(conn, actor, row, allow_same_family)
+            if not ok:
+                return None, why
+        if allow_same_family:
+            lab = json.loads(row["labels"] or "{}")
+            if lab.get("exclude_family") or lab.get("reviews"):
+                lab["same_family_ok"] = allow_same_family
+                conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(lab), row["id"]))
         conn.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, updated_at=? WHERE id=? AND status='open'",
                      (actor, now() + lease_s, now(), row["id"]))
         if conn.execute("SELECT changes()").fetchone()[0] != 1:
             return None, "lost the race, try again"
         event(conn, row["id"], actor, "claimed", {"lease_s": lease_s})
     return row["id"], None
+
+
+def _family_ok(conn, actor, row, allow_why):
+    """Manual-claim form of family_guard: the claimer's family comes from its run (actor 'harness#RUN')."""
+    m = re.fullmatch(r"([A-Za-z0-9_.-]+)#(\d+)", actor or "")
+    r = conn.execute("SELECT harness, model FROM runs WHERE id=?", (int(m.group(2)),)).fetchone() if m else None
+    if not r:
+        return True, None
+    return family_guard(effective_labels(conn, row), r["harness"], r["model"], allow_why)
 
 
 def _owned(conn, tid, actor, force):

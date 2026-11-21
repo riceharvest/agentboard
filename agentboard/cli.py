@@ -427,7 +427,7 @@ def cmd_claim(c, a, out):
     deadline = now() + (parse_dur(a.wait) or 0)
     while True:
         tid, why = store.claim(c, actor_of(a), a.id, a.channel, kv_list(a.label), parse_dur(a.lease) if a.lease else None,
-                               board=board_of(a))
+                               board=board_of(a), allow_same_family=a.allow_same_family)
         if tid or now() >= deadline:
             break
         time.sleep(2)
@@ -1742,6 +1742,7 @@ def build_parser():
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--lease", help="default 30m; renew before it runs out")
     s.add_argument("--wait", help="keep trying this long, e.g. 10m")
+    s.add_argument("--allow-same-family", metavar="WHY", help="claim a review card whose exclude_family label equals your harness:model; records label same_family_ok=WHY")
 
     s = sub("renew", cmd_renew, "extend your lease")
     s.add_argument("id")

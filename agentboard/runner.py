@@ -764,7 +764,12 @@ class Runner:
         primary, extra = H.candidates_for(self.conn, task)
         reasons = []
         skip_n = limit_skip_n(self.conn)
+        lab = store.effective_labels(self.conn, task)
         for cand in primary + extra:
+            ok, why = store.family_guard(lab, cand.harness, cand.model)
+            if not ok:
+                reasons.append(f"{cand.label()}: {why}")
+                continue
             a = H.ADAPTERS.get(cand.harness)
             if a is None or not a.available():
                 reasons.append(f"{cand.label()}: not installed")

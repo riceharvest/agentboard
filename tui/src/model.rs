@@ -166,6 +166,19 @@ pub struct Runner {
     pub auto_worktree: Option<bool>,
     pub windowed: bool,
     pub children: Vec<Child>,
+    /// parked cards whose work runs as a background job (no agent attached)
+    pub jobs: Vec<Job>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Job {
+    pub task_id: String,
+    pub board: Option<String>,
+    pub title: Option<String>,
+    pub pid: Option<i64>,
+    pub file: Option<String>,
+    pub since: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

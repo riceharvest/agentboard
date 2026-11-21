@@ -1017,6 +1017,12 @@ def cmd_runner(c, a, out):
             lines.append(f"  run {ch['run']} {ch['task_id']} " + (f"cmd: {(ch['cmd'] or '')[:40]}" if ch['harness'] == 'cmd' else f"{ch['harness']}:{ch['model'] or ''} [{ch['bucket']}]") + " "
                          f"{fmt_dur(now() - ch['started_at'])}"
                          + (f"  [{ch['stall']}]" if ch.get("stall") else "") + f"  {(ch['title'] or '')[:60]}")
+        live = {ch["task_id"] for ch in s.get("children", [])}
+        for r in c.execute("SELECT id,title,park FROM tasks WHERE status='open' AND park IS NOT NULL"):
+            if r["id"] not in live and store.park_running(r["park"]):
+                pk = json.loads(r["park"])
+                lines.append(f"  job {r['id']} " + (f"pid {pk['pid']}" if pk.get("pid") else f"file {pk.get('file')}")
+                             + f"  (parked card, work runs in the background)  {(r['title'] or '')[:60]}")
         return "\n".join(lines)
     out(st, txt)
 

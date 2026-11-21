@@ -223,7 +223,7 @@ def test_auto_worktree_config_off_and_non_git(rig, abx, tmp_path):
 
 
 def test_worker_env_hygiene_across_ab_home(tmp_path):
-    """Running `ab` with a different AB_HOME than AB_RUN_HOME strips AB_RUN/AB_ACTOR/AB_BOARD/AB_TASK;
+    """Running `ab` with an explicit AB_HOME that differs from AB_RUN_HOME strips AB_RUN/AB_BOARD (the caller's actor/task are kept for that board);
     pointing at the same AB_HOME (even via trailing slash or symlink) keeps the worker identity locked."""
     worker_home = tmp_path / "real_home"
     other_home = tmp_path / "throwaway_home"
@@ -241,18 +241,19 @@ def test_worker_env_hygiene_across_ab_home(tmp_path):
         "AB_TASK": "t_11223344",
     }
 
-    def run_ab(home_val, *args):
-        env = clean_env(home_val, **{k: v for k, v in worker_env.items() if k != "AB_HOME"})
+    def run_ab(home_val, *args, keep_identity=True):
+        drop = {"AB_HOME"} | (set() if keep_identity else {"AB_ACTOR", "AB_TASK"})
+        env = clean_env(home_val, **{k: v for k, v in worker_env.items() if k not in drop})
         return subprocess.run([sys.executable, "-m", "agentboard", *args], cwd=ROOT, capture_output=True, text=True, env=env)
 
-    # Different AB_HOME: worker identity and board are stripped -> defaults to agent / main, admin works
+    # Different explicit AB_HOME: run and board are stripped (-> main); AB_ACTOR/AB_TASK stay the caller's own
     r = run_ab(other_home, "--json", "whoami")
     assert r.returncode == 0, r.stderr
     who = json.loads(r.stdout)
-    assert who["actor"] == "agent" and who["board"] == "main" and who["run"] is None and who["task"] is None, who
-    r = run_ab(other_home, "--json", "config", "set", "pacer", "false")
+    assert who["actor"] == "claude#42" and who["board"] == "main" and who["run"] is None and who["task"] == "t_11223344", who
+    r = run_ab(other_home, "--json", "config", "set", "pacer", "false", keep_identity=False)
     assert r.returncode == 0, r.stderr
-    r = run_ab(other_home, "--json", "add", "works on throwaway")
+    r = run_ab(other_home, "--json", "add", "works on throwaway", keep_identity=False)
     assert r.returncode == 0, r.stderr
 
     # Same AB_HOME (trailing slash and symlink): worker identity stays locked, admin still denied

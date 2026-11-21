@@ -51,3 +51,13 @@ def test_done_refuses_own_dirty_file_in_shared_checkout(abx, tmp_path):
     code, o, e = abx("done", b, "x", env=env)
     assert code != 0 and "mine.txt" in (o + e), (code, o, e)
     assert abx("done", b, "x", "--allow-dirty", env=env)[0] == 0
+
+
+def test_done_succeeds_when_unrelated_file_dirty_before_claim(abx, tmp_path):
+    wd = _shared(abx, tmp_path)
+    env = {"AB_WORKDIR": str(wd)}
+    (wd / "unrelated.txt").write_text("someone else's work")  # dirty before this task exists
+    b = json.loads(abx("--json", "add", "B")[1])["id"]
+    assert abx("claim", b)[0] == 0
+    code, o, e = abx("done", b, "x", env=env)  # task wrote nothing; no --allow-dirty
+    assert code == 0, (code, o, e)

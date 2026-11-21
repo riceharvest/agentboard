@@ -117,6 +117,18 @@ def test_non_run_cwd_refuses_without_writing(abx, tmp_path):
     assert _status(abx, tid)[0] == "open"
 
 
+def test_note_text_without_task_errors_and_writes_nothing(abx, tmp_path):
+    """`ab note "text"` with AB_TASK empty and no run home: a clear error naming the text, no message, no task lookup by text."""
+    abx("--json", "add", "untouched", "--board", "main")
+    before = _snapshot(abx)
+    other = tmp_path / "plain2"
+    other.mkdir()
+    code, out, err = _ab(abx, str(other), ["note", "some progress text"])
+    assert code == 1, (code, out, err)
+    assert "no task id" in err and "some progress text" in err and "ab note <task id>" in err, err
+    assert _snapshot(abx) == before
+
+
 def test_ambiguous_home_refuses(abx, live_run, tmp_path):
     a = live_run(run_id=10)
     b = live_run(run_id=11)

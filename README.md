@@ -85,6 +85,8 @@ cards a live session claimed by hand); paths are compared after `realpath`. Two 
 
 `ab config set share_workdir true` switches the lock off entirely.
 
+Verdict guard: `ab config set verdict_tokens GO,NO-GO` (comma list; `verdict_tokens.BOARD` overrides per board; unset = no check) makes `ab done` refuse a result whose first token (after whitespace and `# > ` * _` markup, case-insensitive, split on whitespace/`:`/`|`) is not listed; the card stays claimed. Escape hatch: `ab done --no-verdict-check`.
+
 ## Features
 
 - **Tasks:** dependencies, priorities, labels, not-before times, retries with backoff, per-task timeout,

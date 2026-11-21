@@ -336,7 +336,7 @@ def cmd_add(c, a, out):
     kw = _card_kwargs(a.title, body_arg(a), labels, a.priority, a.after, a.workdir, a.tier, a.harness, a.model, a.manual,
                       a.max_attempts, a.timeout, data, a.cmd, a.result, a.channel, a.verify)
     info = {}
-    tid = store.add_task(c, actor_of(a), board=board_of(a), key=a.key, key_live=a.key_live, _info=info,
+    tid = store.add_task(c, actor_of(a), board=board_of(a), key=a.key, key_live=a.key_live, _info=info, replace=a.replace,
                          deps=[store.get_task(c, d)["id"] if store.get_task(c, d) else d for d in (a.dep or [])], **kw)
     stale = R.runner_status(c).get("stale")
     out({"id": tid, "existed": bool(info.get("existed"))}, tid)
@@ -1534,6 +1534,7 @@ def build_parser():
     s = sub("add", cmd_add, "create a task")
     s.add_argument("title", nargs="?")
     s.add_argument("--key", help="idempotency key: if a card with this key is already on the board (not cancelled) print its id and create nothing; with --plan, a rerun is a no-op that prints the existing key->id map")
+    s.add_argument("--replace", action="store_true", help="with --key: cancel the open card holding the key (note cites the new id) and create this one; only for that card's owner/creator (same owner label or actor) or with manage, else refused")
     s.add_argument("--key-live", action="store_true", help="--key only matches open/claimed cards (a finished one frees the key)")
     s.add_argument("--plan", metavar="FILE", help="create a whole plan: JSON array of cards {key,title,body,labels,deps:[{key}|id],tier,workdir,after,priority,manual,cmd,...} in ONE transaction ('-' reads stdin)")
     s.add_argument("--body", "-b", help="description ('-' reads stdin)")

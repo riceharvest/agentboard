@@ -650,13 +650,28 @@ def strip_invisible(conn, *texts):
 
 def add_task(conn, actor, title, body="", channel="main", labels=None, priority=0, deps=(), not_before=None,
              workdir=None, tier=None, harness=None, model=None, runnable=True, max_attempts=3, timeout_s=None, data=None,
-             board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None, verify=None):
-    """_info (dict) gets existed=True when `key` already named a card (nothing is created; its id is returned)."""
+             board=DEFAULT_BOARD, _in_tx=False, cmd=None, key=None, key_live=False, _info=None, verify=None, replace=False):
+    """_info (dict) gets existed=True when `key` already named a card (nothing is created; its id is returned).
+    replace=True: an open/claimed card holding `key` is cancelled in favour of the new card, but only for its creator/owner,
+    an actor with the same `owner` label, or one with `manage`; anyone else is refused and nothing changes."""
     def go():
         b = require_board(conn, board)
         ch = channel or "main"
         require(conn, actor, "create", board, ch)
-        if key:
+        superseded = None
+        if key and replace:
+            r = conn.execute("SELECT * FROM tasks WHERE board=? AND key=? AND status IN ('open','claimed') ORDER BY created_at LIMIT 1",
+                             (board, key)).fetchone()
+            if r:
+                mine = (labels or {}).get("owner")
+                same = actor in (r["owner"], r["created_by"]) or (
+                    mine and mine == json.loads(r["labels"] or "{}").get("owner"))
+                if not same and not is_system(actor):
+                    if not can(conn, actor, "manage", r["board"], r["channel"]):
+                        raise PermissionError(f"--replace: card {r['id']} holding key {key!r} belongs to another owner; "
+                                              f"{actor} is not its owner/creator and has no manage grant")
+                superseded = r["id"]
+        if key and not superseded:
             old = find_key(conn, board, key, key_live, os.environ.get("AB_TASK"))
             if old:
                 if _info is not None:
@@ -681,6 +696,11 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
              json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None, verify or None, "cmd" if cmd else "agent"))
         for d in deps:
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (tid, d))
+        if superseded:
+            why = f"superseded by {tid} (same key {key})"
+            conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
+                         (why, t, superseded))
+            event(conn, superseded, actor, "cancelled", {"why": why})
         event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
                                             **({"verify": verify} if verify else {}),

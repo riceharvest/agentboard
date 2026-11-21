@@ -136,3 +136,27 @@ def test_plan_body_id_placeholder(abx):
     assert j(abx, "show", ids["rev"])["labels"]["reviews"] == ids["work"]
     bad = [{"key": "r", "title": "R", "body": "x {{id:nope}}"}]
     assert abx("add", "--plan", "-", stdin=json.dumps(bad))[0] != 0
+
+
+def test_replace_same_actor_cancels_old(abx):
+    old = j(abx, "add", "x", "--key", "k1", "--as", "A")["id"]
+    new = j(abx, "add", "x2", "--key", "k1", "--replace", "--as", "A")
+    assert new["id"] != old and not new["existed"]
+    o = j(abx, "show", old)
+    assert o["status"] == "cancelled" and new["id"] in (o.get("result") or "")
+    assert j(abx, "show", new["id"])["key"] == "k1"
+
+
+def test_replace_other_actor_refused(abx):
+    old = j(abx, "add", "x", "--key", "k1", "--as", "A")["id"]
+    assert j(abx, "add", "y", "--key", "k1", "--as", "B")["id"] == old      # reproduce: plain --key returns the existing id
+    j(abx, "grants", "add", "B", "--can", "read,post,create,claim", "--grant-board", "*")   # worker without manage
+    code, out, err = abx("--json", "add", "y", "--key", "k1", "--replace", "--as", "B")
+    assert code != 0 and "another owner" in (out + err)
+    assert j(abx, "show", old)["status"] == "open" and len(cards(abx)) == 1
+
+
+def test_replace_same_owner_label(abx):
+    old = j(abx, "add", "x", "--key", "k1", "--label", "owner=team1", "--as", "A")["id"]
+    new = j(abx, "add", "x", "--key", "k1", "--label", "owner=team1", "--replace", "--as", "B")["id"]
+    assert new != old and j(abx, "show", old)["status"] == "cancelled"

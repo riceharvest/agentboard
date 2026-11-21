@@ -254,6 +254,8 @@ def _card_kwargs(title, body, labels, priority, after, workdir, tier, harness, m
         raise ValueError("--verify gates agent cards; a --cmd card already settles by its exit code")
     if verify is not None and not str(verify).strip():
         verify = None
+    if (labels or {}).get("kind") == "decision" and cmd is None:
+        manual = True  # a decision waits for a person's answer; an agent run can only fail it
     return dict(title=title, body=body, channel=channel, labels=labels, priority=priority,
                 not_before=parse_time(after) if after else None, workdir=workdir, tier=tier, harness=harness, model=model,
                 runnable=not manual, max_attempts=max_attempts, timeout_s=parse_dur(timeout) if timeout else None, data=data, cmd=cmd, verify=verify)

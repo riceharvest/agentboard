@@ -446,6 +446,9 @@ def verify_rounds(conn):
         return 2
 
 
+KNOWN_KINDS = frozenset({"agent", "cmd"})  # card kinds this runner can dispatch; anything else is refused, never run as a model
+
+
 def run_verify(cmd, workdir, timeout_s):
     """Run a card's --verify command in its workdir. Returns (ok, tail): the last VERIFY_TAIL_LINES lines of stdout+stderr."""
     try:
@@ -835,6 +838,11 @@ class Runner:
                 note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
                 break
             workdir = t["workdir"] or str(store.HOME / "work" / t["id"])
+            if (t["kind"] or ("cmd" if t["cmd"] else "agent")) not in KNOWN_KINDS:
+                with tx(c):
+                    why = store.refuse_unknown_kind(c, t, KNOWN_KINDS)
+                self.log(f"{t['id']} refused: {why}")
+                continue
             if t["cmd"]:
                 # command card: no harness, no bucket, no quota gating or pacing; slots, RAM gate, deps and priority applied above
                 self.waiting.pop(t["id"], None)

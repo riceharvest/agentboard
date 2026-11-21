@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from agentboard import store
 from conftest import ROOT, clean_env
 
 
@@ -107,3 +108,21 @@ def test_env_exported_and_timeout_fails(rig):
     assert res.startswith(f"{e} cmd#") and res.endswith(" main"), res
     assert wait(lambda: j("show", to)["status"] == "dead", 40)
     assert j("show", to)["runs"][0]["outcome"] == "timeout"
+
+
+def test_unknown_card_kind_is_refused_not_run_as_model(rig, abx):
+    import sqlite3
+    j = rig
+    j("runner", "pause")
+    tid = j("add", "future kind", "--cmd", "echo hi", "--cwd", str(rig.tmp))["id"]
+    c = sqlite3.connect(str(abx.home / store.DB_PATH.name))
+    c.execute("UPDATE tasks SET kind='cmd-v9' WHERE id=?", (tid,))
+    c.commit()
+    c.close()
+    j("runner", "resume")
+    assert wait(lambda: j("show", tid)["status"] == "dead")
+    t = j("show", tid)
+    assert "cmd-v9" in t["result"]
+    c = sqlite3.connect(str(abx.home / store.DB_PATH.name))
+    assert c.execute("SELECT count(*) FROM runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
+    c.close()

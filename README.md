@@ -441,3 +441,14 @@ Reads the plan's own rolling (5h), weekly and monthly percentages from the OpenC
 `@opencode/console`, or the path in `AB_OPENCODE_CRED`; the token is never printed) and holds the bucket when a window reaches its `max_pct`
 or the provider reports it rate-limited. The reading is cached 2 minutes; if it cannot be read the guard fails open (keep a `windows` cost cap as a backstop).
 
+
+## Why is my ready card not running?
+
+A card can be `state=ready` and still never start because `runnable=0`. Every writer of that flag now records why in
+`labels.hold` (`manual`, `needs_admin`, `retry_backoff`, `reopen`), and `ab show` / `ab ls` print `runnable=0 (hold=...)`.
+`ab ls --stuck` lists ready cards with `runnable=0` whose hold is not a deliberate one (`manual`, `needs_admin`):
+
+    $ ab ls --stuck
+    t_ab12cd34  ready  p0  medium main  [build] some card  (runnable=0 (hold=unknown))
+
+A `retry_backoff` hold clears by itself when the backoff ends. Release any hold with `ab edit ID --auto`.

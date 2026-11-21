@@ -698,10 +698,11 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
         if tr not in tiers:
             raise ValueError(f"unknown tier {tr!r}; tiers: {', '.join(tiers)}")
         t = now()
+        lab = {**(labels or {}), "hold": (labels or {}).get("hold") or "manual"} if not runnable else (labels or {})
         conn.execute(
             "INSERT INTO tasks(id,board,title,body,channel,status,priority,labels,tier,harness,model,workdir,runnable,"
             "max_attempts,timeout_s,not_before,data,created_by,created_at,updated_at,cmd,key,verify,kind) VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (tid, board, title, body or "", ch, int(priority or 0), json.dumps(labels or {}), tr, harness, model,
+            (tid, board, title, body or "", ch, int(priority or 0), json.dumps(lab), tr, harness, model,
              workdir or b["default_workdir"], 1 if runnable else 0, int(max_attempts), timeout_s, not_before,
              json.dumps(data) if data is not None else None, actor, t, t, cmd or None, key or None, verify or None, "cmd" if cmd else "agent"))
         for d in deps:
@@ -711,7 +712,8 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
             conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
                          (why, t, superseded))
             event(conn, superseded, actor, "cancelled", {"why": why})
-        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": labels or {},
+        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": lab,
+                                            **({"runnable": False} if not runnable else {}),
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
                                             **({"verify": verify} if verify else {}),
                                             **({"stripped_invisible": stripped} if stripped else {})})
@@ -817,6 +819,7 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
         # Hold the card for the overseer (label needs_admin=overseer, not auto-run) instead of retrying.
         lb = json.loads(row["labels"] or "{}")
         lb["needs_admin"] = "overseer"
+        lb["hold"] = "needs_admin"
         conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, runnable=0, labels=?, updated_at=? WHERE id=?",
                      (attempts, json.dumps(lb), now(), row["id"]))
         event(conn, row["id"], actor, "needs_admin", {"why": why, "attempts": attempts})
@@ -831,8 +834,12 @@ def _fail_attempt(conn, row, actor, why, kind="failed"):
         return "dead"
     nb = now() + (parse_dur(cfg(conn, "backoff")) or 0) * attempts
     up = escalated_tier(conn, row)
-    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, not_before=?, updated_at=?, tier=COALESCE(?, tier) WHERE id=?",
-                 (attempts, nb, now(), up, row["id"]))
+    lb = json.loads(row["labels"] or "{}")
+    if row["runnable"] and nb > now():
+        lb["hold"] = "retry_backoff"  # not runnable until the backoff ends; heal_holds() flips it back
+    conn.execute("UPDATE tasks SET status='open', attempts=?, owner=NULL, lease_until=NULL, park=NULL, not_before=?, updated_at=?, tier=COALESCE(?, tier), "
+                 "runnable=?, labels=? WHERE id=?",
+                 (attempts, nb, now(), up, 0 if lb.get("hold") == "retry_backoff" else row["runnable"], json.dumps(lb), row["id"]))
     if up:
         event(conn, row["id"], actor, "escalated", {"from": row["tier"] or cfg(conn, "default_tier"), "to": up})
     event(conn, row["id"], actor, kind, {"why": why, "attempts": attempts, "retry_at": nb})
@@ -851,9 +858,26 @@ def refuse_unknown_kind(conn, row, known, actor="runner"):
     return why
 
 
+def heal_holds(conn):
+    """Recompute runnable for cards held only by a timed hold (hold=retry_backoff|reopen) whose not_before has passed."""
+    t = now()
+    rows = conn.execute("SELECT id, labels FROM tasks WHERE runnable=0 AND status='open' AND (not_before IS NULL OR not_before <= ?) "
+                        "AND json_extract(labels,'$.hold') IN ('retry_backoff','reopen')", (t,)).fetchall()
+    if not rows:
+        return 0
+    with tx(conn):
+        for r in rows:
+            lb = json.loads(r["labels"] or "{}")
+            lb.pop("hold", None)
+            conn.execute("UPDATE tasks SET runnable=1, labels=?, updated_at=? WHERE id=? AND runnable=0", (json.dumps(lb), t, r["id"]))
+            event(conn, r["id"], "board", "hold_cleared", {"was": "timed hold expired"})
+    return len(rows)
+
+
 def reap(conn):
     """Expired leases go back to the pool (counted as an attempt). Runner-held claims are renewed by the runner."""
     t = now()
+    heal_holds(conn)
     rows = conn.execute("SELECT id FROM tasks WHERE status='claimed' AND lease_until IS NOT NULL AND lease_until < ?", (t,)).fetchall()
     if not rows:
         return 0
@@ -1299,6 +1323,9 @@ def retry(conn, tid, actor):
         if cur.get("outcome") == "negative":
             cur.pop("outcome", None)
             conn.execute("UPDATE tasks SET labels=? WHERE id=?", (json.dumps(cur), row["id"]))
+        if cur.get("hold") in ("retry_backoff", "reopen"):
+            cur.pop("hold")
+            conn.execute("UPDATE tasks SET labels=?, runnable=1 WHERE id=?", (json.dumps(cur), row["id"]))
         conn.execute("UPDATE tasks SET status='open', attempts=0, owner=NULL, lease_until=NULL, not_before=NULL, park=NULL, updated_at=? WHERE id=?",
                      (now(), row["id"]))
         event(conn, row["id"], actor, "retry", {"was": row["status"]})
@@ -1327,6 +1354,9 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
             if k not in EDITABLE:
                 raise ValueError(f"cannot edit {k}")
             conn.execute(f"UPDATE tasks SET {k}=? WHERE id=?", (v, row["id"]))
+        if "runnable" in fields:
+            labels = dict(labels or {})
+            labels.setdefault("hold", "" if fields["runnable"] else "manual")
         changed = {}
         if labels:
             cur = json.loads(row["labels"] or "{}")

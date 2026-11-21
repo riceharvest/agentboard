@@ -1468,6 +1468,7 @@ class Runner:
                         else:
                             lb = json.loads(t["labels"] or "{}")
                             lb["stalled"] = "overseer"
+                            lb["hold"] = "needs_admin"
                             c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, runnable=0, labels=?, updated_at=? WHERE id=?",
                                       (json.dumps(lb), now(), ch.task_id))
                             event(c, ch.task_id, "runner", "stalled", {"run": ch.run_id, "retry": False, "why": ch.stall_error})

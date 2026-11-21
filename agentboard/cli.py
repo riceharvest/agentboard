@@ -66,6 +66,13 @@ def text_arg(value, path=None):
     return sys.stdin.read() if value == "-" else (value or "")
 
 
+def hold_txt(d, always=False):
+    """' (hold=X)' when the card is not runnable (the stored reason), '' otherwise."""
+    if d.get("runnable"):
+        return ""
+    return f" (hold={(d.get('labels') or {}).get('hold') or 'unknown'})"
+
+
 def tline(d):
     lab = ",".join(f"{k}={v}" for k, v in (d.get("labels") or {}).items())
     extra = []
@@ -78,6 +85,8 @@ def tline(d):
         extra.append("parked: " + (f"pid {p['pid']}" if p.get("pid") else f"file {p.get('file')}"))
     if d.get("wait_reason"):
         extra.append(d["wait_reason"])
+    if not d.get("runnable", True) and d["state"] == "ready":
+        extra.append("runnable=0" + hold_txt(d).replace(" (", " (", 1))
     if d.get("deps"):
         extra.append("deps " + ",".join(d["deps"]))
     n = d["runs"] if isinstance(d.get("runs"), int) else len(d.get("runs") or [])
@@ -91,7 +100,7 @@ def show_text(d):
     lines = [f"{d['id']}  {d['title']}",
              f"state={d['state']} status={d['status']} board={d['board']} channel={d['channel']} priority={d['priority']} tier={d['tier']}"
              + (f" pin={d['harness']}:{d.get('model') or ''}" if d.get("harness") else "") + (" kind=cmd" if d.get("cmd") else "")
-             + f" runs={len(d.get('runs') or [])} attempts={d['attempts']}/{d['max_attempts']} runnable={bool(d['runnable'])}",
+             + f" runs={len(d.get('runs') or [])} attempts={d['attempts']}/{d['max_attempts']} runnable={bool(d['runnable'])}" + hold_txt(d),
              f"created {fmt_ts(d['created_at'])} by {d['created_by']}, updated {fmt_ts(d['updated_at'])}"
              + (f", owner {d['owner']} lease until {fmt_ts(d['lease_until'])}" if d.get("owner") else "")
              + (f", not before {fmt_ts(d['not_before'])}" if d.get("not_before") else "")]
@@ -351,7 +360,12 @@ def cmd_ls(c, a, out):
     where = []
     status = a.status
     bsel = None if a.all_boards else board_of(a)
-    if a.ready:
+    if a.stuck:
+        rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=100000, board=bsel)
+                if not r["runnable"] and json.loads(r["labels"] or "{}").get("hold") not in ("manual", "needs_admin")]
+        total = len(rows)
+        rows = rows[:a.limit]
+    elif a.ready:
         rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=a.limit + 1, board=bsel)
         total = len(rows)
         rows = rows[:a.limit]
@@ -753,7 +767,15 @@ def cmd_decision(c, a, out):
         args.append(a.owner)
     rows = c.execute(sql + " ORDER BY priority DESC, created_at LIMIT ?", args + [a.limit]).fetchall()
     items = [store.task_dict(c, r) for r in visible(c, a, rows)]
-    out(items, lambda xs: "\n".join(tline(x) for x in xs) or "(no decisions waiting)")
+    def text(xs):
+        rest = [x for x in xs if x["state"] != "ready"]
+        ready = [x for x in xs if x["state"] == "ready"]
+        lines = [tline(x) for x in rest]
+        if ready:
+            lines.append(f"ready but not runnable ({len(ready)}):")
+            lines += [f"  {x['id']}  hold={(x.get('labels') or {}).get('hold') or 'unknown'}  {x['title'][:70]}" for x in ready]
+        return "\n".join(lines) or "(no decisions waiting)"
+    out(items, text)
 
 
 def cmd_snapshot(c, a, out):
@@ -1679,6 +1701,7 @@ def build_parser():
     s = sub("ls", cmd_ls, "list tasks (default: open+claimed)", ["list"])
     s.add_argument("--status", "-s", help="open,claimed,done,dead,cancelled or all")
     s.add_argument("--ready", "-r", action="store_true", help="only claimable now")
+    s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin)")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=50)

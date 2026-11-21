@@ -519,6 +519,61 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
 norm_dir = store.norm_dir
 
 
+GIT_LOCK_NAMES = ("index.lock", "HEAD.lock", "packed-refs.lock", "config.lock")
+GIT_LOCK_MIN_AGE_S = 60  # never touch a lock an in-flight git may have just made
+
+
+def _path_open_by_any_process(path):
+    """True when some process has `path` open (scan /proc/<pid>/fd); unreadable fd dirs are skipped."""
+    target = os.path.realpath(path)
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"{fd_dir}/{fd}") == target:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def clear_stale_git_locks(wt, now_ts=None):
+    """Remove provably dead git lock files from a linked worktree's private git dir. A lock goes only when it is 0 bytes,
+    older than GIT_LOCK_MIN_AGE_S and open in no process. Returns [(name, mtime, removed, why)] for every lock seen."""
+    now_ts = time.time() if now_ts is None else now_ts
+    r = subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True, timeout=30)
+    if r.returncode:
+        return []
+    gd = Path(r.stdout.strip())
+    out = []
+    for name in GIT_LOCK_NAMES:
+        f = gd / name
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        why = ""
+        if st.st_size:
+            why = f"not empty ({st.st_size} bytes)"
+        elif now_ts - st.st_mtime < GIT_LOCK_MIN_AGE_S:
+            why = f"younger than {GIT_LOCK_MIN_AGE_S}s"
+        elif _path_open_by_any_process(f):
+            why = "held open by a live process"
+        if not why:
+            try:
+                f.unlink()
+            except OSError as e:
+                why = f"unlink failed: {e}"
+        out.append((name, st.st_mtime, not why, why))
+    return out
+
+
 # ---------------------------------------------------------------- runner
 def worktree_base(top):
     """Revision a card's own worktree branches from. Normally HEAD of the shared checkout. When that checkout sits on
@@ -850,6 +905,13 @@ class Runner:
                     self.wt_err = f"git worktree failed: {(r.stderr or r.stdout).strip()[-200:]}"
                     self.log(f"{task['id']}: {self.wt_err}")
                     return None
+            for name, mtime, removed, why in clear_stale_git_locks(wt):
+                if removed:
+                    self.log(f"{task['id']}: removed dead git lock {name} (mtime {mtime:.0f}) in {wt}")
+                    with tx(self.conn):
+                        event(self.conn, task["id"], "runner", "worktree_lock", {"file": name, "mtime": mtime, "dir": str(wt)})
+                else:
+                    self.log(f"{task['id']}: left git lock {name} in {wt}: {why}")
             return str(wt), branch, top.stdout.strip()
         except (OSError, subprocess.SubprocessError) as e:
             self.wt_err = f"git worktree failed: {e}"

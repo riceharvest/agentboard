@@ -4,6 +4,8 @@
 
 - op-request: queue a runner reload or an allowlisted config change from a non-admin card (`ab op-request add --kind reload|config --arg 'extra_args.claude=[...]' --why TEXT`, `ls [--stale --older 30m]`). The runner applies at most one per tick; `ab runner status` shows `requests: N pending`. Runner change: `ab runner reload` needed.
 
+- config: extra_args/extra_args_tier collisions merge or warn instead of last-one-wins. `--settings` objects deep-merge (tier wins per key) into one flag; any other flag in both keeps the base value, drops the tier copy and records a warning (`launch_warning` event in `ab log`, a `warnings` section in `ab config show`, and printed by `ab config set`). Runner change: `ab runner reload` needed.
+
 - Runner names why a ready card is not launched: a `hold` event (`workdir_locked:<path>`, `workdir_missing`, `no_tier_bucket`, `no_harness`, `deps_pending`, `not_before_future`, `runnable_flag_zero:<creator>`; one row per card+reason, refreshed every 5 min) and `hold_cleared` when it ends. `ab show` prints `hold=<reason> since <ts>`; `ab ls --stuck` groups by reason. Runner change: `ab runner reload` needed.
 
 - `ab done` can enforce a board's verdict vocabulary: `ab config set verdict_tokens GO,NO-GO` (or `verdict_tokens.BOARD`); a result whose first token is not listed is refused and the card stays claimed. `--no-verdict-check` bypasses it (noted). Unset = no check.

@@ -231,7 +231,9 @@ add flags to one tier; leave tiers you do not list untouched. Runner change: `ab
 claude keeps only the LAST of repeated `--settings`, so for claude launches agentboard merges every `--settings` (inline JSON or a
 JSON file path) from `extra_args` and `extra_args_tier` into ONE `--settings` JSON: objects deep-merge, lists (e.g. the hooks of one
 event) concatenate base first, other keys: the tier value wins. A single `--settings`, or a value that is not JSON, is passed unchanged.
-Other repeated flags are passed as written.
+Any other flag present in BOTH `extra_args` and `extra_args_tier` keeps the `extra_args` value; the tier copy is dropped and a
+warning names harness, tier, flag and both values (`launch_warning` event in `ab log ID`, `warnings` in `ab config show`, and printed by
+`ab config set`). Repeats inside one source are passed as written.
 
 **Grant refusals are not retried.** A run that fails because `ab` itself refused it for lack of a grant (`has no 'admin' on ...`)
 is not retried by another worker with the same rights: the card is held (label `needs_admin=overseer`, not auto-run), `ab anomalies`

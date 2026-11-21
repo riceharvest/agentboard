@@ -482,31 +482,55 @@ def cmd_request_reload(c, a, out):
     out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done")
 
 
-def dirty_files(c, tid):
-    """Untracked or modified (non-ignored) files in the task's worktree: labels.worktree_dir, else $AB_WORKDIR. [] if none or not git."""
+def dirty_files(c, tid, skipped=None):
+    """Untracked or modified (non-ignored) files this task is answerable for: in its own worktree (labels.worktree_dir) all of them;
+    in a shared checkout ($AB_WORKDIR) only paths touched since the task was last claimed, the rest are appended to `skipped`. [] if none or not git."""
     import subprocess
     row = store.get_task(c, tid) if tid else None
     d = ""
     if row is not None:
         d = (json.loads(row["labels"] or "{}")).get("worktree_dir") or ""
+    own = bool(d)
     d = d or os.environ.get("AB_WORKDIR", "")
     if not d or not os.path.isdir(d):
         return []
     p = subprocess.run(["git", "-C", d, "status", "--porcelain", "-uall"], capture_output=True, text=True)
-    return [ln for ln in p.stdout.splitlines() if ln.strip()] if p.returncode == 0 else []
+    lines = [ln for ln in p.stdout.splitlines() if ln.strip()] if p.returncode == 0 else []
+    if own or not lines or row is None:
+        return lines
+    ev = c.execute("SELECT MAX(ts) FROM events WHERE task_id=? AND kind='claimed'", (tid,)).fetchone()[0]
+    if ev is None:
+        return lines
+    mine = []
+    for ln in lines:
+        path = ln[3:].split(" -> ")[-1].strip().strip('"')
+        try:
+            touched = os.stat(os.path.join(d, path)).st_mtime >= ev
+        except OSError:
+            touched = False  # deleted: cannot be attributed in a shared checkout
+        (mine if touched else (skipped if skipped is not None else [])).append(ln)
+    return mine
 
 
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
-    if not a.allow_dirty and not a.force:
-        tid0 = a.id or os.environ.get("AB_TASK", "")
+    tid0 = a.id or os.environ.get("AB_TASK", "")
+    note = ""
+    if a.allow_dirty and not a.force:
         dirty = dirty_files(c, tid0)
+        if dirty:
+            store.event(c, tid0, actor_of(a), "allow_dirty", {"files": [ln.strip() for ln in dirty[:50]], "n": len(dirty)})
+    if not a.allow_dirty and not a.force:
+        skipped = []
+        dirty = dirty_files(c, tid0, skipped)
         if dirty:
             shown = "\n".join("  " + ln for ln in dirty[:20]) + (f"\n  ... and {len(dirty) - 20} more" if len(dirty) > 20 else "")
             raise ValueError(f"{tid0}: worktree has untracked or modified files, so the result cannot be reproduced from the branch; "
                              f"commit them (or delete them) and retry, or pass --allow-dirty:\n{shown}")
+        if skipped:
+            note = f" (ignored {len(skipped)} dirty path(s) this task did not change: {', '.join(ln[3:] for ln in skipped[:3])}{', ...' if len(skipped) > 3 else ''})"
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
-    out({"id": tid, "status": "done"}, f"{tid} done")
+    out({"id": tid, "status": "done"}, f"{tid} done{note}")
 
 
 def cmd_fail(c, a, out):

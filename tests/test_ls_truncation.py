@@ -28,3 +28,15 @@ def test_ls_no_note_when_short(abx):
     _fill(abx, 3)
     code, o, e = abx("ls")
     assert code == 0 and len(o.splitlines()) == 3 and e.strip() == ""
+
+
+def test_ls_limit_zero_means_all(abx):
+    _fill(abx, 60)
+    code, o, e = abx("ls", "--all-boards", "--status", "all", "--limit", "0")
+    assert code == 0 and len(o.splitlines()) == 60 and e.strip() == ""
+    code, o, e = abx("ls", "--all-boards", "--status", "all", "--limit", "0", "--json")
+    assert code == 0 and len(json.loads(o)) == 60 and e.strip() == ""
+    code, o, e = abx("ls", "--ready", "--limit", "0")
+    assert code == 0 and len(o.splitlines()) == 60 and "showing" not in e
+    code, o, e = abx("ls", "--status", "all", "--limit", "1")
+    assert code == 0 and len(o.splitlines()) == 1 and "showing 1 of 60 (add --limit N for more)" in e

@@ -362,16 +362,18 @@ def cmd_ls(c, a, out):
     where = []
     status = a.status
     bsel = None if a.all_boards else board_of(a)
+    unlimited = a.limit <= 0  # --limit 0 means all rows, like other CLIs
+    lim = 10**9 if unlimited else a.limit
     if a.stuck:
         rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=100000, board=bsel)
                 if (not r["runnable"] and json.loads(r["labels"] or "{}").get("hold") not in ("manual", "needs_admin"))
                 or store.current_hold(c, r["id"])]
         total = len(rows)
-        rows = rows[:a.limit]
+        rows = rows[:lim]
     elif a.ready:
-        rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=a.limit + 1, board=bsel)
+        rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=lim + 1, board=bsel)
         total = len(rows)
-        rows = rows[:a.limit]
+        rows = rows[:lim]
     else:
         if bsel:
             where.append("board=?")
@@ -392,7 +394,7 @@ def cmd_ls(c, a, out):
             sql += " WHERE " + " AND ".join(where)
         total = c.execute("SELECT COUNT(*) FROM tasks" + sql[len("SELECT * FROM tasks"):], args).fetchone()[0]
         sql += " ORDER BY CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 ELSE 2 END, priority DESC, updated_at DESC LIMIT ?"
-        rows = c.execute(sql, args + [a.limit]).fetchall()
+        rows = c.execute(sql, args + [lim]).fetchall()
     items = [store.task_dict(c, r) for r in visible(c, a, rows)]
     if a.ready and items:
         held = store.busy_dirs(c)
@@ -410,7 +412,7 @@ def cmd_ls(c, a, out):
             text += "\nholds by reason:\n" + "\n".join(f"  {r}: {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         return text
     out(items, ls_text)
-    if a.limit and total > a.limit:
+    if not unlimited and total > lim:
         more = "+" if a.ready else ""
         print(f"ab ls: showing {a.limit} of {total}{more} (add --limit N for more)", file=sys.stderr)
 
@@ -1728,7 +1730,7 @@ def build_parser():
     s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
-    s.add_argument("--limit", "-n", type=int, default=50)
+    s.add_argument("--limit", "-n", type=int, default=50, help="max rows (default 50; 0 = all)")
     s.add_argument("--all-boards", action="store_true")
 
     s = sub("show", cmd_show, "full task: body, notes, runs, result")

@@ -431,3 +431,12 @@ Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on s
 `usage_rates` prices usage rows whose provider reports no cost (per million tokens, with an optional scale and a peak-hours multiplier), so
 `max_cost` and `windows` caps can pace such a bucket. With `escalate_on_fail` a failed attempt retries the card one rung up `escalation_ladder`
 (a start tier that is too cheap costs one retry). A Hermes spec may carry an effort: `hermes/PROVIDER:MODEL@low` is passed as `--reasoning low`.
+
+### OpenCode Go quota guard (opt-in)
+
+    ab config set caps '{"BUCKET": {"provider": "opencode-go", "max_pct": {"5h": 90, "7d": 90, "30d": 90}, "pace_lead_h": 1}}'
+
+Reads the plan's own rolling (5h), weekly and monthly percentages from the OpenCode Console login on the machine (the credential file of
+`@opencode/console`, or the path in `AB_OPENCODE_CRED`; the token is never printed) and holds the bucket when a window reaches its `max_pct`
+or the provider reports it rate-limited. The reading is cached 2 minutes; if it cannot be read the guard fails open (keep a `windows` cost cap as a backstop).
+

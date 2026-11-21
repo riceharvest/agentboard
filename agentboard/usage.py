@@ -308,6 +308,64 @@ def claude_plan_pct():
 
 _DEFAULT_CLAUDE_PLAN_PCT = claude_plan_pct
 
+_GO = {"data": None, "ts": 0.0, "tried": 0.0}
+GO_WINDOWS = (("rolling", "5h", 5 * 3600.0), ("weekly", "7d", 7 * 86400.0), ("monthly", "30d", 30 * 86400.0))
+
+
+def opencode_go_usage():
+    """OpenCode Go allowance as the provider reports it: {"rolling"|"weekly"|"monthly": {"percent", "limited", "resets_at"}} or None.
+    Uses the OpenCode Console login on this machine (opencode-console credential file, or the path in env AB_OPENCODE_CRED); the token is never printed or stored.
+    Cached PLAN_TTL_S; the last good reading is served for PLAN_STALE_S after a failed read."""
+    now = time.time()
+    if _GO["data"] is not None and now - _GO["ts"] < PLAN_TTL_S:
+        return _GO["data"]
+    if _GO["data"] is None and now - _GO["tried"] < 30:
+        return None
+    _GO["tried"] = now
+    try:
+        import urllib.request
+        cp = Path(os.environ.get("AB_OPENCODE_CRED") or Path.home() / ".local/share/opencode-console/credential.json")
+        cred = json.loads(cp.read_text())
+        base = cred.get("server") or "https://opencode.ai/console"
+        origin = "/".join(base.split("/")[:3])
+        req = urllib.request.Request(origin + "/zen/go/v1/usage", headers={
+            "Authorization": "Bearer " + cred["access"], "x-opencode-org-id": cred["orgID"], "User-Agent": "agentboard/1.0"})
+        j = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())["usage"]
+        _GO["data"] = {k: {"percent": float(j[k]["percent"]), "limited": j[k].get("status") == "rate-limited",
+                           "resets_at": _parse_reset_ts(j[k].get("resetsAt"), now)} for k, _, _ in GO_WINDOWS}
+        _GO["ts"] = now
+    except Exception:
+        if _GO["data"] is not None and now - _GO["ts"] > PLAN_STALE_S:
+            _GO["data"] = None
+        elif _GO["data"] is not None:
+            _GO["ts"] = now - PLAN_TTL_S + 30
+    return _GO["data"]
+
+
+def go_windows(cap, now=None):
+    """Provider windows for a bucket whose cap has {"provider": "opencode-go", "max_pct": {"5h": 90, "7d": 90, "30d": 90}, "pace_lead_h": h}."""
+    d = opencode_go_usage()
+    if not d:
+        return []
+    now = now if now is not None else time.time()
+    mp = cap.get("max_pct") or {}
+    return [{"name": nm, "used": d[k]["percent"], "window_s": w_s, "resets_at": d[k]["resets_at"],
+             "max_pct": float(mp.get(nm, 100.0)), "lead_h": float(cap.get("pace_lead_h") or 0.0),
+             "hard_pace": cap.get("pace_lead_h") is not None} for k, nm, w_s in GO_WINDOWS]
+
+
+def go_reason(cap):
+    """Reason string when the Go allowance is at/over a cap max_pct (or the provider itself reports the window limited)."""
+    d = opencode_go_usage()
+    if not d:
+        return None
+    mp = cap.get("max_pct") or {}
+    for k, nm, _ in GO_WINDOWS:
+        lim = float(mp.get(nm, 100.0))
+        if d[k]["limited"] or d[k]["percent"] >= lim:
+            return f"provider guard: opencode-go {nm} usage {d[k]['percent']:.0f}% >= {lim:.0f}% (resets {time.strftime('%m-%d %H:%M', time.localtime(d[k]['resets_at']))})"
+    return None
+
 
 def skip_7d(cap, now=None):
     """True while `ignore_7d_until` (epoch) is in the future: the weekly window neither caps nor paces."""
@@ -536,6 +594,8 @@ def provider_windows(conn, bucket, cap=None, plan=_LIVE, now=None):
     Empty list when the provider reports nothing for this bucket."""
     now = now if now is not None else time.time()
     cap = cap if cap is not None else ((store.cfg(conn, "caps") or {}).get(bucket) or {})
+    if cap.get("provider") == "opencode-go":
+        return go_windows(cap, now)
     if bucket == "claude-sub":
         p = None
         if plan is _LIVE:
@@ -835,6 +895,10 @@ def cap_status(conn, bucket, plan=_LIVE):
     r = plan_status(cap) if plan is _LIVE else plan_reason(cap, plan)
     if r:
         return r
+    if cap.get("provider") == "opencode-go":
+        r = go_reason(cap)
+        if r:
+            return r
     if bucket == "openai-codex" and cap.get("pace_lead_h") is not None:
         cw = codex_rate_limits() if plan is _LIVE else stored_codex(conn)[0]
         r = pace_reason(cap, cw)

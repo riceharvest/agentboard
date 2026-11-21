@@ -204,6 +204,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN endpoint TEXT")
     if "provider" not in _cols(conn, "runs"):
         conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT")
+    if "wake" not in _cols(conn, "runs"):
+        conn.execute("ALTER TABLE runs ADD COLUMN wake TEXT")
     if "park" not in _cols(conn, "tasks"):
         conn.execute("ALTER TABLE tasks ADD COLUMN park TEXT")
     if "cmd" not in _cols(conn, "tasks"):
@@ -563,7 +565,12 @@ def task_dict(conn, row, full=False):
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]
         d["runs"] = [dict(r) for r in conn.execute(
             "SELECT id,harness,endpoint,provider,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
-            "cache_write,reasoning,cost_usd,detail FROM runs WHERE task_id=? ORDER BY id", (d["id"],))]
+            "cache_write,reasoning,cost_usd,detail,wake FROM runs WHERE task_id=? ORDER BY id", (d["id"],))]
+        for r in d["runs"]:
+            try:
+                r["wake"] = json.loads(r["wake"]) if r.get("wake") else None
+            except ValueError:
+                r["wake"] = None
     return d
 
 

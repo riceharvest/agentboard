@@ -450,6 +450,17 @@ def cmd_show(c, a, out):
     out(store.task_dict(c, row, full=True), show_text)
 
 
+def cmd_wake(c, a, out):
+    row = store.must_task(c, a.id)
+    store.require(c, actor_of(a), "read", row["board"], row["channel"])
+    r = c.execute("SELECT id,wake FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+    if not r or not r["wake"]:
+        print(f"ab wake: {row['id']} has no wake snapshot ("
+              + ("no runs yet" if not r else f"run {r['id']} predates the field") + ")", file=sys.stderr)
+        return 2
+    print(json.dumps(json.loads(r["wake"]), indent=2, sort_keys=True))
+
+
 def cmd_claim(c, a, out):
     deadline = now() + (parse_dur(a.wait) or 0)
     while True:
@@ -1764,6 +1775,9 @@ def build_parser():
     s.add_argument("--all-boards", action="store_true")
 
     s = sub("show", cmd_show, "full task: body, notes, runs, result")
+    s.add_argument("id")
+
+    s = sub("wake", cmd_wake, "print the newest run's wake snapshot (card + scheduler settings at launch) as JSON; exit 2 if the run predates it")
     s.add_argument("id")
 
     s = sub("claim", cmd_claim, "claim the next ready task (or a given id); exit 3 if none")

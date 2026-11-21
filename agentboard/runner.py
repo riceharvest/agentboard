@@ -968,8 +968,15 @@ class Runner:
             if cur["status"] != "open" or self.has_live_run(task["id"]) or task["id"] not in {r["id"] for r in store.ready_tasks(c, runnable_only=True, limit=100000)}:
                 return False
             t_start = now()
-            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint,provider) VALUES(?,?,?,?,?,?,?,?,?)",
-                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, t_start, cand.endpoint, cand.provider))
+            wake = json.dumps({
+                "at": t_start, "board": cur["board"], "status": cur["status"], "priority": cur["priority"], "tier": cur["tier"],
+                "attempts": cur["attempts"] or 0, "labels": json.loads(cur["labels"] or "{}"),
+                "deps": [r["dep_id"] for r in c.execute("SELECT dep_id FROM deps WHERE task_id=? ORDER BY dep_id", (task["id"],))],
+                "cfg": {"slots": cfg(c, "slots"), "launch_per_tick": cfg(c, "launch_per_tick"), "gating": cfg(c, "gating"),
+                        "paused": bool(cfg(c, "paused"))},
+                "bucket": bucket, "candidate": cand.label()}, sort_keys=True)
+            c.execute("INSERT INTO runs(task_id,harness,model,effort,tier,bucket,started_at,endpoint,provider,wake) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (task["id"], cand.harness, cand.model, cand.effort, task["tier"], bucket, t_start, cand.endpoint, cand.provider, wake))
             run_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             owner = f"{cand.harness}#{run_id}"
             # label role=NAME runs the agent as NAME#<run> (so a grant on 'NAME#*' can give it more rights, e.g. an

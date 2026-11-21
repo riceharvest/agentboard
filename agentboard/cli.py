@@ -559,6 +559,30 @@ def cmd_request_reload(c, a, out):
     out({"ok": True, "id": tid, "reload_after": cur}, f"runner reload requested; it runs once {tid} is done" + ("" if len(cur) == 1 else f" (queued: {', '.join(cur)})"))
 
 
+def cmd_op_request(c, a, out):
+    """Any actor may ASK for a runner reload or an allowlisted config change; the runner tick applies it. Never applies here."""
+    act = a.action or "ls"
+    if act == "add":
+        if not a.kind:
+            raise ValueError("usage: ab op-request add --kind reload|config [--arg 'key=value'] --why TEXT")
+        adopt_run_identity(c, board=getattr(a, "board", None))   # a worker terminal without AB_* env: take it from the run home
+        tid = os.environ.get("AB_TASK") or None
+        rid = store.op_request_add(c, a.kind, a.arg, a.why, actor_of(a), tid)
+        out({"ok": True, "id": rid, "state": "pending", "kind": a.kind, "task_id": tid},
+            f"op-request {rid} queued ({a.kind}); the runner applies it on a tick, no admin needed to ask")
+        return
+    older = parse_dur(a.older or "30m", "m") if (a.stale or a.older) else None
+    rows = store.op_requests(c, "pending" if a.stale else a.state, older)
+
+    def txt(rs):
+        if not rs:
+            return "no op-requests"
+        return "\n".join(f"#{r['id']} {r['state']:<8} {r['kind']:<6} {r['arg'] or '-'}  by {r['actor']}"
+                         + (f" task {r['task_id']}" if r["task_id"] else "") + f"  {fmt_ts(r['created_at'])}  why: {r['why']}"
+                         + (f"  [{r['result']}]" if r.get("result") else "") for r in rs)
+    out(rows, txt)
+
+
 def _porcelain_path(ln):
     return ln[3:].split(" -> ")[-1].strip().strip('"')
 
@@ -1180,12 +1204,16 @@ def cmd_runner(c, a, out):
     st.update({"paused": ctl["paused"], "draining": ctl["draining"], "slots_setting": ctl["slots"], "stop": ctl["stop"],
                "free_gib": round(R.free_gib(), 1), "ready": len(store.ready_tasks(c, runnable_only=True))})
 
+    st["op_pending"], st["op_oldest_s"] = store.op_pending_summary(c)
+
     def txt(s):
         head = (f"runner {'RUNNING' if s['running'] else 'NOT RUNNING'}" + (f" pid {s.get('pid')}" if s.get("pid") else "")
                 + f"  state={s.get('state')} slots={s.get('slots')} (setting {s['slots_setting']}) paused={s['paused']} "
                 f"draining={s['draining']} ready={s['ready']} free={s['free_gib']}GiB"
                 + (f" heartbeat {fmt_dur(now() - s['heartbeat'])} ago" if s.get("heartbeat") else ""))
         lines = [head]
+        if s.get("op_pending"):
+            lines.append(f"requests: {s['op_pending']} pending (oldest {fmt_dur(s['op_oldest_s'])})")
         if s.get("stale"):
             lines.append(store.STALE_MSG)
         if s.get("note"):
@@ -1944,6 +1972,15 @@ def build_parser():
     s.add_argument("tier", nargs="?")
     s.add_argument("specs", nargs="*", help="harness:model@effort, e.g. claude:sonnet@high")
     s.add_argument("--pos", type=int)
+
+    s = sub("op-request", cmd_op_request, "ask the runner (no admin needed) to reload or apply an allowlisted config change: add --kind reload|config [--arg k=v] --why TEXT | ls [--state S] [--stale --older 30m]")
+    s.add_argument("action", nargs="?", choices=["add", "ls"])
+    s.add_argument("--kind")
+    s.add_argument("--arg")
+    s.add_argument("--why")
+    s.add_argument("--state", choices=["pending", "applying", "applied", "rejected"])
+    s.add_argument("--stale", action="store_true", help="pending rows nobody drained (with --older, default 30m)")
+    s.add_argument("--older", help="age threshold, e.g. 30m")
 
     s = sub("runner", cmd_runner, "start | stop [--now] | reload | pause | resume | drain | slots N | status | run | service [--enable]")
     s.add_argument("action", nargs="?", choices=["start", "stop", "reload", "pause", "resume", "drain", "slots", "status", "run", "service"])

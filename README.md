@@ -65,6 +65,10 @@ the board commands. After you change agentboard itself, `ab runner reload` makes
 code without waiting for or killing running agents (they are re-adopted); `ab runner stop` waits for them to finish
 and `ab runner start` or `resume` cancels a pending stop. Agents finish with `ab done $AB_TASK "result"`, or with `fail`, `fail --negative` (records an intended negative with label `outcome=negative` so `ab anomalies` and `--on dead` watchers skip it; also works retroactively on dead cards for any actor with write access), `defer`, `park` (wait for a long external job, see below) or `release`.
 
+#### op-request (ask without admin)
+
+A worker without an admin grant queues the step instead of stranding it: `ab op-request add --kind reload --why TEXT`, or `--kind config --arg 'extra_args.claude=["--flag"]' --why TEXT` (only `extra_args` and `extra_args_tier` are allowed; other keys are refused at add time). It writes a row and applies nothing. The runner tick applies at most one pending request (config: records before/after in the runner log; reload: the same re-exec as `ab runner reload`). `ab op-request ls [--json] [--state S] [--stale --older 30m]` lists the queue; `ab runner status` prints `requests: N pending (oldest Xm)`.
+
 ### One workdir, one run (the workdir lock)
 
 The runner never starts a card in a workdir that another card currently holds. The check reads the board, so it covers

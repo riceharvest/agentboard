@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A card that runs in its own worktree no longer shows a `workdir_locked` hold for the shared checkout: `worktree=on` (and the automatic worktree on a git checkout) is exempt at hold-report time, matching the runner's pick rule. When `worktree=on` cannot isolate (non-git workdir) the hold reason says so (`share_workdir true` needs no exemption: it has no lock). `ab ls --stuck` / `ab show` now name the holder next to `workdir_locked`: `held_by <card id> pid <pid>`, or `held_by runner` when the runner holds it. Runner change: `ab runner reload` needed.
+
 - Runner names why a ready card is not launched: a `hold` event (`workdir_locked:<path>`, `workdir_missing`, `no_tier_bucket`, `no_harness`, `deps_pending`, `not_before_future`, `runnable_flag_zero:<creator>`; one row per card+reason, refreshed every 5 min) and `hold_cleared` when it ends. `ab show` prints `hold=<reason> since <ts>`; `ab ls --stuck` groups by reason. Runner change: `ab runner reload` needed.
 
 - `ab done` can enforce a board's verdict vocabulary: `ab config set verdict_tokens GO,NO-GO` (or `verdict_tokens.BOARD`); a result whose first token is not listed is refused and the card stays claimed. `--no-verdict-check` bypasses it (noted). Unset = no check.

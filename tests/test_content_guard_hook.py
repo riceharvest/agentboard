@@ -72,6 +72,10 @@ def test_false_positives_pass(hooked_repo):
     assert rc == 0, out
     rc, out = _try_commit(repo, "tui/tests/sample.rs", 'const ID: &str = "t_deadbeef";\n')
     assert rc == 0, out
+    # Placeholder ids in documentation files must pass
+    for doc in ("README.md", "docs/guide.rst", "notes.txt"):
+        rc, out = _try_commit(repo, doc, "example id: t_ab12cd34\n")
+        assert rc == 0, out
 
 
 def test_real_guards_still_blocked(hooked_repo):

@@ -559,6 +559,8 @@ class Runner:
         self.children = {}
         self.host = socket.gethostname()
         self.waiting = {}
+        self.iso_skipped = set()
+        self.wt_err = None
         self.last_harvest = 0
         self.log_f = log or sys.stderr
         self.lock_f = None
@@ -824,6 +826,7 @@ class Runner:
         try:
             top = subprocess.run(["git", "-C", workdir, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=30)
             if top.returncode:
+                self.wt_err = "not a git dir"
                 return None
             wt = Path(store.HOME) / "worktrees" / task["id"]
             branch = f"ab/{task['id']}"
@@ -835,11 +838,13 @@ class Runner:
                     r = subprocess.run(["git", "-C", top.stdout.strip(), "worktree", "add", str(wt), branch],
                                        capture_output=True, text=True, timeout=120)
                 if r.returncode:
-                    self.log(f"{task['id']}: git worktree failed: {(r.stderr or r.stdout).strip()[-200:]}")
+                    self.wt_err = f"git worktree failed: {(r.stderr or r.stdout).strip()[-200:]}"
+                    self.log(f"{task['id']}: {self.wt_err}")
                     return None
             return str(wt), branch, top.stdout.strip()
         except (OSError, subprocess.SubprocessError) as e:
-            self.log(f"{task['id']}: git worktree failed: {e}")
+            self.wt_err = f"git worktree failed: {e}"
+            self.log(f"{task['id']}: {self.wt_err}")
             return None
 
     def has_live_run(self, task_id):
@@ -889,7 +894,25 @@ class Runner:
             labels = json.loads(t["labels"] or "{}")
             free = self.lockfree(labels)
             wt = None
-            if not free and not cfg(c, "share_workdir") and norm_dir(workdir) in busy_dirs:
+            explicit = str(labels.get("worktree", "")).lower() in ("on", "1", "yes", "true")
+            if explicit and cfg(c, "share_workdir"):
+                if t["id"] not in self.iso_skipped:
+                    self.iso_skipped.add(t["id"])
+                    with tx(c):
+                        event(c, t["id"], "runner", "isolation_skipped", {"why": "share_workdir=true: worktree=on skipped, running in the shared workdir"})
+                    self.log(f"{t['id']}: worktree=on skipped because share_workdir=true")
+            elif explicit:
+                # worktree=on always isolates, busy or not; never fall back to the shared checkout
+                if not store.is_git_dir(workdir):
+                    why = "not a git dir (worktree=on needs a git workdir)"
+                    if self.waiting.get(t["id"]) != why:
+                        self.waiting[t["id"]] = why
+                        with tx(c):
+                            event(c, t["id"], "runner", "waiting", {"why": why})
+                        self.log(f"{t['id']} waiting: {why}")
+                    continue
+                wt = True
+            elif not free and not cfg(c, "share_workdir") and norm_dir(workdir) in busy_dirs:
                 git_ok = store.is_git_dir(workdir)
                 want = store.want_worktree(c, labels)
                 if not git_ok or not want:
@@ -923,7 +946,13 @@ class Runner:
         if worktree:
             wtinfo = self.make_worktree(task, workdir)
             if not wtinfo:
-                return False  # not a git repo / git failed: stay queued like a plain busy dir
+                why = getattr(self, "wt_err", None) or "git worktree failed"
+                if self.waiting.get(task["id"]) != why:
+                    self.waiting[task["id"]] = why
+                    with tx(c):
+                        event(c, task["id"], "runner", "waiting", {"why": why})
+                    self.log(f"{task['id']} waiting: {why}")
+                return False  # stay queued, never fall back to the shared dir
         a = H.ADAPTERS[cand.harness]
         with tx(c):
             cur = c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()

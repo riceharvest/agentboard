@@ -1994,8 +1994,7 @@ def main(argv=None):
         msg = str(e).strip("'\"")
         if out.as_json:
             print(json.dumps({"error": msg, "type": type(e).__name__}))
-        else:
-            print(f"error: {msg}", file=sys.stderr)
+        print(f"error: {msg}", file=sys.stderr)  # also in --json mode, so wrappers that show stderr print the text
         return 1
     finally:
         conn.close()

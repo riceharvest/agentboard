@@ -272,20 +272,22 @@ def parse_dur(s, default_unit="s"):
 
 
 def parse_time(s, base=None):
-    """'+2h', 'HH:MM' (next occurrence), 'YYYY-MM-DD HH:MM', ISO, or epoch -> epoch seconds."""
+    """'+2h', 'now', 'HH:MM' (next occurrence; the current minute means today), 'YYYY-MM-DD HH:MM', ISO, or epoch -> epoch seconds."""
     if s is None or s == "":
         return None
     s = str(s).strip()
     base = base or now()
     if s.startswith("+"):
         return base + parse_dur(s[1:])
+    if s.lower() == "now":
+        return base
     if re.fullmatch(r"\d{9,11}(\.\d+)?", s):
         return float(s)
     m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
     if m:
         b = datetime.fromtimestamp(base)
         t = b.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
-        if t.timestamp() <= base:
+        if t.timestamp() <= base and base - t.timestamp() >= 60:  # same minute = today
             t += timedelta(days=1)
         return t.timestamp()
     try:

@@ -188,7 +188,8 @@ def code_version():
     return h.hexdigest()[:10]
 
 
-STALE_MSG = "runner code older than installed code: ab runner reload"
+STALE_MSG = ("runner code older than installed code — reload now: ab runner reload (needs admin, HANDOFF: admin actor)"
+             " · queue it: ab request-reload [ID]")
 
 
 def _cols(conn, table):

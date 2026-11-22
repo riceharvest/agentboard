@@ -640,6 +640,8 @@ class Runner:
         self.waiting = {}
         self.gates = {}              # card id -> launch-gate hold reason (ram_gate / board_slots) from the last fill()
         self.iso_skipped = set()
+        self.gate_since = None       # monotonic time the RAM gate first held with zero runs
+        self.gate_probe = None       # card started anyway this gate episode (one probe per episode)
         self.wt_err = None
         self.unloadable_note = None
         self.last_harvest = 0
@@ -1026,12 +1028,31 @@ class Runner:
                 self.gates[t["id"]] = f"board_slots:{t['board']} {cap}/{cap}"
                 continue
             gib = free_gib()
-            if gib < float(cfg(c, "min_free_gib") or 0):
-                note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
-                reason = f"ram_gate:{gib:.1f}GiB<{float(cfg(c, 'min_free_gib')):g}"
-                for u in ready[i:]:  # every card the gate keeps back, not just the one that tripped it
-                    self.gates.setdefault(u["id"], reason)
-                break
+            floor = float(cfg(c, "min_free_gib") or 0)
+            if gib >= floor:
+                self.gate_since = None
+                self.gate_probe = None
+            else:
+                if not self.children:
+                    if self.gate_since is None:
+                        self.gate_since = time.monotonic()
+                else:
+                    self.gate_since = None
+                band = max(float(cfg(c, "ram_gate_idle_hard_floor_gib") or 0), floor - float(cfg(c, "ram_gate_idle_slack_gib") or 0))
+                grace = float(cfg(c, "ram_gate_idle_grace_s") or 0)
+                if (not self.children and self.gate_probe is None and gib >= band
+                        and self.gate_since is not None and time.monotonic() - self.gate_since >= grace):
+                    # idle board under the floor: nothing running means nothing will ever free RAM, so start one probe run
+                    self.gate_probe = t["id"]
+                    self.log("ram gate: nothing running, starting one run to break the deadlock")
+                else:
+                    note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
+                    reason = f"ram_gate:{gib:.1f}GiB<{floor:g}"
+                    if self.gate_probe:
+                        reason += f" (idle probe {self.gate_probe} started anyway)"
+                    for u in ready[i:]:  # every card the gate keeps back, not just the one that tripped it
+                        self.gates.setdefault(u["id"], reason)
+                    break
             workdir = t["workdir"] or str(store.HOME / "work" / t["id"])
             if (t["kind"] or ("cmd" if t["cmd"] else "agent")) not in KNOWN_KINDS:
                 with tx(c):

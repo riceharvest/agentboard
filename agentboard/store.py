@@ -82,6 +82,9 @@ DEFAULTS = {
     "lease": "30m",             # lease for agent-held claims; the runner renews its own children
     "timeout": "2h",            # default per-run wall clock
     "min_free_gib": 10,         # don't start an agent below this much free RAM
+    "ram_gate_idle_hard_floor_gib": 2,  # idle-board probe never starts below this much free RAM
+    "ram_gate_idle_slack_gib": 1.5,     # with zero runs, one run may start when free >= min_free_gib - slack (and >= hard floor)
+    "ram_gate_idle_grace_s": 0,         # seconds the gate must have held with no runs before that probe
     "harvest_every_s": 60,
     "sync_every_s": 120,
     "strip_invisible": True,    # drop zero-width / bidi / tag characters from card and message text on ingest (the event records how many)

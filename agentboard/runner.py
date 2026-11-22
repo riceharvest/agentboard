@@ -916,7 +916,12 @@ class Runner:
         reasons = []
         skip_n = limit_skip_n(self.conn)
         lab = store.effective_labels(self.conn, task)
+        routes = store.board_routes(self.conn, task["board"])
         for cand in primary + extra:
+            ok, why = store.board_route_ok(self.conn, task["board"], cand, routes=routes)
+            if not ok:
+                reasons.append(f"{cand.label()}: {why}")
+                continue
             ok, why = store.family_guard(lab, cand.harness, cand.model)
             if not ok:
                 reasons.append(f"{cand.label()}: {why}")

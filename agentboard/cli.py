@@ -1850,7 +1850,8 @@ def cmd_boards(c, a, out):
     if act == "create":
         admin(c, a)
         store.board_create(c, a.name, actor_of(a), a.description or "", a.max_slots, a.tier,
-                           str(Path(a.workdir).expanduser().resolve()) if a.workdir else None)
+                           str(Path(a.workdir).expanduser().resolve()) if a.workdir else None,
+                           _routes(a))
     elif act == "set":
         admin(c, a, a.name)
         f = {}
@@ -1862,6 +1863,8 @@ def cmd_boards(c, a, out):
             f["default_tier"] = a.tier or None
         if a.workdir is not None:
             f["default_workdir"] = str(Path(a.workdir).expanduser().resolve()) if a.workdir else None
+        if a.routes is not None:
+            f["routes"] = json.dumps(_routes(a)) if _routes(a) else None
         if a.pause:
             f["paused"] = 1
         if a.resume:
@@ -1873,12 +1876,19 @@ def cmd_boards(c, a, out):
     rows = []
     for r in c.execute("SELECT * FROM boards ORDER BY name"):
         d = dict(r)
+        d["routes"] = store.board_routes(c, r["name"])
         d["counts"] = {x["status"]: x["n"] for x in c.execute("SELECT status, COUNT(*) n FROM tasks WHERE board=? GROUP BY status", (r["name"],))}
         rows.append(d)
     out(rows, lambda xs: "\n".join(
         f"{d['name']:<14} {'PAUSED ' if d['paused'] else ''}max_slots={d['max_slots'] if d['max_slots'] is not None else '-'} "
-        f"tier={d['default_tier'] or '-'} " + " ".join(f"{k}={v}" for k, v in sorted(d["counts"].items()))
+        f"tier={d['default_tier'] or '-'} " + (f"routes={','.join(d['routes'])} " if d["routes"] else "")
+        + " ".join(f"{k}={v}" for k, v in sorted(d["counts"].items()))
         + (f"  {d['description']}" if d["description"] else "") for d in xs))
+
+
+def _routes(a):
+    """--routes 'a,b' -> ['a','b']; an empty value clears the allowlist."""
+    return [x.strip() for x in (a.routes or "").split(",") if x.strip()]
 
 
 # ---- endpoints (OpenAI-compatible servers any endpoint-capable harness can run on)
@@ -2396,13 +2406,15 @@ def build_parser():
     s.add_argument("--grant-board", help="board the grant applies to, or * for all (default: current board)")
     s.add_argument("--note")
 
-    s = sub("boards", cmd_boards, "boards: ls | create NAME | set NAME [--pause|--resume|--max-slots N|--tier T|--workdir D] | rm NAME [--force]")
+    s = sub("boards", cmd_boards, "boards: ls | create NAME | set NAME [--pause|--resume|--max-slots N|--tier T|--workdir D|--routes SPECS] | rm NAME [--force]")
     s.add_argument("action", nargs="?", choices=["ls", "create", "set", "rm"])
     s.add_argument("name", nargs="?")
     s.add_argument("--description")
     s.add_argument("--max-slots", type=int, help="max parallel agents for this board (-1 = no cap)")
     s.add_argument("--tier", help="default tier for new tasks on this board")
     s.add_argument("--workdir", help="default workdir for new tasks on this board")
+    s.add_argument("--routes", help="comma-separated route allowlist for this board (globs ok, e.g. 'hermes/*:deepseek*'); "
+                                    "cards launch only on those routes, tier fallback included; '' clears it")
     s.add_argument("--pause", action="store_true")
     s.add_argument("--resume", action="store_true")
     s.add_argument("--force", action="store_true")

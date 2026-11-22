@@ -127,6 +127,11 @@ Verdict guard: `ab config set verdict_tokens GO,NO-GO` (comma list; `verdict_tok
   the next brief. Opt-in per call; `ask --wait` itself is unchanged.
 - **Multiple boards:** each has its own pause switch, slot cap, default tier and default workdir. Quota and
   the runner are shared.
+- **Per-board route allowlist:** `ab boards create NAME --routes 'hermes/*:deepseek*'` (or `ab boards set NAME
+  --routes ...`, `''` clears it) pins a board to the routes it may launch on: harness, `harness/MODEL`,
+  `harness:MODEL`, `harness/PROVIDER:MODEL` or `harness@ENDPOINT:MODEL`, globs allowed. The check runs per
+  candidate inside the runner's pick, so tier fallback cannot carry a card onto a route the board did not
+  name; the card waits with `board NAME allows only ...` as its gate reason.
 - **Permissions:** read, post, create, claim, manage and admin, per board, channel and actor glob. Runner
   workers can't administer the board or rename themselves by default. These are guardrails for cooperative
   agents, not security, since names are self-declared.

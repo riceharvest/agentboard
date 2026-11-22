@@ -107,7 +107,8 @@ TOOLS = {
                                                        "context": ("--context", I), "bucket": ("--bucket", S)}, []),
     "ab_boards": ("Boards. action ls|create|set|rm.", "boards", ["action", "name"],
                   {"description": ("--description", S), "max_slots": ("--max-slots", I), "tier": ("--tier", S),
-                   "workdir": ("--workdir", S), "pause": ("--pause", B), "resume": ("--resume", B), "force": ("--force", B)}, []),
+                   "workdir": ("--workdir", S), "routes": ("--routes", S),
+                   "pause": ("--pause", B), "resume": ("--resume", B), "force": ("--force", B)}, []),
 }
 
 JS = {S: {"type": "string"}, I: {"type": "number"}, B: {"type": "boolean"},

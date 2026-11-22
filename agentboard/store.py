@@ -17,7 +17,7 @@ DEFAULT_BOARD = "main"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS boards(name TEXT PRIMARY KEY, description TEXT DEFAULT '', paused INTEGER DEFAULT 0,
-  max_slots INTEGER, default_tier TEXT, default_workdir TEXT, created_by TEXT, created_at REAL);
+  max_slots INTEGER, default_tier TEXT, default_workdir TEXT, routes TEXT, created_by TEXT, created_at REAL);
 CREATE TABLE IF NOT EXISTS tasks(
   id TEXT PRIMARY KEY, board TEXT DEFAULT 'main', title TEXT NOT NULL, body TEXT DEFAULT '', channel TEXT DEFAULT 'main',
   status TEXT NOT NULL DEFAULT 'open', priority INTEGER DEFAULT 0, labels TEXT DEFAULT '{}',
@@ -236,6 +236,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE tasks ADD COLUMN verify TEXT")
     if "code_ver" not in _cols(conn, "runner"):
         conn.execute("ALTER TABLE runner ADD COLUMN code_ver TEXT")
+    if "routes" not in _cols(conn, "boards"):
+        conn.execute("ALTER TABLE boards ADD COLUMN routes TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_key ON tasks(board, key)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
@@ -433,19 +435,63 @@ def require_board(conn, name):
     return row
 
 
-def board_create(conn, name, actor, description="", max_slots=None, default_tier=None, default_workdir=None):
+def board_routes(conn, name):
+    """Route allowlist of a board: [] = no restriction (the default for every board)."""
+    row = board_row(conn, name)
+    if row is None:
+        return []
+    try:
+        return [str(x) for x in (json.loads(row["routes"]) if row["routes"] else []) if str(x).strip()]
+    except (ValueError, TypeError):
+        return []
+
+
+def route_forms(cand):
+    """Every spelling a route allowlist may use for one launch candidate.
+
+    `hermes`, `hermes/MODEL`, `hermes:MODEL`, `hermes/PROVIDER:MODEL`,
+    `hermes@ENDPOINT` and `hermes@ENDPOINT:MODEL`; fnmatch globs apply."""
+    h, m = cand.harness, (cand.model or "")
+    forms = {h}
+    if m:
+        forms |= {f"{h}/{m}", f"{h}:{m}"}
+    if getattr(cand, "provider", None) and m:
+        forms.add(f"{h}/{cand.provider}:{m}")
+    if getattr(cand, "endpoint", None):
+        forms.add(f"{h}@{cand.endpoint}")
+        if m:
+            forms.add(f"{h}@{cand.endpoint}:{m}")
+    return forms
+
+
+def board_route_ok(conn, board, cand, routes=None):
+    """-> (allowed, reason). A board with a route allowlist launches a card on those
+    routes only, including tier fallback: the check runs per candidate, so a blocked
+    or limited tier can never carry the card onto a route the board did not name."""
+    routes = board_routes(conn, board) if routes is None else routes
+    if not routes:
+        return True, None
+    forms = route_forms(cand)
+    if any(fnmatch.fnmatchcase(f, pat) for pat in routes for f in forms):
+        return True, None
+    return False, f"board {board} allows only {', '.join(routes)}"
+
+
+def board_create(conn, name, actor, description="", max_slots=None, default_tier=None, default_workdir=None, routes=None):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name or ""):
         raise ValueError("board names: letters, digits, _ . - (max 64)")
     with tx(conn):
         if board_row(conn, name):
             raise ValueError(f"board {name!r} exists")
-        conn.execute("INSERT INTO boards(name,description,max_slots,default_tier,default_workdir,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
-                     (name, description or "", max_slots, default_tier, default_workdir, actor, now()))
-        event(conn, None, actor, "board_created", {"name": name}, board=name)
+        conn.execute("INSERT INTO boards(name,description,max_slots,default_tier,default_workdir,routes,created_by,created_at)"
+                     " VALUES(?,?,?,?,?,?,?,?)",
+                     (name, description or "", max_slots, default_tier, default_workdir,
+                      json.dumps([str(x) for x in routes]) if routes else None, actor, now()))
+        event(conn, None, actor, "board_created", {"name": name, "routes": list(routes or [])}, board=name)
 
 
 def board_update(conn, name, actor, **fields):
-    allowed = {"description", "paused", "max_slots", "default_tier", "default_workdir"}
+    allowed = {"description", "paused", "max_slots", "default_tier", "default_workdir", "routes"}
     why = audit(actor)
     with tx(conn):
         require_board(conn, name)

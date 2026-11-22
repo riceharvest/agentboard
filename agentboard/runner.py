@@ -139,6 +139,9 @@ def wake_parked(conn):
             rs = store.park_replies(conn, spec)
             if rs:
                 why = f"reply in thread {spec['reply_thread']} from {rs[0]['author']}"
+        elif spec.get("resource"):
+            if store.resource_block(conn, {"needs": spec["resource"]}, exclude=r["id"]) is None:
+                why = f"resource {spec['resource']} is free"
         elif spec.get("pid"):
             if not alive(spec["pid"], spec.get("pid_start")):
                 why = f"pid {spec['pid']} exited"
@@ -1051,6 +1054,14 @@ class Runner:
         for i, t in enumerate(ready):
             if only_tiers and t["tier"] not in only_tiers:
                 continue  # config only_tiers: this card's tier is not on the allow list right now
+            rb = store.resource_block(c, t["labels"])
+            if rb:
+                self.gates[t["id"]] = rb  # the card waits for a named resource (needs=..., gpu=1), nothing is killed
+                continue
+            bh = self.budget_hold(c, t)
+            if bh:
+                self.gates[t["id"]] = bh
+                continue
             if store.is_anon(t["created_by"]):
                 self.gates[t["id"]] = "audit: card has no named creator, refused (who/what/why unknown)"
                 continue
@@ -1141,6 +1152,10 @@ class Runner:
                         event(c, t["id"], "runner", "waiting", {"why": why})
                     self.log(f"{t['id']} waiting: {why}")
                 note = f"{t['id']} waiting: {why}"
+                continue
+            pg = self.probe_gate(bucket)
+            if pg:
+                self.gates[t["id"]] = pg
                 continue
             self.waiting.pop(t["id"], None)
             if self.spawn(t, cand, bucket, workdir, worktree=bool(wt), lockfree=free):
@@ -1399,6 +1414,7 @@ class Runner:
                           (result, now(), ch.task_id))
                 event(c, ch.task_id, "runner", "done", {"run": ch.run_id, "auto": True, "cmd": True})
                 store._report_back(c, t, ch.owner, result)
+                store.recur(c, t)
             elif rc == CMD_RELEASE_RC:
                 outcome = "released"
                 nb = now() + (parse_dur(cfg(c, "backoff")) or 0)
@@ -1419,6 +1435,45 @@ class Runner:
             event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc, "out_sha": sha})
             self._series_audit(c, t, outcome, rc, last)
         self.log(f"run {ch.run_id} ({ch.task_id}, cmd) -> {outcome}" + (f": {detail[:160]}" if detail else ""))
+
+    def budget_hold(self, c, t):
+        """A plain card that has used its run/cost budget since its last review is held (hold=budget) with a note; `ab edit ID --auto --why ..`
+        releases it for another budget. Recurring, watch and cmd cards are exempt (they have repeat notices instead)."""
+        labels = json.loads(t["labels"] or "{}")
+        if t["cmd"] or labels.get("every") or labels.get("type") in ("watch", "decision", "dive", "overseer"):
+            return None
+        lim = int(labels.get("budget_runs") or cfg(c, "card_max_runs") or 0)
+        capc = float(labels.get("budget_cost") or cfg(c, "card_max_cost") or 0)
+        if not lim and not capc:
+            return None
+        since = c.execute("SELECT MAX(ts) ts FROM events WHERE task_id=? AND kind='budget_hold'", (t["id"],)).fetchone()["ts"] or 0
+        n, cost = c.execute("SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM runs WHERE task_id=? AND started_at>?", (t["id"], since)).fetchone()
+        if not ((lim and n >= lim) or (capc and cost >= capc)):
+            return None
+        with tx(c):
+            labels["hold"] = "budget"
+            c.execute("UPDATE tasks SET runnable=0, labels=?, updated_at=? WHERE id=?", (json.dumps(labels), now(), t["id"]))
+            event(c, t["id"], "runner", "budget_hold", {"runs": n, "cost_usd": round(cost, 2), "max_runs": lim, "max_cost": capc})
+            store.post_message(c, "runner", f"Budget reached: {n} runs, ${cost:.2f} since the last review. Card held. Review it, then "
+                               f"`ab edit {t['id']} --auto --why TEXT` allows another round.", thread=t["id"], check=False, _in_tx=True)
+        return f"budget: {n} runs / ${cost:.2f}, held for review"
+
+    def probe_gate(self, bucket):
+        """Half-open breaker: a bucket whose last run hit a limit (no success since, inside limit_probe_window) takes ONE run at a time
+        until one succeeds, so a burst can't all launch into an exhausted quota."""
+        c = self.conn
+        win = parse_dur(cfg(c, "limit_probe_window")) or 0
+        if not win or not bucket:
+            return None
+        last = c.execute("SELECT MAX(ended_at) a FROM runs WHERE bucket=? AND outcome='limit'", (bucket,)).fetchone()["a"]
+        if not last or now() - last > win:
+            return None
+        ok = c.execute("SELECT MAX(ended_at) a FROM runs WHERE bucket=? AND outcome IN ('agent_done','done','parked','agent_open')", (bucket,)).fetchone()["a"]
+        if ok and ok > last:
+            return None
+        if any(getattr(ch, "bucket", None) == bucket for ch in self.children.values()):
+            return f"limit_probe:{bucket} hit a limit {store.fmt_ts(last)}, one run at a time until one succeeds"
+        return None
 
     def _series_audit(self, c, t, outcome, rc, last):
         """A cmd card series (board+title+cmd): repeated identical output -> one 'pause this?' notice; a failing check -> a throttled

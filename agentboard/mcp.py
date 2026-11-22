@@ -32,7 +32,7 @@ TOOLS = {
     "ab_park": ("Park your claimed card on a long external job and exit (no attempt counted): exactly one of pid (wake when the "
                 "process exits), reply (a thread id: wake when someone else posts in it; the reply is in the next brief) or file (wake when it exists and stops growing for grace, default 60s). note is required: what you "
                 "wait for and what the next agent should do. The runner resumes the card with a fresh agent whose brief carries the note.",
-                "park", ["id"], {"pid": ("--pid", I), "file": ("--file", S), "reply": ("--reply", S), "grace": ("--grace", S),
+                "park", ["id"], {"pid": ("--pid", I), "file": ("--file", S), "reply": ("--reply", S), "resource": ("--resource", S), "grace": ("--grace", S),
                                  "note": ("--note", S), "note_file": ("--note-file", S), "force": ("--force", B)}, []),
     "ab_cancel": ("Cancel a task (stops its run).", "cancel", ["id", "why"], {}, ["id"]),
     "ab_retry": ("Reopen a dead/cancelled/done task with fresh attempts.", "retry", ["id"], {}, ["id"]),
@@ -69,6 +69,7 @@ TOOLS = {
                  {"window": ("--window", S), "at": ("--at", S), "daily": ("--daily", S), "days": ("--days", S),
                   "slots": ("--slots", I), "do": ("--do", S)}, []),
     "ab_config": ("Runtime settings: ls|get|set|unset.", "config", ["action", "key", "value"], {}, []),
+    "ab_resources": ("Named resources cards declare with label needs=a,b (gpu=1 = needs gpu): capacity, who holds each, which are down, how many cards wait.", "resources", [], {}, []),
     "ab_guide": ("How agents use this board.", "guide", [], {}, []),
     "ab_post": ("Start a thread in a channel. Mention agents with @name.", "post", ["channel", "text"], {"data": ("--data", S)}, ["channel", "text"]),
     "ab_reply": ("Reply in a thread (task id or m<id>). sync=true mirrors it to the synced GitHub issue/PR.", "reply",

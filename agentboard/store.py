@@ -81,6 +81,11 @@ DEFAULTS = {
     "proactive": "create",      # cards that agents inside a run create on their own, when recurring (cmd cards, type=watch): create | offer (made held, awaiting approval) | off (refused)
     "repeat_notice_after": 5,   # a cmd card series (same board+title+cmd) with this many identical outputs in a row posts a "pause this?" notice, then again every N (0 = off)
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
+    "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
+    "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
+    "limit_probe_window": "6h", # after a bucket hit a limit with no success since, only ONE run at a time may start on it until one succeeds (0 = off)
+    "card_max_runs": 20,        # a plain card (not recurring, not a watch/cmd) is held for review after this many runs since its last review (0 = off; label budget_runs=N overrides)
+    "card_max_cost": 0,         # same, in USD of run cost (0 = off; label budget_cost=N overrides)
     "compute_lock": False,      # true = LOCKED: the runner launches no card at all (any type, tier or lock label, cmd or agent); nothing running is killed
     "draining": False,
     "stop": "",                 # "", "graceful", "now"
@@ -644,6 +649,8 @@ def park_cond(park):
         return f"a reply in thread {park['reply_thread']}"
     if park.get("file"):
         return f"file {park['file']} (stable for {fmt_dur(park.get('grace_s') or 0)})"
+    if park.get("resource"):
+        return f"resource {park['resource']} to be free"
     return "a wake condition"
 
 
@@ -1188,8 +1195,8 @@ def workdir_wait_reason(conn, task, held=None):
     return None
 
 
-HOLD_REFRESH_S = 300
-DELIBERATE_HOLDS = ("manual", "needs_admin")
+HOLD_REFRESH_S = 6 * 3600  # a still-true hold is not re-logged more often than this (state, not an event stream)
+DELIBERATE_HOLDS = ("manual", "needs_admin", "budget")
 
 
 def workdir_lock_exempt(conn, labels, wd):
@@ -1511,6 +1518,7 @@ def _complete(conn, row, actor, result, data=None):
                  (result, json.dumps(data) if data is not None else None, now(), row["id"]))
     event(conn, row["id"], actor, "done", {"result": (result or "")[:500]})
     _report_back(conn, row, actor, result or "done")
+    recur(conn, row)
 
 
 def complete(conn, tid, actor, result="", data=None, force=False):
@@ -1623,13 +1631,15 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
     return row["id"]
 
 
-def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False, reply=None):
+def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False, reply=None, resource=None):
     """Park a claimed card on a long external job: release the claim WITHOUT counting an attempt and record
     the wake condition (process gone, or file present and stable for grace_s). The runner wakes it later."""
     if not note or not note.strip():
         raise ValueError("ab park needs --note: what you wait for and what the next agent should do with the result")
-    if bool(pid) + bool(file) + bool(reply) != 1:
-        raise ValueError("give exactly one of --pid PID, --file PATH or --reply THREAD")
+    if len(note.split()) < 4 or len(note.strip()) < 20:
+        raise ValueError("ab park --note must say what you wait for and what the next agent should do (at least 4 words)")
+    if bool(pid) + bool(file) + bool(reply) + bool(resource) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD or --resource NAME")
     with tx(conn):
         row = _owned(conn, tid, actor, force)
         if row["status"] not in ("open", "claimed"):
@@ -1644,6 +1654,8 @@ def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60
             # replies newer than this agent's own last post in the thread wake the card (one that arrived
             # between the ask and the park still counts)
             spec.update(reply_thread=th, reply_after=mine or last, reply_by=actor)
+        elif resource:
+            spec.update(resource=str(resource).strip().lower())
         elif pid:
             spec.update(pid=int(pid), pid_start=pid_start)
         else:
@@ -1724,6 +1736,8 @@ EDITABLE = {"cmd", "verify", "title", "body", "channel", "priority", "tier", "ha
 
 
 def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=(), allow_cycle=None):
+    if "runnable" in fields:
+        audit(actor)  # holding or releasing a card needs a named actor and a reason
     with tx(conn):
         row = must_task(conn, tid)
         if not fields and not add_deps and not rm_deps and row["status"] == "dead" and labels == {"outcome": "negative"}:
@@ -1990,3 +2004,76 @@ def launch_audit(conn, task_id):
     return {"card": t["id"], "created_why": created_why, "title": (t["title"] or "")[:120], "created_by": t["created_by"], "board": t["board"],
             "board_paused": bool(brow["paused"]) if brow else None, "tier": t["tier"], "kind": "cmd" if t["cmd"] else "agent",
             "config": {k: cfg(conn, k) for k in keys}, "last_change": last}
+
+
+# ---------------------------------------------------------------- named resources, recurring cards
+def card_needs(labels):
+    """Resource names a card needs: label needs=a,b plus 'gpu' for a truthy gpu label."""
+    if not isinstance(labels, dict):
+        try:
+            labels = json.loads(labels or "{}")
+        except ValueError:
+            labels = {}
+    names = [x.strip().lower() for x in str(labels.get("needs", "")).split(",") if x.strip()]
+    if str(labels.get("gpu", "")).strip().lower() not in ("", "0", "off", "no", "false", "none") and "gpu" not in names:
+        names.append("gpu")
+    return names
+
+
+def resource_holders(conn, exclude=None):
+    out = {}
+    for r in conn.execute("SELECT id, labels FROM tasks WHERE status='claimed'"):
+        if r["id"] == exclude:
+            continue
+        for n in card_needs(r["labels"]):
+            out.setdefault(n, []).append(r["id"])
+    return out
+
+
+def resource_block(conn, labels, exclude=None):
+    """Why a card with these labels cannot start for the resources it needs (down or full), else None."""
+    down = {str(x).lower() for x in (cfg(conn, "resources_down") or [])}
+    caps = cfg(conn, "resources") or {}
+    names = card_needs(labels)
+    if not names:
+        return None
+    held = resource_holders(conn, exclude)
+    for n in names:
+        if n in down:
+            return f"resource:{n} is down (resources_down)"
+        cap = int(caps.get(n, 1))
+        used = len(held.get(n, []))
+        if used >= cap:
+            return f"resource:{n} {used}/{cap} held by {', '.join(held.get(n, []))}"
+    return None
+
+
+def recur(conn, row):
+    """A done card with label every=DUR reopens itself (same id, run history kept) for the next pass: not_before = now + every.
+    Ends at max_runs=N or ends=<ISO|epoch>; a recur_ended event records why it stopped. Returns True when it reopened."""
+    lb = json.loads(row["labels"] or "{}")
+    try:
+        every = parse_dur(str(lb.get("every") or ""))
+    except ValueError:
+        every = None
+    if not every:
+        return False
+    n = conn.execute("SELECT COUNT(*) n FROM events WHERE task_id=? AND kind='recurred'", (row["id"],)).fetchone()["n"] + 1
+    mx = int(lb.get("max_runs") or 0)
+    end_ts = None
+    if lb.get("ends"):
+        try:
+            end_ts = float(lb["ends"])
+        except ValueError:
+            try:
+                end_ts = datetime.fromisoformat(str(lb["ends"])).timestamp()
+            except ValueError:
+                end_ts = None
+    if (mx and n >= mx) or (end_ts and now() + every > end_ts):
+        event(conn, row["id"], "board", "recur_ended", {"runs": n, "why": "max_runs reached" if mx and n >= mx else "ends passed"})
+        return False
+    nb = now() + every
+    conn.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, run_id=NULL, attempts=0, park=NULL, not_before=?, updated_at=? WHERE id=?",
+                 (nb, now(), row["id"]))
+    event(conn, row["id"], "board", "recurred", {"run": n, "next_at": nb})
+    return True

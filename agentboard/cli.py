@@ -915,8 +915,8 @@ def cmd_park(c, a, out):
     tid = a.id or os.environ.get("AB_TASK")
     if not tid:
         raise ValueError("give a task ID (or run inside a runner-started agent where AB_TASK is set)")
-    if (a.pid is not None) + bool(a.file) + bool(a.reply) != 1:
-        raise ValueError("give exactly one of --pid PID, --file PATH or --reply THREAD")
+    if (a.pid is not None) + bool(a.file) + bool(a.reply) + bool(a.resource) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD or --resource NAME")
     pid = pid_start = None
     if a.pid is not None:
         pid = int(a.pid)
@@ -928,9 +928,22 @@ def cmd_park(c, a, out):
     grace = parse_dur(a.grace or "60s")
     grace = 60.0 if grace is None else grace
     tid, spec = store.park(c, tid, actor_of(a), text_arg(a.note, a.note_file), pid=pid, pid_start=pid_start,
-                           file=a.file, grace_s=grace, force=a.force, reply=a.reply)
+                           file=a.file, grace_s=grace, force=a.force, reply=a.reply, resource=a.resource)
     out({"id": tid, "status": "open", "parked": True, "wake": {k: v for k, v in spec.items() if k in ("pid", "file", "grace_s")}},
         f"{tid} parked on {store.park_cond(spec)}; exit now - the runner wakes this card and a fresh agent continues with your note")
+
+
+def cmd_resources(c, a, out):
+    caps, down = store.cfg(c, "resources") or {}, {str(x).lower() for x in (store.cfg(c, "resources_down") or [])}
+    held = store.resource_holders(c)
+    want = {}
+    for r in c.execute("SELECT id, labels FROM tasks WHERE status='open'"):
+        for n in store.card_needs(r["labels"]):
+            want.setdefault(n, []).append(r["id"])
+    rows = []
+    for n in sorted(set(caps) | down | set(held) | set(want)):
+        rows.append({"resource": n, "capacity": int(caps.get(n, 1)), "down": n in down, "held_by": held.get(n, []), "waiting": len(want.get(n, []))})
+    out(rows, lambda d: "\n".join(f"{r['resource']}: {len(r['held_by'])}/{r['capacity']} held{' (DOWN)' if r['down'] else ''} by {', '.join(r['held_by']) or '-'}; {r['waiting']} cards want it" for r in d) or "no resources in use")
 
 
 def cmd_cancel(c, a, out):
@@ -2121,11 +2134,14 @@ def build_parser():
     s.add_argument("--why")
     s.add_argument("--force", action="store_true")
 
+    s = sub("resources", cmd_resources, "named resources (label needs=a,b; gpu=1 means needs=gpu): capacity, holders, down, who waits")
+
     s = sub("park", cmd_park, "park a claimed card on a long external job and exit; the runner resumes it with a fresh agent")
     s.add_argument("id", nargs="?", help="default $AB_TASK")
     s.add_argument("--pid", type=int, help="wake when this process exits (start it detached: nohup/setsid)")
     s.add_argument("--file", help="wake when this file exists and stops growing for --grace")
     s.add_argument("--reply", metavar="THREAD", help="wake when someone else posts in THREAD (e.g. the m<id> printed by `ab ask`); the reply goes in the next brief")
+    s.add_argument("--resource", help="wake when this named resource (label needs=NAME) is free and not down")
     s.add_argument("--grace", default="60s", help="file stability window (default 60s)")
     s.add_argument("--note", help="what you wait for and what the next agent should do ('-' reads stdin)")
     s.add_argument("--note-file", help="read the note from this file")

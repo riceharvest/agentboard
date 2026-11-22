@@ -11,6 +11,7 @@ from pathlib import Path
 from . import runner as R
 from . import snapshot as S
 from . import store, usage
+from . import unmerged as unmerged_mod
 from . import _sanity
 from ._lazy import Lazy
 from .store import fmt_dur, fmt_ts, now, parse_dur, parse_time
@@ -480,6 +481,8 @@ def cmd_ls(c, a, out):
             text += "\nholds by reason:\n" + "\n".join(f"  {r}: {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         return text
     out(items, ls_text)
+    if status and "done" in status.split(",") and not (a.stuck or a.ready):
+        print("\n".join(["unmerged:", *unmerged_mod.lines(unmerged_mod.scan(c, None, bsel))]), file=sys.stderr)
     if not unlimited and total > lim:
         more = "+" if a.ready else ""
         print(f"ab ls: showing {a.limit} of {total}{more} (add --limit N for more)", file=sys.stderr)
@@ -764,8 +767,19 @@ def cmd_done(c, a, out):
             print(f"ab done: refused: {tid0}: {msg}. Fix the ids and retry (or drop --strict-refs). The card stays claimed.", file=sys.stderr)
             sys.exit(2)
         print(f"ab done: warning: {msg}", file=sys.stderr)
+    wt_branch = (json.loads(row["labels"] or "{}") or {}).get("worktree_branch") if row else None
+    wt_repo = (row["workdir"] if row else None) or None
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
     out({"id": tid, "status": "done"}, f"{tid} done{note}")
+    if wt_branch and wt_repo:
+        warn = unmerged_mod.warning(wt_repo, wt_branch)
+        if warn:
+            print(warn, file=sys.stderr)
+
+
+def cmd_unmerged(c, a, out):
+    rep = unmerged_mod.scan(c, a.repo, None if a.all_boards else board_of(a))
+    out(rep, lambda r: "\n".join(unmerged_mod.lines(r)))
 
 
 def cmd_fail(c, a, out):
@@ -1953,6 +1967,10 @@ def build_parser():
     s.add_argument("paths", nargs="+")
     s.add_argument("-r", "--recursive", action="store_true")
     s.add_argument("-f", "--force", action="store_true", help="a missing path is not an error")
+
+    s = sub("unmerged", cmd_unmerged, "report done worktree cards whose branch never reached the default branch (exit 0: a report, not a gate)")
+    s.add_argument("--repo", help="git checkout to test branches against (default: each card's own workdir)")
+    s.add_argument("--all-boards", action="store_true")
 
     s = sub("done", cmd_done, "complete your task", ["complete"])
     s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")

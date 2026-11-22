@@ -1147,7 +1147,7 @@ def workdir_holders(conn):
     return out
 
 
-def hold_reason(conn, row, waiting=None, held=None):
+def hold_reason(conn, row, waiting=None, held=None, gates=None):
     """Machine reason why an open card is not being launched, or None. Diagnostic only: never changes eligibility."""
     lb = json.loads(row["labels"] or "{}")
     if not row["runnable"]:
@@ -1182,7 +1182,13 @@ def hold_reason(conn, row, waiting=None, held=None):
         return "no_tier_bucket"
     if "not installed" in w:
         return "no_harness"
-    return None
+    return (gates or {}).get(row["id"])  # runner-side launch gates: ram_gate:<free>GiB<min>, board_slots:<board> N/N
+
+
+def hold_key(reason):
+    """Identity of a hold: a ram_gate reason carries the live free-RAM figure, which moves every tick, so only the kind counts."""
+    r = reason or ""
+    return "ram_gate" if r.startswith("ram_gate:") else r
 
 
 def current_hold(conn, tid):
@@ -1196,13 +1202,13 @@ def current_hold(conn, tid):
     since = rows[0]["ts"]
     for r in rows[1:]:
         p = json.loads(r["payload"] or "{}")
-        if r["kind"] != "hold" or p.get("reason") != reason or p.get("holder") != holder:
+        if r["kind"] != "hold" or hold_key(p.get("reason")) != hold_key(reason) or p.get("holder") != holder:
             break
         since = r["ts"]
     return {"reason": reason, "since": since, "last": rows[0]["ts"], "holder": holder}
 
 
-def record_holds(conn, waiting=None, held=None):
+def record_holds(conn, waiting=None, held=None, gates=None):
     """One `hold` event per card+reason+holder (refreshed at most every HOLD_REFRESH_S), `hold_cleared` when the cause is gone."""
     t = now()
     seen = set()
@@ -1210,20 +1216,21 @@ def record_holds(conn, waiting=None, held=None):
     rows = conn.execute("SELECT t.* FROM tasks t JOIN boards b ON b.name=t.board WHERE t.status='open' AND b.paused=0 AND "
                         "(t.park IS NULL OR json_extract(t.park,'$.woken_at') IS NOT NULL)").fetchall()
     for r in rows:
-        why = hold_reason(conn, r, waiting, held)
+        why = hold_reason(conn, r, waiting, held, gates)
         if not why:
             continue
         seen.add(r["id"])
-        holder = None
+        holder = "runner" if why.startswith(("ram_gate:", "board_slots:")) else None
         if why.startswith("workdir_locked:"):  # who holds it: the claiming card's id + pid (or the runner itself)
             hs = holders.get(why.split(":", 1)[1].split(" (", 1)[0]) or []
             holder = ", ".join(f"{tid} pid {pid}" if pid else str(tid) for tid, pid in hs) or "runner"
         cur = current_hold(conn, r["id"])
-        if cur and cur["reason"] == why and cur.get("holder") == holder and t - cur["last"] < HOLD_REFRESH_S:
+        if cur and hold_key(cur["reason"]) == hold_key(why) and cur.get("holder") == holder and t - cur["last"] < HOLD_REFRESH_S:
             continue
         text = {"workdir_missing": "workdir does not exist", "no_tier_bucket": "no candidate harness/bucket for the card's tier",
                 "no_harness": "no installed harness for the card", "deps_pending": "dependencies not done",
-                "not_before_future": "not_before is in the future"}.get(why.split(":")[0])
+                "not_before_future": "not_before is in the future",
+                "ram_gate": "free RAM is under min_free_gib, the runner will not launch", "board_slots": "board max_slots reached"}.get(why.split(":")[0])
         if text is None:
             text = ("workdir overlaps a claimed card's checkout: " if why.startswith("workdir_locked") else
                     "runnable flag is 0 with no named hold, set by ") + why.split(":", 1)[1]

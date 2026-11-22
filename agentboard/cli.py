@@ -108,7 +108,13 @@ def tline(d):
         extra.append("parked: " + (f"pid {p['pid']}" if p.get("pid") else f"file {p.get('file')}"))
     if d.get("wait_reason"):
         extra.append(d["wait_reason"])
-    if (d.get("hold") or {}).get("holder"):
+    hr = (d.get("hold") or {}).get("reason") or ""
+    if hr.startswith("ram_gate:"):
+        free, _, mn = hr[9:].partition("GiB<")
+        extra.append(f"cross RAM gate: {free} GiB free < {mn}")
+    elif hr.startswith("board_slots:"):
+        extra.append("board slots full: " + hr[12:])
+    elif (d.get("hold") or {}).get("holder"):
         extra.append("held_by " + d["hold"]["holder"])
     if not d.get("runnable", True) and d["state"] == "ready":
         extra.append("runnable=0" + hold_txt(d).replace(" (", " (", 1) + "; " + clear_hint(d))
@@ -415,6 +421,7 @@ def cmd_ls(c, a, out):
     bucket_limit = None if (a.limit is None or unlimited) else lim
     ready_footer = None
     buckets = None
+    excluded_buckets = {}
     if a.in_flight:
         if bsel:
             where.append("board=?")
@@ -469,10 +476,34 @@ def cmd_ls(c, a, out):
     elif a.ready:
         # `--ready` shows the claimable bucket only: ready_tasks() also returns runnable=0 cards (deliberate
         # holds), but nothing can claim them, so they belong in the footer's `hold` bucket instead.
-        rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=lim + 1, board=bsel) if r["runnable"]]
+        skip_types = {x.strip() for x in (a.exclude_type or "").split(",") if x.strip()}
+        skip_labels = kv_list(a.exclude_label) if a.exclude_label else {}
+        rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=(10**9 if (skip_types or skip_labels) else lim + 1), board=bsel)
+                if r["runnable"]]
+        excluded = []
+        if skip_types or skip_labels:
+            keep = []
+            for r in rows:
+                lb = json.loads(r["labels"] or "{}")
+                if store.task_type({"labels": lb}) in skip_types or any(str(lb.get(k)) == v for k, v in skip_labels.items()):
+                    excluded.append(r)
+                else:
+                    keep.append(r)
+            rows = keep
         total = len(rows)
         rows = rows[:lim]
-        buckets = store.ready_buckets(c, a.channel, kv_list(a.label), limit=bucket_limit, board=bsel)
+        buckets = store.ready_buckets(c, a.channel, kv_list(a.label), limit=bucket_limit, board=bsel,
+                                      exclude=[r["id"] for r in excluded])
+        for r in excluded:
+            lb = json.loads(r["labels"] or "{}")
+            ty = store.task_type({"labels": lb})
+            if ty in skip_types:
+                d_ = excluded_buckets.setdefault("excluded-type", {})
+                d_[ty] = d_.get(ty, 0) + 1
+            else:
+                key = next(f"{k}={v}" for k, v in skip_labels.items() if str(lb.get(k)) == v)
+                d_ = excluded_buckets.setdefault("excluded-label", {})
+                d_[key] = d_.get(key, 0) + 1
     else:
         if bsel:
             where.append("board=?")
@@ -513,16 +544,23 @@ def cmd_ls(c, a, out):
         text = "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)"
         if ready_footer:
             text += "\n" + ready_footer
+        if not xs and not ready_footer:
+            text = ""
+        if a.ready:
+            ex = "\n".join(f"{kind}: " + ", ".join(f"{k} {n}" for k, n in sorted(m.items())) for kind, m in excluded_buckets.items())
+            if ex:
+                text = (text + "\n" if text and text != "(nothing)" else "") + ex
         if a.stuck and xs:
             counts = {}
             for x in xs:
                 r = (x.get("hold") or {}).get("reason") or (x.get("labels") or {}).get("hold") or "unknown"
+                r = store.hold_key(r)
                 counts[r] = counts.get(r, 0) + 1
             text += "\nholds by reason:\n" + "\n".join(f"  {r}: {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         return text
     if a.ready and out.as_json:
         # Same card objects as the text listing, plus the bucket dict, so callers stop re-deriving it.
-        out({"items": items, "buckets": buckets})
+        out({"items": items, "buckets": buckets, "excluded": excluded_buckets})
     else:
         out(items, ls_text)
     if status and "done" in status.split(",") and not (a.stuck or a.ready):
@@ -1977,7 +2015,8 @@ def build_parser():
     s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts, and names the holder (card id + pid, or runner) of a workdir lock")
     s.add_argument("--in-flight", action="store_true", help="cards really in flight: open/claimed, not parked, not_before past, all deps done; ends with a counts line for the exclusions")
     s.add_argument("--tier", help="with --in-flight: comma list of tiers to count")
-    s.add_argument("--exclude-type", help="with --in-flight: comma list of card types (labels['type'], e.g. watch) to leave out of the count and report in an 'excluded-type' bucket. A watch card is a stocker: it polls the board and creates work, so it is not work in flight; counting it inflates the number a watcher compares against its own stop rule")
+    s.add_argument("--exclude-label", action="append", help="with --ready: k=v labels to leave out; the hidden count is printed as an 'excluded-label' bucket")
+    s.add_argument("--exclude-type", help="with --in-flight or --ready: comma list of card types (labels['type'], e.g. watch) to leave out of the count and report in an 'excluded-type' bucket. A watch card is a stocker: it polls the board and creates work, so it is not work in flight; counting it inflates the number a watcher compares against its own stop rule")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=None, help="max rows (default 50; 0 = all)")

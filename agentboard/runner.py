@@ -638,6 +638,7 @@ class Runner:
         self.children = {}
         self.host = socket.gethostname()
         self.waiting = {}
+        self.gates = {}              # card id -> launch-gate hold reason (ram_gate / board_slots) from the last fill()
         self.iso_skipped = set()
         self.wt_err = None
         self.unloadable_note = None
@@ -874,7 +875,7 @@ class Runner:
         if not paused and not draining:
             note = self.fill(slots)
             try:
-                store.record_holds(c, self.waiting, self.busy_dirs())
+                store.record_holds(c, self.waiting, self.busy_dirs(), self.gates)
             except Exception as e:
                 self.log(f"hold scan error: {e!r}")
         self.heartbeat(state, slots, note if note else ("schedule window" if windowed else None))
@@ -1004,6 +1005,7 @@ class Runner:
                 self.unloadable_note = note
                 self.log(f"not claiming cards: {note}")
             return note
+        self.gates = {}
         if len(self.children) >= slots:
             return None
         chans = cfg(c, "channels") or None
@@ -1013,17 +1015,22 @@ class Runner:
         max_per_tick = int(cfg(c, "launch_per_tick") or 0)
         launched = 0
         note = None
-        for t in store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True):
+        ready = store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True)
+        for i, t in enumerate(ready):
             if self.has_live_run(t["id"]):
                 continue  # a previous run of this card is still alive (e.g. parked while exiting): never race a second one
             if len(self.children) >= slots or (max_per_tick > 0 and launched >= max_per_tick):
                 break
             cap = caps.get(t["board"])
             if cap is not None and sum(1 for ch in self.children.values() if ch.board == t["board"]) >= cap:
+                self.gates[t["id"]] = f"board_slots:{t['board']} {cap}/{cap}"
                 continue
             gib = free_gib()
             if gib < float(cfg(c, "min_free_gib") or 0):
                 note = f"waiting for RAM: {gib:.1f} GiB free < min_free_gib"
+                reason = f"ram_gate:{gib:.1f}GiB<{float(cfg(c, 'min_free_gib')):g}"
+                for u in ready[i:]:  # every card the gate keeps back, not just the one that tripped it
+                    self.gates.setdefault(u["id"], reason)
                 break
             workdir = t["workdir"] or str(store.HOME / "work" / t["id"])
             if (t["kind"] or ("cmd" if t["cmd"] else "agent")) not in KNOWN_KINDS:

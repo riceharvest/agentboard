@@ -102,6 +102,7 @@ def _task(r, keys, deps, dep_status, t):
         d["state"] = "waiting"
     else:
         d["state"] = "ready"
+    d["in_flight"], d["in_flight_reason"] = store.in_flight_reason(d["status"], d["park"], d["not_before"], d["deps_open"], t)
     return d
 
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab ls --in-flight [--tier a,b] [--json]`: the cards really in flight (open/claimed, not parked, `not_before` past or empty, every dep done), ending with `in-flight: N (parked P, deferred D, dep-waiting W)`. `ab snapshot --json` tasks gain `in_flight` and `in_flight_reason` (`parked|not_before|dep_open|null`); existing keys unchanged.
+
 - A card that runs in its own worktree no longer shows a `workdir_locked` hold for the shared checkout: `worktree=on` (and the automatic worktree on a git checkout) is exempt at hold-report time, matching the runner's pick rule. When `worktree=on` cannot isolate (non-git workdir) the hold reason says so (`share_workdir true` needs no exemption: it has no lock). `ab ls --stuck` / `ab show` now name the holder next to `workdir_locked`: `held_by <card id> pid <pid>`, or `held_by runner` when the runner holds it. Runner change: `ab runner reload` needed.
 
 - op-request: queue a runner reload or an allowlisted config change from a non-admin card (`ab op-request add --kind reload|config --arg 'extra_args.claude=[...]' --why TEXT`, `ls [--stale --older 30m]`). The runner applies at most one per tick; `ab runner status` shows `requests: N pending`. Runner change: `ab runner reload` needed.

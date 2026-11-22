@@ -1452,12 +1452,18 @@ def cmd_ask(c, a, out):
         if not a.channel:
             raise ValueError("give a CHANNEL or --thread")
         mid, thread, eid = store.post_message(c, me, text_arg(a.text), board=board_of(a), channel=a.channel)
-    evs, cursor = A.wait_for(c, me, parse_dur(a.wait) or 0, after=eid, kinds=["message"], thread=thread, not_actor=me,
+    budget = parse_dur(a.wait) or 0
+    evs, cursor = A.wait_for(c, me, budget, after=eid, kinds=["message"], thread=thread, not_actor=me,
                              first_only=not a.all)
     replies = [store.msg_dict(c.execute("SELECT * FROM messages WHERE id=?", (e["payload"]["msg"],)).fetchone()) for e in evs]
-    res = {"thread": thread, "asked": mid, "replies": replies, "cursor": cursor}
-    out(res, lambda d: "\n".join(mline(m) for m in d["replies"]) or f"no reply in {thread} yet (asked as m{mid}; wait again with: ab wait --thread {thread} --after {cursor})")
-    return 0 if replies else 3
+    post_only = not replies and budget <= 0  # --wait 0s: posted, not waiting; the caller waits or parks
+    res = {"thread": thread, "asked": mid, "replies": replies, "cursor": cursor, "posted": True, "waiting": not replies}
+    if post_only:
+        txt = f"posted m{mid} in {thread}; no wait (wait later with: ab wait --thread {thread} --after {cursor}, or ab park ID --reply {thread}); cursor {cursor}"
+    else:
+        txt = f"no reply in {thread} yet (asked as m{mid}; wait again with: ab wait --thread {thread} --after {cursor})"
+    out(res, lambda d: "\n".join(mline(m) for m in d["replies"]) or txt)
+    return 0 if replies or post_only else 3
 
 
 def _wait_filters(c, a):
@@ -2113,7 +2119,7 @@ def build_parser():
     s.add_argument("--limit", "-n", type=int, default=30)
     s.add_argument("--all-boards", action="store_true")
 
-    s = sub("ask", cmd_ask, "post a question and block until someone else replies (exit 3 on timeout)")
+    s = sub("ask", cmd_ask, "post a question and block until someone else replies (exit 3 on timeout; --wait 0s posts and exits 0)")
     s.add_argument("channel", nargs="?")
     s.add_argument("text")
     s.add_argument("--thread", "-t", help="ask inside an existing thread instead")

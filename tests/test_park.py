@@ -58,7 +58,7 @@ def rig(abx, tmp_path):
     fake.mkdir()
     (fake / "claude").write_text(FAKE_CLAUDE)
     (fake / "claude").chmod(0o755)
-    (fake / "ab").write_text(f'#!/bin/sh\nexec {sys.executable} {ROOT}/ab "$@"\n')  # this checkout's ab, not an installed one
+    (fake / "ab").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{ROOT}/ab" "$@"\n')  # this checkout's ab, not an installed one (quoted: worktree paths may contain spaces)
     (fake / "ab").chmod(0o755)
     home = tmp_path / "fakehome"
     home.mkdir()

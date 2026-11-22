@@ -1192,7 +1192,9 @@ class Runner:
         # every worker shell: a per-run file bash sources (non-interactive shells read $BASH_ENV), and harness-specific args
         env_file = runs_dir / f"{run_id}.env"
         env_file.write_text("".join(f"export {k}={shlex.quote(v)}\n" for k, v in abenv.items()))
-        env.setdefault("BASH_ENV", str(env_file))
+        inherited = env.get("BASH_ENV", "")
+        if not inherited or re.fullmatch(r"\d+\.env", os.path.basename(inherited)):  # a parent worker's per-run file would give the children its identity
+            env["BASH_ENV"] = str(env_file)
         sea = a.shell_env_args(abenv)
         if sea and len(cmd) > 1:
             cmd = list(cmd[:-1]) + sea + [cmd[-1]]

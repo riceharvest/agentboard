@@ -9,7 +9,7 @@ sys.path.insert(0, ROOT)
 
 
 def clean_env(home, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("AB_") and k != "HERMES_HOME"}  # never act as the worker running the tests
+    env = {k: v for k, v in os.environ.items() if not k.startswith("AB_") and k not in ("HERMES_HOME", "BASH_ENV")}  # never act as the worker running the tests
     env.update(AB_HOME=str(home), PYTHONPATH=ROOT, **extra)
     return env
 

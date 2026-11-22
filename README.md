@@ -452,6 +452,7 @@ Controls (all take `--json`; exit `0` ok, `1` error with `{"error","type"}` on s
     ab park ID --pid PID|--file PATH [--grace 60s] --note "..."   (wait for a long external job; a fresh agent resumes the card)
     ab done ID "result" --force     ab decision ls [--owner X] | answer ID "text"    (manual cards: note, then done)
     ab kill RUN_ID                  (stops one run; the task goes back to the queue without an attempt. `cancel` ends the work)
+    ab merge ID [--branch B] [--into DIR] [--push]   (merge the card's branch; --push or config merge_push also reaches origin)
     ab watch|sched enable|disable NAME
 
 ### Cost-priced usage, multi-window caps, escalate on failure (all opt-in)

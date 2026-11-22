@@ -83,6 +83,7 @@ DEFAULTS = {
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
     "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
+    "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
     "require_compute_class": False,  # true = a card whose labels declare neither cpu nor gpu does not launch (it waits with a compute: gate reason)
     "limit_probe_window": "6h", # after a bucket hit a limit with no success since, only ONE run at a time may start on it until one succeeds (0 = off)
     "card_max_runs": 20,        # a plain card (not recurring, not a watch/cmd) is held for review after this many runs since its last review (0 = off; label budget_runs=N overrides)

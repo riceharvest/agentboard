@@ -2284,6 +2284,7 @@ def build_parser():
     s.add_argument("id")
     s.add_argument("--branch")
     s.add_argument("--into", help="checkout to merge into (default: the card's workdir)")
+    s.add_argument("--push", action="store_true", help="push the merged branch to origin afterwards (also on when config merge_push is true)")
 
     s = sub("sched", cmd_sched, "schedules: ls | add NAME (--window A-B --slots N | --at T --do X | --daily HH:MM --do X) | rm|enable|disable NAME")
     s.add_argument("action", nargs="?", choices=["ls", "add", "rm", "enable", "disable"])
@@ -2498,6 +2499,15 @@ def git_merge(repo, branch):
     return False, text, files
 
 
+def git_push(repo):
+    """Push the current branch of `repo` to its upstream/remote. Returns (ok, message)."""
+    br = subprocess.run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
+    if br.returncode != 0:
+        return False, (br.stdout + br.stderr).strip()
+    p = subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", br.stdout.strip()], capture_output=True, text=True)
+    return p.returncode == 0, (p.stdout + p.stderr).strip() or f"pushed {br.stdout.strip()}"
+
+
 def cmd_merge(c, a, out):
     row = store.get_task(c, a.id)
     if row is None:
@@ -2508,7 +2518,13 @@ def cmd_merge(c, a, out):
     if not repo:
         raise ValueError("no checkout to merge into: pass --into DIR")
     ok, msg, files = git_merge(repo, branch)
-    out({"id": row["id"], "branch": branch, "into": str(repo), "merged": ok, "overlap": files, "git": msg},
+    pushed, pmsg = None, None
+    if ok and (getattr(a, "push", False) or store.cfg(c, "merge_push")):
+        pushed, pmsg = git_push(repo)  # the owner's policy: verified work does not stay on this machine
+        if not pushed:
+            print(f"ab merge: merged locally, push failed: {pmsg}", file=sys.stderr)
+    out({"id": row["id"], "branch": branch, "into": str(repo), "merged": ok, "overlap": files, "git": msg,
+         "pushed": pushed, "push": pmsg},
         lambda r: msg if ok else None)
     if not ok:
         print(f"ab merge: git refused to merge {branch} into {repo}"

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `ab ls --ready` explains an empty answer instead of a bare `(nothing)`: a footer `ready: 0 (dep_open N, not_before N, parked N, hold N)` counts one mutually exclusive bucket per open card (park > not_before > dep_open > hold > ready), over the filtered population (`--board`, `--label`, `--channel`, `--limit`; `; board filter: NAME` when the board was chosen explicitly). A non-empty listing is unchanged. `--ready --json` is now `{"items": [...], "buckets": {...}}`, carrying the same card objects as `--in-flight --json` plus the bucket counts. `runnable=0` cards are no longer listed as ready rows: nothing can claim them, so they count in `hold`.
 - Card type in snapshot and an in-flight type filter: `ab snapshot --json` tasks gain `type` (from `labels['type']`, else `labels['kind']`, null when absent; existing keys unchanged) and `ab ls --in-flight --exclude-type TYPE[,TYPE]` leaves those cards out of the count and reports them in an `excluded-type N` bucket (no flag = unchanged output). A `watch` card is a stocker that polls the board and creates work, so counting it as work in flight inflates the number a watcher compares against its own stop rule.
 
 - `ab ls --in-flight [--tier a,b] [--json]`: the cards really in flight (open/claimed, not parked, `not_before` past or empty, every dep done), ending with `in-flight: N (parked P, deferred D, dep-waiting W)`. `ab snapshot --json` tasks gain `in_flight` and `in_flight_reason` (`parked|not_before|dep_open|null`); existing keys unchanged.

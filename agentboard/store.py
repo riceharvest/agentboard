@@ -984,6 +984,56 @@ def ready_tasks(conn, channel=None, labels=None, runnable_only=False, exclude=()
     return [r for r in conn.execute(sql, args).fetchall() if r["id"] not in exclude]
 
 
+BUCKET_KEYS = ("ready", "hold", "dep_open", "park", "not_before")
+
+
+def ready_buckets(conn, channel=None, labels=None, limit=None, board=None, exclude=()):
+    """Why the claimable population is what it is: one mutually exclusive bucket per open card.
+
+    Buckets are assigned in the order park > not_before > dep_open > hold > ready, so every card lands in
+    exactly one bucket: a parked card is not counted again as dep-blocked, a future `not_before` hides an open
+    dep, and `runnable=0` (a deliberate hold) only counts when nothing more specific explains the wait.
+    The board/channel/label filters and `limit` (same priority order as ready_tasks) describe the caller's
+    filtered population, not the whole database.
+    """
+    sql = ("SELECT t.*, (SELECT COUNT(*) FROM deps x LEFT JOIN tasks p ON p.id=x.dep_id "
+           "WHERE x.task_id=t.id AND (p.status IS NULL OR p.status!='done')) AS deps_open_n "
+           "FROM tasks t WHERE t.status='open'")
+    args = []
+    if board:
+        sql += " AND t.board=?"
+        args.append(board)
+    if channel:
+        chans = [c.strip() for c in channel.split(",") if c.strip()]
+        sql += " AND (" + " OR ".join("(t.channel=? OR t.channel LIKE ?)" for _ in chans) + ")"
+        for c in chans:
+            args += [c, c.rstrip("/") + "/%"]
+    for k, v in (labels or {}).items():
+        sql += " AND json_extract(t.labels, ?) = ?"
+        args += [f"$.{json.dumps(k)}", v]
+    sql += " ORDER BY t.priority DESC, t.created_at ASC"
+    if limit:
+        sql += " LIMIT ?"
+        args.append(int(limit))
+    counts = {k: 0 for k in BUCKET_KEYS}
+    skip = set(exclude)
+    for r in conn.execute(sql, args).fetchall():
+        if r["id"] in skip:
+            continue
+        if park_active(r["park"]):
+            b = "park"
+        elif r["not_before"] and r["not_before"] > now():
+            b = "not_before"
+        elif r["deps_open_n"]:
+            b = "dep_open"
+        elif not r["runnable"]:
+            b = "hold"
+        else:
+            b = "ready"
+        counts[b] += 1
+    return counts
+
+
 def norm_dir(d):
     return os.path.realpath(os.path.expanduser(str(d))) if d else ""
 

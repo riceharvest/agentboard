@@ -607,6 +607,26 @@ def park_cond(park):
     return "a wake condition"
 
 
+def task_type(d):
+    """The card's type, from labels['type'] (or labels['kind'] when a board spells it that way), else None.
+
+    A `watch` card is a stocker: it polls the board and decides whether to create more work. Counting it as
+    work in flight inflates the number the watcher compares against its own stop rule, so callers that want
+    live work pass its type to `ab ls --in-flight --exclude-type`.
+    """
+    labels = d.get("labels") or {}
+    if isinstance(labels, str):
+        try:
+            labels = json.loads(labels) if labels else {}
+        except ValueError:
+            return None
+    for k in ("type", "kind"):
+        v = labels.get(k)
+        if v:
+            return str(v)
+    return None
+
+
 def in_flight_reason(status, park, not_before, deps_open, t=None):
     """(in_flight, reason): a card is in flight when open/claimed, not parked, not_before past/empty and every dep done.
     reason is parked|not_before|dep_open for an excluded open card, else None (also None for closed cards)."""

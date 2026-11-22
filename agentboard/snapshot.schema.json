@@ -64,7 +64,7 @@
     },
     "task": {
       "type": "object",
-      "required": ["id", "board", "title", "channel", "status", "state", "runnable", "priority", "tier", "harness", "model", "labels",
+      "required": ["id", "board", "title", "channel", "status", "state", "runnable", "priority", "tier", "type", "harness", "model", "labels",
                    "deps", "deps_open", "workdir", "attempts", "max_attempts", "timeout_s", "owner", "lease_until", "not_before",
                    "run_id", "created_by", "created_at", "updated_at", "result_head"],
       "properties": {
@@ -81,6 +81,7 @@
         "priority": {"type": "integer"},
         "tier": {"type": "string"},
         "kind": {"enum": ["agent", "cmd"], "description": "cmd = command card: the runner runs its shell command, no model"},
+        "type": {"type": ["string", "null"], "description": "card type from labels['type'] (or labels['kind']), e.g. build, watch, experiment; null when the card carries no type label. A watch card is a stocker that polls the board and creates work, so it is not itself work in flight"},
         "harness": {"type": ["string", "null"], "description": "pinned harness, null = routed by tier"},
         "model": {"type": ["string", "null"]},
         "labels": {"type": "object", "additionalProperties": {"type": "string"}},

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Card type in snapshot and an in-flight type filter: `ab snapshot --json` tasks gain `type` (from `labels['type']`, else `labels['kind']`, null when absent; existing keys unchanged) and `ab ls --in-flight --exclude-type TYPE[,TYPE]` leaves those cards out of the count and reports them in an `excluded-type N` bucket (no flag = unchanged output). A `watch` card is a stocker that polls the board and creates work, so counting it as work in flight inflates the number a watcher compares against its own stop rule.
+
 - `ab ls --in-flight [--tier a,b] [--json]`: the cards really in flight (open/claimed, not parked, `not_before` past or empty, every dep done), ending with `in-flight: N (parked P, deferred D, dep-waiting W)`. `ab snapshot --json` tasks gain `in_flight` and `in_flight_reason` (`parked|not_before|dep_open|null`); existing keys unchanged.
 
 - A card that runs in its own worktree no longer shows a `workdir_locked` hold for the shared checkout: `worktree=on` (and the automatic worktree on a git checkout) is exempt at hold-report time, matching the runner's pick rule. When `worktree=on` cannot isolate (non-git workdir) the hold reason says so (`share_workdir true` needs no exemption: it has no lock). `ab ls --stuck` / `ab show` now name the holder next to `workdir_locked`: `held_by <card id> pid <pid>`, or `held_by runner` when the runner holds it. Runner change: `ab runner reload` needed.

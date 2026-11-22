@@ -86,6 +86,7 @@ def _task(r, keys, deps, dep_status, t):
     d["kind"] = "cmd" if d.pop("is_cmd", 0) else "agent"
     lab = d["labels"]
     d["labels"] = json.loads(lab) if lab and lab != "{}" else {}
+    d["type"] = store.task_type(d)
     d["park"] = json.loads(d["park"]) if d.get("park") else None
     ds = deps.get(d["id"], [])
     d["deps"] = ds

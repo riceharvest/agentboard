@@ -428,19 +428,28 @@ def cmd_ls(c, a, out):
             args += tl
         cand = [store.task_dict(c, r) for r in visible(c, a, c.execute("SELECT * FROM tasks WHERE " + " AND ".join(where) +
                 " ORDER BY CASE status WHEN 'claimed' THEN 0 ELSE 1 END, priority DESC, updated_at DESC", args).fetchall())]
-        t_now, fl, excl = now(), [], {"parked": 0, "not_before": 0, "dep_open": 0}
+        t_now, fl, excl = now(), [], {"parked": 0, "not_before": 0, "dep_open": 0, "excluded_type": 0}
+        # Type filter: a `watch` card is the stocker that runs the count, not work, so a watcher excludes its own
+        # kind and reads the excluded-type bucket instead of inflating the number it compares to its stop rule.
+        skip_types = {x.strip() for x in (a.exclude_type or "").split(",") if x.strip()}
         for d in cand:
+            d["type"] = store.task_type(d)
             dep_open = [x for x in d["deps"] if (c.execute("SELECT status FROM tasks WHERE id=?", (x,)).fetchone() or {"status": None})["status"] != "done"] \
                 if d["deps"] else []
             ok, why = store.in_flight_reason(d["status"], d["park"], d["not_before"], dep_open, t_now)
-            if ok:
-                fl.append(d)
-            else:
+            if not ok:
                 excl[why] += 1
+            elif d["type"] in skip_types:
+                excl["excluded_type"] += 1
+            else:
+                fl.append(d)
         total = len(fl)
         rows = None
         items = fl[:lim]
-        summary = f"in-flight: {len(fl)} (parked {excl['parked']}, deferred {excl['not_before']}, dep-waiting {excl['dep_open']})"
+        buckets = [f"parked {excl['parked']}", f"deferred {excl['not_before']}", f"dep-waiting {excl['dep_open']}"]
+        if skip_types:
+            buckets.append(f"excluded-type {excl['excluded_type']}")
+        summary = f"in-flight: {len(fl)} ({', '.join(buckets)})"
         def fl_text(xs):
             return "\n".join([*(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs), summary])
         out(items, fl_text)
@@ -1947,6 +1956,7 @@ def build_parser():
     s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts, and names the holder (card id + pid, or runner) of a workdir lock")
     s.add_argument("--in-flight", action="store_true", help="cards really in flight: open/claimed, not parked, not_before past, all deps done; ends with a counts line for the exclusions")
     s.add_argument("--tier", help="with --in-flight: comma list of tiers to count")
+    s.add_argument("--exclude-type", help="with --in-flight: comma list of card types (labels['type'], e.g. watch) to leave out of the count and report in an 'excluded-type' bucket. A watch card is a stocker: it polls the board and creates work, so it is not work in flight; counting it inflates the number a watcher compares against its own stop rule")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=50, help="max rows (default 50; 0 = all)")

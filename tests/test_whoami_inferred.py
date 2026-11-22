@@ -40,3 +40,37 @@ def test_not_a_run_home(abx, tmp_path):
     code, out, err = _ab(abx, str(tmp_path), ["whoami"])
     assert code == 0, err
     assert "inferred_run=None inferred_reason=None" in out
+
+
+def _who_env(abx, cwd, args, env):
+    code, out, err = _ab(abx, str(cwd), ["whoami", "--json", *args], env)
+    assert code == 0, err
+    return json.loads(out)
+
+
+def test_effective_identity_from_run_home(abx, live_run):
+    r = live_run(run_id=7)
+    d = _who(abx, r)
+    assert d["actor"] == "hermes#7" and d["actor_source"] == "run home"
+    assert d["board"] == "main" and d["board_source"] == "run home"
+    assert d["run"] == 7 and d["task"] == r["task"]
+    assert d["admin"] is not None and d["inferred_run"] == 7
+
+
+def test_effective_identity_flag_wins(abx, live_run):
+    r = live_run(run_id=7)
+    d = _who_env(abx, r["home"], ["--as", "someone#9"], {"HERMES_HOME": str(r["home"])})
+    assert d["actor"] == "someone#9" and d["actor_source"] == "flag"
+
+
+def test_effective_identity_env(abx, tmp_path):
+    d = _who_env(abx, tmp_path, [], {"AB_ACTOR": "x#1"})
+    assert d["actor"] == "x#1" and d["actor_source"] == "env"
+    assert d["board_source"] == "default"
+
+
+def test_effective_identity_default(abx, tmp_path):
+    d = _who_env(abx, tmp_path, [], {})
+    assert d["actor"] == "agent" and d["actor_source"] == "default"
+    assert d["board_source"] == "default" and d["inferred_reason"] is None
+    assert d["task"] is None and d["run"] is None

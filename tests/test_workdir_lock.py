@@ -182,7 +182,7 @@ def test_auto_worktree_when_busy_and_opt_out(rig, abx, tmp_path):
     fourth = j("add", "fourth", "--workdir", str(repo))["id"]
     code, txt, err = abx("ls", "--ready", env=j.env)
     assert code == 0, err
-    ready_json = {x["id"]: x for x in j("ls", "--ready")}
+    ready_json = {x["id"]: x for x in j("ls", "--ready")["items"]}
     assert ready_json[optout].get("wait_reason") == "workdir busy (auto worktree off)"
     assert "wait_reason" not in ready_json[fourth]
     optout_line = next(l for l in txt.splitlines() if optout in l)
@@ -217,7 +217,7 @@ def test_auto_worktree_config_off_and_non_git(rig, abx, tmp_path):
     time.sleep(3)
     assert status(j, waits) == "open"
     assert status(j, ng2) == "open"
-    ready = {x["id"]: x for x in j("ls", "--ready")}
+    ready = {x["id"]: x for x in j("ls", "--ready")["items"]}
     assert ready[waits].get("wait_reason") == "workdir busy (auto worktree off)"
     assert ready[ng2].get("wait_reason") == "workdir busy"
 

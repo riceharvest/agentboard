@@ -409,8 +409,12 @@ def cmd_ls(c, a, out):
     where = []
     status = a.status
     bsel = None if a.all_boards else read_board_of(c, a)
-    unlimited = a.limit <= 0  # --limit 0 means all rows, like other CLIs
-    lim = 10**9 if unlimited else a.limit
+    unlimited = (a.limit if a.limit is not None else 50) <= 0  # --limit 0 means all rows, like other CLIs
+    lim = 10**9 if unlimited else (a.limit if a.limit is not None else 50)
+    # The footer explains the whole filtered population: only an explicit --limit bounds it.
+    bucket_limit = None if (a.limit is None or unlimited) else lim
+    ready_footer = None
+    buckets = None
     if a.in_flight:
         if bsel:
             where.append("board=?")
@@ -454,9 +458,12 @@ def cmd_ls(c, a, out):
         total = len(rows)
         rows = rows[:lim]
     elif a.ready:
-        rows = store.ready_tasks(c, a.channel, kv_list(a.label), limit=lim + 1, board=bsel)
+        # `--ready` shows the claimable bucket only: ready_tasks() also returns runnable=0 cards (deliberate
+        # holds), but nothing can claim them, so they belong in the footer's `hold` bucket instead.
+        rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=lim + 1, board=bsel) if r["runnable"]]
         total = len(rows)
         rows = rows[:lim]
+        buckets = store.ready_buckets(c, a.channel, kv_list(a.label), limit=bucket_limit, board=bsel)
     else:
         if bsel:
             where.append("board=?")
@@ -485,8 +492,18 @@ def cmd_ls(c, a, out):
             why = store.workdir_wait_reason(c, d, held)
             if why:
                 d["wait_reason"] = why
+    if a.ready and not items:
+        # No claimable row: say which bucket(s) the filtered population fell into, so an empty answer is
+        # distinguishable from a broken query without re-deriving `ab snapshot --json` by hand.
+        bk = buckets or {k: 0 for k in store.BUCKET_KEYS}
+        parts = ", ".join(f"{word} {bk[key]}" for key, word in
+                          (("dep_open", "dep_open"), ("not_before", "not_before"), ("park", "parked"), ("hold", "hold")))
+        bflag = getattr(a, "board", None) or os.environ.get("AB_BOARD")
+        ready_footer = f"ready: {bk['ready']} ({parts}" + (f"; board filter: {bflag}" if bflag else "") + ")"
     def ls_text(xs):
         text = "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)"
+        if ready_footer:
+            text += "\n" + ready_footer
         if a.stuck and xs:
             counts = {}
             for x in xs:
@@ -494,12 +511,16 @@ def cmd_ls(c, a, out):
                 counts[r] = counts.get(r, 0) + 1
             text += "\nholds by reason:\n" + "\n".join(f"  {r}: {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         return text
-    out(items, ls_text)
+    if a.ready and out.as_json:
+        # Same card objects as the text listing, plus the bucket dict, so callers stop re-deriving it.
+        out({"items": items, "buckets": buckets})
+    else:
+        out(items, ls_text)
     if status and "done" in status.split(",") and not (a.stuck or a.ready):
         print("\n".join(["unmerged:", *unmerged_mod.lines(unmerged_mod.scan(c, None, bsel))]), file=sys.stderr)
     if not unlimited and total > lim:
         more = "+" if a.ready else ""
-        print(f"ab ls: showing {a.limit} of {total}{more} (add --limit N for more)", file=sys.stderr)
+        print(f"ab ls: showing {lim} of {total}{more} (add --limit N for more)", file=sys.stderr)
 
 
 def cmd_show(c, a, out):
@@ -1949,7 +1970,7 @@ def build_parser():
     s.add_argument("--tier", help="with --in-flight: comma list of tiers to count")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
-    s.add_argument("--limit", "-n", type=int, default=50, help="max rows (default 50; 0 = all)")
+    s.add_argument("--limit", "-n", type=int, default=None, help="max rows (default 50; 0 = all)")
     s.add_argument("--all-boards", action="store_true")
 
     s = sub("show", cmd_show, "full task: body, notes, runs, result")

@@ -135,7 +135,7 @@ def test_park_pid_frees_slot_and_new_run_resumes(rig, abx):
     snap = j("snapshot")
     sa = next(x for x in snap["tasks"] if x["id"] == a)
     assert sa["state"] == "running" and sa["park"]["pid"] == pid
-    assert a not in [x["id"] for x in j("ls", "--ready")]
+    assert a not in [x["id"] for x in j("ls", "--ready")["items"]]
     # after the sleep ends the card wakes and a NEW run resumes it (it may finish between two polls)
     assert wait(lambda: j("show", a)["status"] in ("claimed", "done")), (j("show", a), open(j.tmp / "runner.log").read())
     assert wait(lambda: j("show", a)["status"] == "done"), j("show", a)
@@ -169,7 +169,7 @@ def test_park_file_wakes_when_file_appears(rig, abx):
     assert t["attempts"] == 0
     time.sleep(4)
     assert parked(j, a)  # no file yet: still waiting
-    assert a not in [x["id"] for x in j("ls", "--ready")]
+    assert a not in [x["id"] for x in j("ls", "--ready")["items"]]
     out.write_text('{"score": 0.9}\n')
     assert wait(lambda: j("show", a)["status"] in ("claimed", "done")), j("show", a)
     assert wait(lambda: j("show", a)["status"] == "done"), j("show", a)

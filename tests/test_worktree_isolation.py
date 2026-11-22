@@ -77,7 +77,7 @@ def test_worktree_on_not_held_by_busy_shared_dir(rig, abx, tmp_path):
     wt = j("add", "worktree build", "--workdir", str(d), "-l", "worktree=on")["id"]
     j.start(slots="1")
     assert wait(lambda: status(j, holder) == "claimed")
-    assert wait(lambda: wt in [x["id"] for x in j("ls", "--ready")])
+    assert wait(lambda: wt in [x["id"] for x in j("ls", "--ready")["items"]])
     time.sleep(4)  # a few runner ticks: the hold scan runs too
     assert status(j, wt) == "open"
     show = abx("show", wt, env=j.env)[1]

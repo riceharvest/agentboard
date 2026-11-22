@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ab ls --ready` explains an empty answer instead of a bare `(nothing)`: a footer `ready: 0 (dep_open N, not_before N, parked N, hold N)` counts one mutually exclusive bucket per open card (park > not_before > dep_open > hold > ready), over the filtered population (`--board`, `--label`, `--channel`, `--limit`; `; board filter: NAME` when the board was chosen explicitly). A non-empty listing is unchanged. `--ready --json` is now `{"items": [...], "buckets": {...}}`, carrying the same card objects as `--in-flight --json` plus the bucket counts. `runnable=0` cards are no longer listed as ready rows: nothing can claim them, so they count in `hold`.
+
 - `ab ls --in-flight [--tier a,b] [--json]`: the cards really in flight (open/claimed, not parked, `not_before` past or empty, every dep done), ending with `in-flight: N (parked P, deferred D, dep-waiting W)`. `ab snapshot --json` tasks gain `in_flight` and `in_flight_reason` (`parked|not_before|dep_open|null`); existing keys unchanged.
 
 - A card that runs in its own worktree no longer shows a `workdir_locked` hold for the shared checkout: `worktree=on` (and the automatic worktree on a git checkout) is exempt at hold-report time, matching the runner's pick rule. When `worktree=on` cannot isolate (non-git workdir) the hold reason says so (`share_workdir true` needs no exemption: it has no lock). `ab ls --stuck` / `ab show` now name the holder next to `workdir_locked`: `held_by <card id> pid <pid>`, or `held_by runner` when the runner holds it. Runner change: `ab runner reload` needed.

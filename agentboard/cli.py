@@ -2359,8 +2359,12 @@ def _sanitize_worker_env():
     run_home = os.environ.get("AB_RUN_HOME")
     if run_home and store.norm_dir(str(store.HOME)) != store.norm_dir(run_home):
         explicit = bool(os.environ.get("AB_HOME"))
-        for k in ("AB_RUN", "AB_BOARD", "AB_RUN_HOME") + (() if explicit else ("AB_ACTOR", "AB_TASK")):
-            os.environ.pop(k, None)
+        keep = ("AB_ACTOR", "AB_TASK", "AB_BOARD") if explicit else ()
+        dropped = [k for k in ("AB_RUN", "AB_BOARD", "AB_RUN_HOME", "AB_ACTOR", "AB_TASK")
+                   if k not in keep and os.environ.pop(k, None) is not None and k in ("AB_ACTOR", "AB_TASK", "AB_BOARD")]
+        if dropped:
+            print(f"ab: ignoring {', '.join(dropped)} from the worker shell (AB_HOME is not this run's home); "
+                  f"set AB_HOME explicitly to keep them", file=sys.stderr)
 
 
 def _resolve_task_arg(conn, a, fn_name):

@@ -14,6 +14,16 @@ use std::time::{Duration, Instant};
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// True once the controlling terminal is gone (pty closed, ssh/tmux dropped). Without this check the event
+/// loop spun a core forever: a hung-up tty keeps `poll` readable, so the inner read loop never returned to
+/// the STOP check.
+fn tty_gone() -> bool {
+    // `isatty` still says yes on a hung-up pty, but poll(2) reports POLLHUP/POLLERR on it even with no events asked for.
+    let mut fd = libc::pollfd { fd: libc::STDIN_FILENO, events: 0, revents: 0 };
+    let r = unsafe { libc::poll(&mut fd, 1, 0) };
+    r < 0 || fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 || unsafe { libc::isatty(libc::STDIN_FILENO) == 0 }
+}
+
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
@@ -170,10 +180,18 @@ fn main() {
     app.tx_poll = Some(ptx.clone());
     app.tx_msg = Some(tx);
 
+    // A hangup that lands while the main thread is inside crossterm's poll() leaves it busy-reading EOF
+    // forever (it ignores its own timeout), so the loop checks above never run: a watchdog ends the process.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if tty_gone() {
+            std::process::exit(0);
+        }
+    });
     let mut terminal = enter();
     let mut last = Instant::now();
     let result: std::io::Result<()> = (|| loop {
-        if STOP.load(Ordering::SeqCst) || app.quit {
+        if STOP.load(Ordering::SeqCst) || app.quit || tty_gone() {
             return Ok(());
         }
         while let Ok(m) = rx.try_recv() {
@@ -193,14 +211,21 @@ fn main() {
             continue;
         }
         let wait = if app.fx.running() { Duration::from_millis(33) } else { Duration::from_millis(100) };
+        if tty_gone() {
+            return Ok(());
+        }
         if event::poll(wait)? {
             loop {
+                // crossterm's read() spins forever on EOF, so never call it on a dead tty
+                if tty_gone() {
+                    return Ok(());
+                }
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                     Event::Mouse(m) => app.on_mouse(m),
                     _ => {}
                 }
-                if !event::poll(Duration::ZERO)? {
+                if !event::poll(Duration::ZERO)? || STOP.load(Ordering::SeqCst) || tty_gone() {
                     break;
                 }
             }

@@ -409,7 +409,16 @@ def cmd_add(c, a, out):
         print(store.STALE_MSG, file=sys.stderr)
 
 
+LS_STATUSES = ("open", "claimed", "done", "dead", "cancelled")
+
+
 def cmd_ls(c, a, out):
+    if a.status:
+        bad = [t for t in (x.strip() for x in a.status.split(",")) if t and t != "all" and t not in LS_STATUSES]
+        if bad:
+            print(f"error: unknown --status {', '.join(repr(t) for t in bad)}; valid: {', '.join(LS_STATUSES)}, all (or a comma list)",
+                  file=sys.stderr)
+            return 2
     store.reap(c)
     sql, args = "SELECT * FROM tasks", []
     where = []

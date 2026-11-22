@@ -15,7 +15,7 @@ FAKE_CLAUDE = r'''#!/bin/sh
 # -p BRIEF: keep every brief this route was started with
 printf '%s\n=====\n' "$2" >> "$FAKE_LOG.briefs"
 n=$(cat "$FAKE_LOG.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$FAKE_LOG.n"
-echo "step $n done, next: step $((n+1))" > .ab-progress.md
+echo "step $n done, next: step $((n+1))" > "$AB_PROGRESS"
 echo "work $n" > "work$n.txt"
 git add "work$n.txt" && git -c user.name=t -c user.email=t@t commit -qm "milestone $n"
 tid=$(echo "$2" | sed -n "s/.*agentboard task \(t_[0-9a-f]*\).*/\1/p" | head -1)

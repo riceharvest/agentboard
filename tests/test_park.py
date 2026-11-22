@@ -119,7 +119,7 @@ def test_park_pid_frees_slot_and_new_run_resumes(rig, abx):
     j.start(slots="1")
     assert wait(lambda: parked(j, a)), j("show", a)
     t = j("show", a)
-    assert t["state"] == "waiting" and t["attempts"] == 0 and t["owner"] is None
+    assert t["state"] == "running" and t["attempts"] == 0 and t["owner"] is None  # a pid/file park counts as running (ae0c111)
     pid = t["park"]["pid"]
     assert t["park"]["note"] == NOTE and t["park"]["run"] == t["runs"][0]["id"]
     assert wait(lambda: j("show", a)["runs"][0]["outcome"] == "parked"), j("show", a)["runs"]
@@ -134,7 +134,7 @@ def test_park_pid_frees_slot_and_new_run_resumes(rig, abx):
     assert code == 0 and f"parked: pid {pid}" in txt, txt
     snap = j("snapshot")
     sa = next(x for x in snap["tasks"] if x["id"] == a)
-    assert sa["state"] == "waiting" and sa["park"]["pid"] == pid
+    assert sa["state"] == "running" and sa["park"]["pid"] == pid
     assert a not in [x["id"] for x in j("ls", "--ready")]
     # after the sleep ends the card wakes and a NEW run resumes it (it may finish between two polls)
     assert wait(lambda: j("show", a)["status"] in ("claimed", "done")), (j("show", a), open(j.tmp / "runner.log").read())
@@ -195,7 +195,7 @@ def test_park_survives_runner_reload(rig):
     assert j("runner", "status")["running"]
     time.sleep(3)
     t = j("show", a)
-    assert t["state"] == "waiting" and t["attempts"] == 0
+    assert t["state"] == "running" and t["attempts"] == 0
     assert t["park"]["file"] == before["file"] and not t["park"].get("woken_at")
     out.write_text("done\n")
     assert wait(lambda: j("show", a)["status"] in ("claimed", "done")), j("show", a)
@@ -257,7 +257,7 @@ def test_park_validation_and_permissions(abx):
     c = _conn(abx)
     try:
         t = store.task_dict(c, store.must_task(c, tid))
-        assert t["state"] == "waiting" and t["attempts"] == 0 and t["owner"] is None
+        assert t["state"] == "running" and t["attempts"] == 0 and t["owner"] is None
         assert t["park"]["note"] == "forced"
         assert store.ready_tasks(c) == []
         # cancel clears the park

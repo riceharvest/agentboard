@@ -223,7 +223,7 @@ def test_auto_worktree_config_off_and_non_git(rig, abx, tmp_path):
 
 
 def test_worker_env_hygiene_across_ab_home(tmp_path):
-    """Running `ab` with an explicit AB_HOME that differs from AB_RUN_HOME strips AB_RUN/AB_BOARD (the caller's actor/task are kept for that board);
+    """Running `ab` with an explicit AB_HOME that differs from AB_RUN_HOME strips AB_RUN (the caller's actor/task/board are kept);
     pointing at the same AB_HOME (even via trailing slash or symlink) keeps the worker identity locked."""
     worker_home = tmp_path / "real_home"
     other_home = tmp_path / "throwaway_home"
@@ -246,11 +246,11 @@ def test_worker_env_hygiene_across_ab_home(tmp_path):
         env = clean_env(home_val, **{k: v for k, v in worker_env.items() if k not in drop})
         return subprocess.run([sys.executable, "-m", "agentboard", *args], cwd=ROOT, capture_output=True, text=True, env=env)
 
-    # Different explicit AB_HOME: run and board are stripped (-> main); AB_ACTOR/AB_TASK stay the caller's own
+    # Different explicit AB_HOME: run is stripped; AB_ACTOR/AB_TASK/AB_BOARD stay the caller's own (697ac74)
     r = run_ab(other_home, "--json", "whoami")
     assert r.returncode == 0, r.stderr
     who = json.loads(r.stdout)
-    assert who["actor"] == "claude#42" and who["board"] == "main" and who["run"] is None and who["task"] == "t_11223344", who
+    assert who["actor"] == "claude#42" and who["board"] == "customboard" and who["run"] is None and who["task"] == "t_11223344", who
     r = run_ab(other_home, "--json", "config", "set", "pacer", "false", keep_identity=False)
     assert r.returncode == 0, r.stderr
     r = run_ab(other_home, "--json", "add", "works on throwaway", keep_identity=False)

@@ -44,7 +44,7 @@ FAILED tests/test_worktree_isolation.py::test_worktree_on_cannot_isolate_says_so
 FAILED tests/test_runner_hold.py::test_stuck_names_the_lock_holder
 3 failed in 56.77s
 ```
-Full suite:
+Full suite (branch on its original base):
 ```
 $ env -i PATH="$PATH" HOME="$HOME" AB_HOME=$(mktemp -d) python3 -m pytest tests -q
 4 failed, 210 passed, 3 skipped in 875.86s (0:14:35)
@@ -55,6 +55,15 @@ tests/test_park.py::test_park_pid_frees_slot_and_new_run_resumes,
 tests/test_park.py::test_park_survives_runner_reload,
 tests/test_park.py::test_park_validation_and_permissions
 (4 failed, 10 passed in the clean-tree rerun of those files).
+
+Full suite after merging current `master` (0b40e38) into the branch — same 4 pre-existing failures:
+```
+$ env -i PATH="$PATH" HOME="$HOME" AB_HOME=$(mktemp -d) python3 -m pytest tests -q
+4 failed, 219 passed, 3 skipped in 759.48s (0:12:39)
+```
+(An intermediate merge resolution had nested master's `clear_hint()` call inside the hold-event
+block and broke two `test_runnable_hold_hint.py` tests; fixed in 6cdee9c, both pass.)
+
 
 Manual repro (runner + fake harness, shared git checkout; holder = long card, plain = worktree=off,
 wt = worktree=on):

@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from agentboard.cli import main  # noqa: E402
+from agentboard._entry import main  # noqa: E402  (checks the checkout before importing agentboard.cli)
 
 if __name__ == "__main__":
     sys.exit(main())

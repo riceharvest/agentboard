@@ -11,6 +11,7 @@ from pathlib import Path
 from . import runner as R
 from . import snapshot as S
 from . import store, usage
+from . import _sanity
 from ._lazy import Lazy
 from .store import fmt_dur, fmt_ts, now, parse_dur, parse_time
 
@@ -1318,6 +1319,8 @@ def cmd_runner(c, a, out):
         lines = [head]
         if s.get("op_pending"):
             lines.append(f"requests: {s['op_pending']} pending (oldest {fmt_dur(s['op_oldest_s'])})")
+        if s.get("checkout_unloadable"):
+            lines.append(f"checkout_unloadable: {s['checkout_unloadable']}")
         if s.get("stale"):
             lines.append(store.STALE_MSG)
         if s.get("note"):
@@ -1873,6 +1876,7 @@ def build_parser():
     p.add_argument("--json", action="store_true", default=os.environ.get("AB_JSON") == "1", help="machine-readable output")
     p.add_argument("--as", dest="actor", help="who you are (default $AB_ACTOR)")
     p.add_argument("--board", "-B", help="board name (default $AB_BOARD or main)")
+    p.add_argument("--version", "-V", action="version", version=f"ab {_sanity.version_string()}")
     sp = p.add_subparsers(dest="cmd", required=True)
 
     def sub(name, fn, help_, aliases=()):
@@ -2355,8 +2359,12 @@ def _sanitize_worker_env():
     run_home = os.environ.get("AB_RUN_HOME")
     if run_home and store.norm_dir(str(store.HOME)) != store.norm_dir(run_home):
         explicit = bool(os.environ.get("AB_HOME"))
-        for k in ("AB_RUN", "AB_BOARD", "AB_RUN_HOME") + (() if explicit else ("AB_ACTOR", "AB_TASK")):
-            os.environ.pop(k, None)
+        keep = ("AB_ACTOR", "AB_TASK", "AB_BOARD") if explicit else ()
+        dropped = [k for k in ("AB_RUN", "AB_BOARD", "AB_RUN_HOME", "AB_ACTOR", "AB_TASK")
+                   if k not in keep and os.environ.pop(k, None) is not None and k in ("AB_ACTOR", "AB_TASK", "AB_BOARD")]
+        if dropped:
+            print(f"ab: ignoring {', '.join(dropped)} from the worker shell (AB_HOME is not this run's home); "
+                  f"set AB_HOME explicitly to keep them", file=sys.stderr)
 
 
 def _resolve_task_arg(conn, a, fn_name):

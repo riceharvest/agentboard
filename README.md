@@ -469,6 +469,25 @@ A card can be `state=ready` and still never start because `runnable=0`. Every wr
 A `retry_backoff` hold clears by itself when the backoff ends. Release any hold with `ab edit ID --auto` (same as `--runnable on`; `--runnable off` or `--manual` sets one). `ab show`, `ab ls` and `ab ls --stuck` print the exact `clear with:` command. A hold is never cleared on a timer: its owner releases it.
 
 
+## Troubleshooting: `ab` dies in `SyntaxError` / nothing is being claimed
+
+If a worker leaves the checkout `ab` runs from mid-merge, every `ab` call used to die in `SyntaxError` naming a line
+but not the cause. `ab` now checks the checkout before importing the CLI and refuses with exit 2 instead:
+
+    $ ab ls
+    ab: checkout at /mnt/ssd/dev workspace/agentboard has unresolved merge-conflict markers:
+      agentboard/cli.py:1234  <<<<<<< HEAD
+      agentboard/cli.py:1236  =======
+      agentboard/cli.py:1238  >>>>>>> side
+    ab: resolve the merge (git status, git checkout --ours/--theirs, git merge --abort) and retry.
+
+`ab --version` and `ab guide` keep working in that state (they do not import the CLI). The marker scan covers the
+package's `*.py` modules and any `*.py` at the checkout root; markers in a `README.md` are ignored. Anything else that
+makes the checkout unimportable (any `SyntaxError`, not only markers) is reported as
+`checkout_unloadable: <first line>` by `ab` and by `ab runner status`, and the runner refuses to claim new cards while
+it is set, so cards are not half-started and left dead. `ab runner reload` refuses the same way.
+
+
 ## Troubleshooting: who does `ab` think I am?
 
 `ab whoami` prints the env identity (`run` is `AB_RUN`) and, separately, the run inferred from the run home

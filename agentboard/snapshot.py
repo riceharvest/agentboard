@@ -103,6 +103,13 @@ def _task(r, keys, deps, dep_status, t):
         d["state"] = "waiting"
     else:
         d["state"] = "ready"
+    d["hold"] = None
+    if d["status"] == "open" and d["deps_open"]:
+        cyc = store.graph_path(lambda c: deps.get(c, []), d["id"], d["deps_open"][0]) if len(d["deps_open"]) == 1 else None
+        for x in d["deps_open"]:
+            cyc = cyc or store.graph_path(lambda c: deps.get(c, []), d["id"], x)
+        if cyc:
+            d["hold"] = {"reason": "dep_cycle", "cycle": " -> ".join([d["id"]] + cyc)}
     d["in_flight"], d["in_flight_reason"] = store.in_flight_reason(d["status"], d["park"], d["not_before"], d["deps_open"], t)
     return d
 

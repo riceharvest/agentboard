@@ -439,7 +439,7 @@ def cmd_ls(c, a, out):
             args += tl
         cand = [store.task_dict(c, r) for r in visible(c, a, c.execute("SELECT * FROM tasks WHERE " + " AND ".join(where) +
                 " ORDER BY CASE status WHEN 'claimed' THEN 0 ELSE 1 END, priority DESC, updated_at DESC", args).fetchall())]
-        t_now, fl, excl = now(), [], {"parked": 0, "not_before": 0, "dep_open": 0, "excluded_type": 0}
+        t_now, fl, excl = now(), [], {"parked": 0, "not_before": 0, "dep_open": 0, "dep_cycle": 0, "excluded_type": 0}
         # Type filter: a `watch` card is the stocker that runs the count, not work, so a watcher excludes its own
         # kind and reads the excluded-type bucket instead of inflating the number it compares to its stop rule.
         skip_types = {x.strip() for x in (a.exclude_type or "").split(",") if x.strip()}
@@ -449,6 +449,8 @@ def cmd_ls(c, a, out):
                 if d["deps"] else []
             ok, why = store.in_flight_reason(d["status"], d["park"], d["not_before"], dep_open, t_now)
             if not ok:
+                if why == "dep_open" and (d.get("hold") or {}).get("reason") == "dep_cycle":
+                    why = "dep_cycle"
                 excl[why] += 1
             elif d["type"] in skip_types:
                 excl["excluded_type"] += 1
@@ -458,6 +460,8 @@ def cmd_ls(c, a, out):
         rows = None
         items = fl[:lim]
         buckets = [f"parked {excl['parked']}", f"deferred {excl['not_before']}", f"dep-waiting {excl['dep_open']}"]
+        if excl["dep_cycle"]:
+            buckets.append(f"dep_cycle {excl['dep_cycle']}")
         if skip_types:
             buckets.append(f"excluded-type {excl['excluded_type']}")
         summary = f"in-flight: {len(fl)} ({', '.join(buckets)})"
@@ -966,7 +970,8 @@ def cmd_edit(c, a, out):
         if r is None:
             raise LookupError(f"no task {x}")
         return r["id"]
-    tid = store.edit(c, a.id, actor_of(a), f, labels, [tid_of(d) for d in a.dep or []], [tid_of(d) for d in a.rm_dep or []])
+    tid = store.edit(c, a.id, actor_of(a), f, labels, [tid_of(d) for d in a.dep or []], [tid_of(d) for d in a.rm_dep or []],
+                    allow_cycle=a.allow_dep_cycle)
     out({"id": tid, "edited": list(f) + (["labels"] if labels else [])}, f"{tid} edited")
 
 
@@ -2136,7 +2141,8 @@ def build_parser():
     s.add_argument("--max-attempts", type=int)
     s.add_argument("--verify", help="done gate command (see `ab add --verify`); empty string removes it")
     s.add_argument("--label", "-l", action="append", help="key=value, or key= to remove")
-    s.add_argument("--dep", action="append")
+    s.add_argument("--dep", action="append", help="add a dependency; refused when it would close a cycle (prints the path)")
+    s.add_argument("--allow-dep-cycle", metavar="WHY", help="force a --dep that closes a cycle (near-unused; recorded as an event)")
     s.add_argument("--rm-dep", action="append")
     s.add_argument("--manual", action="store_true", help="hold the card: the runner won't start it")
     s.add_argument("--auto", action="store_true", help="clear a hold (opposite of --manual): the card becomes runnable")

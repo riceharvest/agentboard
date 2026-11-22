@@ -566,6 +566,10 @@ def task_dict(conn, row, full=False):
     d["deps"] = [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (d["id"],))]
     d["state"] = derived_state(conn, d)
     d["hold"] = current_hold(conn, d["id"]) if d["status"] == "open" else None
+    if d["status"] == "open" and d["deps"] and (d["hold"] or {}).get("reason") != "dep_cycle":
+        cyc = card_cycle(conn, d["id"])
+        if cyc:  # live read, no runner tick needed
+            d["hold"] = {"reason": "dep_cycle", "since": None, "last": None, "holder": None, "cycle": " -> ".join(cyc)}
     d["runs"] = conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=?", (d["id"],)).fetchone()[0]  # run count; `show` swaps in the list below
     if full:
         d["notes"] = thread_messages(conn, d["id"])
@@ -683,17 +687,46 @@ def must_task(conn, tid):
     return row
 
 
-def would_cycle(conn, tid, dep):
-    seen, stack = set(), [dep]
+def dep_path(conn, tid, dep):
+    """Path [dep, ..., tid] along dep edges from `dep` back to `tid` (adding tid->dep would close it), else None."""
+    return graph_path(lambda c: [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (c,))], tid, dep)
+
+
+def graph_path(nexts, tid, start):
+    prev, stack = {start: None}, [start]
     while stack:
         cur = stack.pop()
         if cur == tid:
-            return True
-        if cur in seen:
-            continue
-        seen.add(cur)
-        stack += [r["dep_id"] for r in conn.execute("SELECT dep_id FROM deps WHERE task_id=?", (cur,))]
-    return False
+            path = []
+            while cur is not None:
+                path.append(cur)
+                cur = prev[cur]
+            return path[::-1]
+        for n in nexts(cur):
+            if n not in prev:
+                prev[n] = cur
+                stack.append(n)
+    return None
+
+
+def cycle_text(tid, path):
+    """'t_a -> t_b -> t_a' for the card tid that would depend on path[0] ... path[-1]==tid."""
+    return " -> ".join([tid] + path)
+
+
+def would_cycle(conn, tid, dep):
+    return dep_path(conn, tid, dep) is not None
+
+
+def card_cycle(conn, tid):
+    """Cycle path [tid, dep, ..., tid] when the live card tid's dep graph reaches itself, else None."""
+    live = lambda c: [r["dep_id"] for r in conn.execute(
+        "SELECT x.dep_id FROM deps x JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=? AND p.status IN ('open','claimed')", (c,))]
+    for d in live(tid):
+        p = graph_path(live, tid, d)
+        if p:
+            return [tid] + p
+    return None
 
 
 def find_key(conn, board, key, live=False, skip=None):
@@ -1163,7 +1196,7 @@ def hold_reason(conn, row, waiting=None, held=None, gates=None):
         return "not_before_future"
     if conn.execute("SELECT 1 FROM deps x LEFT JOIN tasks p ON p.id=x.dep_id WHERE x.task_id=? AND (p.status IS NULL OR p.status!='done') LIMIT 1",
                     (row["id"],)).fetchone():
-        return "deps_pending"
+        return "dep_cycle" if card_cycle(conn, row["id"]) else "deps_pending"
     wd = row["workdir"]
     if wd and not Path(os.path.expanduser(wd)).is_dir():
         return "workdir_missing"
@@ -1231,7 +1264,7 @@ def record_holds(conn, waiting=None, held=None, gates=None):
         if cur and hold_key(cur["reason"]) == hold_key(why) and cur.get("holder") == holder and t - cur["last"] < HOLD_REFRESH_S:
             continue
         text = {"workdir_missing": "workdir does not exist", "no_tier_bucket": "no candidate harness/bucket for the card's tier",
-                "no_harness": "no installed harness for the card", "deps_pending": "dependencies not done",
+                "no_harness": "no installed harness for the card", "deps_pending": "dependencies not done", "dep_cycle": "dependency cycle: the card waits on itself",
                 "not_before_future": "not_before is in the future",
                 "ram_gate": "free RAM is under min_free_gib, the runner will not launch", "board_slots": "board max_slots reached"}.get(why.split(":")[0])
         if text is None:
@@ -1536,8 +1569,9 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
         for d in after:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
                 raise ValueError(f"dependency {d} does not exist")
-            if would_cycle(conn, row["id"], d):
-                raise ValueError(f"{d} would create a dependency cycle")
+            cp = dep_path(conn, row["id"], d)
+            if cp:
+                raise ValueError(f"{d} would create a dependency cycle: {cycle_text(row['id'], cp)}")
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (row["id"], d))
         conn.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, not_before=COALESCE(?,not_before), updated_at=? WHERE id=?",
                      (until, now(), row["id"]))
@@ -1647,7 +1681,7 @@ EDITABLE = {"cmd", "verify", "title", "body", "channel", "priority", "tier", "ha
             "max_attempts", "timeout_s", "not_before", "board"}
 
 
-def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
+def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=(), allow_cycle=None):
     with tx(conn):
         row = must_task(conn, tid)
         if not fields and not add_deps and not rm_deps and row["status"] == "dead" and labels == {"outcome": "negative"}:
@@ -1692,9 +1726,13 @@ def edit(conn, tid, actor, fields, labels=None, add_deps=(), rm_deps=()):
         for d in add_deps:
             if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone():
                 raise ValueError(f"dependency {d} does not exist")
-            if would_cycle(conn, row["id"], d):
-                raise ValueError(f"{d} would create a dependency cycle")
+            cp = dep_path(conn, row["id"], d)
+            if cp and not allow_cycle:
+                raise ValueError(f"{d} would create a dependency cycle: {cycle_text(row['id'], cp)} "
+                                 f"(--allow-dep-cycle WHY forces it; the cards then wait on each other forever)")
             conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (row["id"], d))
+            if cp:
+                event(conn, row["id"], actor, "dep_cycle_allowed", {"dep": d, "cycle": cycle_text(row["id"], cp), "why": allow_cycle})
         for d in rm_deps:
             conn.execute("DELETE FROM deps WHERE task_id=? AND dep_id=?", (row["id"], d))
         conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now(), row["id"]))

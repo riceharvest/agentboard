@@ -191,6 +191,20 @@ def board_of(a):
     return getattr(a, "board", None) or os.environ.get("AB_BOARD") or store.DEFAULT_BOARD
 
 
+def read_board_of(c, a):
+    """Board for read commands (ls, unmerged): flag > AB_BOARD > the board of the live run this shell's home belongs to > default."""
+    b = getattr(a, "board", None) or os.environ.get("AB_BOARD")
+    if b:
+        return b
+    try:
+        ctx, _ = infer_run(c)
+    except Exception:
+        ctx = None
+    if ctx is not None and os.environ.get("AB_TASK") and os.environ["AB_TASK"] != ctx["task"]:
+        ctx = None
+    return ctx["board"] if ctx else store.DEFAULT_BOARD
+
+
 # ---- run-home identity: a worker terminal may lack AB_TASK/AB_ACTOR/AB_BOARD (the shared Hermes gateway never passes the
 # runner's per-run env to its terminal tool). A shell whose HERMES_HOME or cwd is <root>/profiles/ab-run-N, with a marker
 # the runner wrote into that home, takes its identity from live run N, and only from that run.
@@ -394,7 +408,7 @@ def cmd_ls(c, a, out):
     sql, args = "SELECT * FROM tasks", []
     where = []
     status = a.status
-    bsel = None if a.all_boards else board_of(a)
+    bsel = None if a.all_boards else read_board_of(c, a)
     unlimited = a.limit <= 0  # --limit 0 means all rows, like other CLIs
     lim = 10**9 if unlimited else a.limit
     if a.in_flight:
@@ -778,7 +792,7 @@ def cmd_done(c, a, out):
 
 
 def cmd_unmerged(c, a, out):
-    rep = unmerged_mod.scan(c, a.repo, None if a.all_boards else board_of(a))
+    rep = unmerged_mod.scan(c, a.repo, None if a.all_boards else read_board_of(c, a))
     out(rep, lambda r: "\n".join(unmerged_mod.lines(r)))
 
 

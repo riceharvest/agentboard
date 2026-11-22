@@ -496,3 +496,6 @@ it is set, so cards are not half-started and left dead. `ab runner reload` refus
 
     $ ab whoami
     actor=... board=main task=None run=None db=... admin=False inferred_run=None inferred_reason=None
+
+Board selection for `ab ls` and `ab unmerged` (no `--all-boards`): `-B/--board` flag, then `AB_BOARD`, then the board of the live
+run whose home this shell is in (so a worker shell with no `AB_*` lists its own board, not `main`), then `main`.

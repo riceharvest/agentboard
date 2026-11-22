@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agentboard import store  # noqa: E402
 
-MSG = "runner code older than installed code: ab runner reload"
+MSG = "runner code older than installed code"
 
 
 def _set_runner(abx, ver):
@@ -49,3 +49,8 @@ def test_code_version_changes_when_code_is_touched(tmp_path, monkeypatch):
     finally:
         os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert store.code_version() == v1
+
+
+def test_stale_hint_names_both_remedies():
+    assert "older than installed code" in store.STALE_MSG
+    assert "ab runner reload" in store.STALE_MSG and "ab request-reload" in store.STALE_MSG

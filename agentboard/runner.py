@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import store
+from . import _sanity
 from ._lazy import Lazy
 from .store import cfg, event, now, parse_dur, tx
 
@@ -164,6 +165,26 @@ def wake_parked(conn):
     return woken
 
 
+_PROBE = {}  # {"key": <module files' size/mtime>, "reason": <None or why the checkout cannot be imported>}
+
+
+def _pkg_key():
+    return tuple((f.name, f.stat().st_size, f.stat().st_mtime_ns) for f in sorted(Path(__file__).resolve().parent.glob("*.py")))
+
+
+def checkout_unloadable():
+    """None, or one line saying why the checkout this code runs from cannot be imported: unresolved merge-conflict
+    markers first, then any SyntaxError. Cached on the module files' size/mtime, so a 5s poll does not recompile the
+    package and a fixed checkout clears the warning on the next tick."""
+    try:
+        key = _pkg_key()
+    except OSError:
+        return None
+    if _PROBE.get("key") != key:
+        _PROBE.update(key=key, reason=_sanity.unloadable_reason(Path(__file__).resolve().parent))
+    return _PROBE.get("reason")
+
+
 def runner_status(conn):
     r = conn.execute("SELECT * FROM runner WHERE id=1").fetchone()
     d = dict(r) if r else {"running": False}
@@ -171,6 +192,9 @@ def runner_status(conn):
         poll = float(cfg(conn, "poll_s") or 5)
         d["running"] = bool(d["pid"] and alive(d["pid"], None) and d["heartbeat"] and now() - d["heartbeat"] < poll * 3 + 30)
     d["stale"] = bool(r and d["running"] and d.get("code_ver") and d["code_ver"] != store.code_version())
+    # A broken checkout answers "why is nothing being claimed" better than a stale-code warning does: the runner
+    # refuses to claim cards while this is set (see fill()).
+    d["checkout_unloadable"] = checkout_unloadable()
     d["children"] = [dict(x) for x in conn.execute(
         "SELECT r.id run, r.task_id, r.harness, t.cmd, r.endpoint, r.model, r.effort, r.bucket, r.pid, r.started_at, r.out_path, r.err_path, "
         "t.title, t.board, t.timeout_s FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.ended_at IS NULL ORDER BY r.id")]
@@ -616,6 +640,7 @@ class Runner:
         self.waiting = {}
         self.iso_skipped = set()
         self.wt_err = None
+        self.unloadable_note = None
         self.last_harvest = 0
         self.log_f = log or sys.stderr
         self.lock_f = None
@@ -970,6 +995,15 @@ class Runner:
 
     def fill(self, slots):
         c = self.conn
+        # A checkout that does not parse cannot run anything: refuse to claim before spawning, so cards are not
+        # claimed and then left dead by a half-started run (the note also lands in `ab runner status`).
+        bad = checkout_unloadable()
+        if bad:
+            note = f"checkout_unloadable: {bad}"
+            if self.unloadable_note != note:
+                self.unloadable_note = note
+                self.log(f"not claiming cards: {note}")
+            return note
         if len(self.children) >= slots:
             return None
         chans = cfg(c, "channels") or None

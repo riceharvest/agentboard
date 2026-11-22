@@ -13,8 +13,10 @@ dependencies = []
 keywords = ["agents", "claude-code", "kanban", "task-queue", "mcp", "llm"]
 
 [project.scripts]
-ab = "agentboard.cli:main"
-agentboard = "agentboard.cli:main"
+# `_entry` checks the checkout for unresolved merge-conflict markers before importing `cli` (which is the file such a
+# merge breaks): `ab` then reports the cause and exits 2 instead of dying in SyntaxError. `cli:main` stays importable.
+ab = "agentboard._entry:main"
+agentboard = "agentboard._entry:main"
 
 [project.urls]
 Homepage = "https://github.com/riceharvest/agentboard"

@@ -82,12 +82,19 @@ cards a live session claimed by hand); paths are compared after `realpath`. Two 
 - **Per-task git worktree (automatic by default).** When a card's workdir is a busy git checkout and the card has no
   `-l worktree=off` label, the runner runs `git worktree add -b ab/<task> $AB_HOME/worktrees/<task> HEAD`, starts the
   card there, tells the agent in its brief to merge the branch back, and records `worktree_dir` and `worktree_branch`
-  on the card (labels). A worktree run does not hold the original dir. Disable globally with
+  on the card (labels). A worktree run does not hold the original dir, and a card that will run in a worktree is not
+  held by the original dir's lock either: `-l worktree=on` never waits on another card's checkout, and a card the
+  automatic worktree will isolate is not reported as `workdir_locked`. When `worktree=on` cannot isolate (non-git
+  workdir) the card falls back to the lock and the hold reason says so
+  (`workdir_locked:<path> (worktree=on cannot isolate: ...)`); with `share_workdir true` there is no lock at all. Disable globally with
   `ab config set auto_worktree false` (cards with `-l worktree=on` still opt in). Non-git workdirs, or cards with
   worktree disabled, wait as before (`ab ls --ready` shows `workdir busy` / `workdir busy (auto worktree off)` only
   when a card will actually wait).
 
 `ab config set share_workdir true` switches the lock off entirely.
+
+`ab ls --stuck` and `ab show` answer *who* is holding a workdir lock next to the `workdir_locked` reason:
+`held_by t_ab12cd34 pid 4242` for a runner child or a manual claim, `held_by runner` when the runner itself holds it.
 
 Verdict guard: `ab config set verdict_tokens GO,NO-GO` (comma list; `verdict_tokens.BOARD` overrides per board; unset = no check) makes `ab done` refuse a result whose first token (after whitespace and `# > ` * _` markup, case-insensitive, split on whitespace/`:`/`|`) is not listed; the card stays claimed. Escape hatch: `ab done --no-verdict-check`.
 

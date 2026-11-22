@@ -106,6 +106,8 @@ def tline(d):
         extra.append("parked: " + (f"pid {p['pid']}" if p.get("pid") else f"file {p.get('file')}"))
     if d.get("wait_reason"):
         extra.append(d["wait_reason"])
+    if (d.get("hold") or {}).get("holder"):
+        extra.append("held_by " + d["hold"]["holder"])
     if not d.get("runnable", True) and d["state"] == "ready":
         extra.append("runnable=0" + hold_txt(d).replace(" (", " (", 1) + "; " + clear_hint(d))
     if d.get("deps"):
@@ -127,6 +129,8 @@ def show_text(d):
              + (f", not before {fmt_ts(d['not_before'])}" if d.get("not_before") else "")]
     if d.get("hold"):
         lines.append(f"hold={d['hold']['reason']} since {fmt_ts(d['hold']['since'])}")
+        if d["hold"].get("holder"):
+            lines.append(f"held by {d['hold']['holder']}")
     if clear_hint(d):
         lines.append(clear_hint(d))
     if d.get("workdir"):
@@ -1802,7 +1806,7 @@ def build_parser():
     s = sub("ls", cmd_ls, "list tasks (default: open+claimed)", ["list"])
     s.add_argument("--status", "-s", help="open,claimed,done,dead,cancelled or all")
     s.add_argument("--ready", "-r", action="store_true", help="only claimable now")
-    s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts")
+    s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts, and names the holder (card id + pid, or runner) of a workdir lock")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=50, help="max rows (default 50; 0 = all)")

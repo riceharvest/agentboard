@@ -2,6 +2,7 @@
 import json
 
 from agentboard import runner, store
+from test_workdir_lock import rig, status, wait  # noqa: F401  (rig fixture)
 
 
 def _j(abx, *args):
@@ -63,3 +64,24 @@ def test_hold_event_volume_and_stuck_groups(abx):
     out = abx("ls", "--stuck")[1]
     assert "runnable_flag_zero:" in out and ": 3" in out
     assert "hold=runnable_flag_zero" in abx("show", ids[0])[1]
+
+
+def test_stuck_names_the_lock_holder(rig, abx, tmp_path):
+    """`ab ls --stuck` answers 'what am I waiting for': the holder's card id and pid, not just the path."""
+    j = rig
+    j("config", "set", "auto_worktree", "false")
+    wd = tmp_path / "shared"
+    holder = j("add", "long job", "--workdir", str(wd))["id"]
+    waiter = j("add", "waits", "--workdir", str(wd))["id"]
+    j.start(slots="1")
+    assert wait(lambda: status(j, holder) == "claimed")
+    assert wait(lambda: "hold=workdir_locked:" in abx("show", waiter, env=j.env)[1])
+    c = store.connect(abx.home / store.DB_PATH.name)
+    try:
+        pid = c.execute("SELECT run.pid FROM tasks t JOIN runs run ON run.id=t.run_id WHERE t.id=?", (holder,)).fetchone()[0]
+    finally:
+        c.close()
+    out = abx("ls", "--stuck", env=j.env)[1]
+    line = next(l for l in out.splitlines() if waiter in l)
+    assert f"held_by {holder} pid {pid}" in line, out
+    assert f"held by {holder} pid {pid}" in abx("show", waiter, env=j.env)[1]

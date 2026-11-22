@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A card that runs in its own worktree no longer shows a `workdir_locked` hold for the shared checkout: `worktree=on` (and the automatic worktree on a git checkout) is exempt at hold-report time, matching the runner's pick rule. When `worktree=on` cannot isolate (non-git workdir) the hold reason says so (`share_workdir true` needs no exemption: it has no lock). `ab ls --stuck` / `ab show` now name the holder next to `workdir_locked`: `held_by <card id> pid <pid>`, or `held_by runner` when the runner holds it. Runner change: `ab runner reload` needed.
+
 - op-request: queue a runner reload or an allowlisted config change from a non-admin card (`ab op-request add --kind reload|config --arg 'extra_args.claude=[...]' --why TEXT`, `ls [--stale --older 30m]`). The runner applies at most one per tick; `ab runner status` shows `requests: N pending`. Runner change: `ab runner reload` needed.
 
 - config: extra_args/extra_args_tier collisions merge or warn instead of last-one-wins. `--settings` objects deep-merge (tier wins per key) into one flag; any other flag in both keeps the base value, drops the tier copy and records a warning (`launch_warning` event in `ab log`, a `warnings` section in `ab config show`, and printed by `ab config set`). Runner change: `ab runner reload` needed.

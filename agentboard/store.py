@@ -1,5 +1,6 @@
 """SQLite store: boards, tasks, deps, messages, events, grants, runs, usage, limits, control, schedules."""
 import fnmatch
+import contextvars
 import copy
 import json
 import os
@@ -77,6 +78,10 @@ DEFAULTS = {
     "gating": "pace",           # "pace": pacer + pace guards; "quota": launch whenever every max_*_pct cap and provider limit allows (no pace lines, no per-interval budgets)
     "paused": False,
     "only_tiers": [],           # [] = off; else the runner launches only cards whose tier is listed (e.g. a no-CPU/GPU hour: ["cheap"]); others wait, nothing is killed
+    "proactive": "create",      # cards that agents inside a run create on their own, when recurring (cmd cards, type=watch): create | offer (made held, awaiting approval) | off (refused)
+    "repeat_notice_after": 5,   # a cmd card series (same board+title+cmd) with this many identical outputs in a row posts a "pause this?" notice, then again every N (0 = off)
+    "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
+    "compute_lock": False,      # true = LOCKED: the runner launches no card at all (any type, tier or lock label, cmd or agent); nothing running is killed
     "draining": False,
     "stop": "",                 # "", "graceful", "now"
     "poll_s": 5,
@@ -347,15 +352,41 @@ def cfg_all(conn):
     return out
 
 
-def cfg_set(conn, key, value, actor="?"):
+# Audit rule: nothing changes settings, pauses a board or creates a card without a named actor and a reason.
+ANON_ACTORS = {"", "?", "agent", "none", "unknown"}
+SYSTEM_WHY = {"runner": "runner internal", "sched:": "schedule fired", "op-request:": "approved op request (reason on the request)"}
+WHY = contextvars.ContextVar("ab_why", default=None)
+
+
+def is_anon(actor):
+    return (actor or "").strip().lower() in ANON_ACTORS
+
+
+def audit(actor, why=None):
+    """Return the recorded reason for a change, or raise: the actor must be named and a reason given (system actors get a fixed one)."""
+    a = (actor or "").strip()
+    if is_anon(a):
+        raise PermissionError("anonymous change refused: say who you are (--as NAME)")
+    why = (why or WHY.get() or os.environ.get("AB_WHY") or "").strip()
+    if not why:
+        for pre, w in SYSTEM_WHY.items():
+            if a == pre or a.startswith(pre):
+                return w
+        raise PermissionError("change refused: say why (--why TEXT)")
+    return why
+
+
+def cfg_set(conn, key, value, actor="?", why=None):
+    why = audit(actor, why)
     conn.execute("INSERT INTO control(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (key, json.dumps(value)))
-    event(conn, None, actor, "config", {"key": key, "value": value})
+    event(conn, None, actor, "config", {"key": key, "value": value, "why": why})
 
 
-def cfg_unset(conn, key, actor="?"):
+def cfg_unset(conn, key, actor="?", why=None):
+    why = audit(actor, why)
     conn.execute("DELETE FROM control WHERE key=?", (key,))
-    event(conn, None, actor, "config", {"key": key, "value": None, "reset": True})
+    event(conn, None, actor, "config", {"key": key, "value": None, "reset": True, "why": why})
 
 
 def coerce(value):
@@ -410,13 +441,14 @@ def board_create(conn, name, actor, description="", max_slots=None, default_tier
 
 def board_update(conn, name, actor, **fields):
     allowed = {"description", "paused", "max_slots", "default_tier", "default_workdir"}
+    why = audit(actor)
     with tx(conn):
         require_board(conn, name)
         for k, v in fields.items():
             if k not in allowed:
                 raise ValueError(f"cannot set {k}")
             conn.execute(f"UPDATE boards SET {k}=? WHERE name=?", (v, name))
-        event(conn, None, actor, "board_updated", {"name": name, **fields}, board=name)
+        event(conn, None, actor, "board_updated", {"name": name, **fields, "why": why}, board=name)
 
 
 def board_delete(conn, name, actor, force=False):
@@ -762,6 +794,13 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
     """_info (dict) gets existed=True when `key` already named a card (nothing is created; its id is returned).
     replace=True: an open/claimed card holding `key` is cancelled in favour of the new card, but only for its creator/owner,
     an actor with the same `owner` label, or one with `manage`; anyone else is refused and nothing changes."""
+    mode = cfg(conn, "proactive")
+    mode = "off" if mode in (False, "off", "false") else mode  # `ab config set proactive off` coerces to false
+    if mode in ("offer", "off") and os.environ.get("AB_RUN") and (cmd or str((labels or {}).get("type", "")) == "watch"):
+        if mode == "off":
+            raise PermissionError("proactive=off: agents may not create recurring cards on their own (ask the user, or set proactive=create)")
+        runnable, labels = False, {**(labels or {}), "proposed_by": actor}  # offered: held until a human approves it
+    card_why = audit(actor)  # a card needs a named creator and a reason: nobody starts work anonymously or without a why
     def go():
         b = require_board(conn, board)
         ch = channel or "main"
@@ -810,7 +849,7 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
             conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
                          (why, t, superseded))
             event(conn, superseded, actor, "cancelled", {"why": why})
-        event(conn, tid, actor, "created", {"title": title, "deps": list(deps), "tier": tr, "labels": lab,
+        event(conn, tid, actor, "created", {"title": title, "why": card_why, "deps": list(deps), "tier": tr, "labels": lab,
                                             **({"runnable": False} if not runnable else {}),
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
                                             **({"verify": verify} if verify else {}),
@@ -1326,6 +1365,8 @@ def effective_labels(conn, row):
 
 
 def claim(conn, actor, tid=None, channel=None, labels=None, lease_s=None, board=DEFAULT_BOARD, allow_same_family=None):
+    if cfg(conn, "compute_lock"):
+        return None, "compute_lock is on: no card may be claimed (ab config set compute_lock false --why TEXT)"
     lease_s = lease_s or parse_dur(cfg(conn, "lease"))
     reap(conn)
     with tx(conn):
@@ -1922,3 +1963,30 @@ def op_config_apply(conn, arg, actor):
         top = val
     cfg_set(conn, path[0], top, actor)
     return before, val
+
+
+def launch_audit(conn, task_id):
+    """Who/what/why record stamped on every `started` event: the card's creator, its board and tier, and the settings
+    (with who set them last, and why) that allowed the runner to launch it."""
+    t = conn.execute("SELECT id, board, title, tier, created_by, labels, cmd, created_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if t is None:
+        return {}
+    keys = ("paused", "only_tiers", "compute_lock", "slots", "stop", "draining")
+    last = {}
+    for r in conn.execute("SELECT actor, payload, ts FROM events WHERE kind='config' ORDER BY id DESC LIMIT 400"):
+        try:
+            pl = json.loads(r["payload"] or "{}")
+        except ValueError:
+            continue
+        k = pl.get("key")
+        if k in keys and k not in last:
+            last[k] = {"by": r["actor"], "why": pl.get("why"), "at": r["ts"]}
+    brow = conn.execute("SELECT paused FROM boards WHERE name=?", (t["board"],)).fetchone()
+    cr = conn.execute("SELECT payload FROM events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1", (task_id,)).fetchone()
+    try:
+        created_why = json.loads(cr["payload"] or "{}").get("why") if cr else None
+    except ValueError:
+        created_why = None
+    return {"card": t["id"], "created_why": created_why, "title": (t["title"] or "")[:120], "created_by": t["created_by"], "board": t["board"],
+            "board_paused": bool(brow["paused"]) if brow else None, "tier": t["tier"], "kind": "cmd" if t["cmd"] else "agent",
+            "config": {k: cfg(conn, k) for k in keys}, "last_change": last}

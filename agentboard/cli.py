@@ -1994,15 +1994,17 @@ def build_parser():
     p = argparse.ArgumentParser(prog="ab", description="agentboard: a task board for AI agents (no humans in the loop).")
     p.add_argument("--json", action="store_true", default=os.environ.get("AB_JSON") == "1", help="machine-readable output")
     p.add_argument("--as", dest="actor", help="who you are (default $AB_ACTOR)")
+    p.add_argument("--why", help="reason for this change (default $AB_WHY); settings, pauses and locks are refused without one")
     p.add_argument("--board", "-B", help="board name (default $AB_BOARD or main)")
     p.add_argument("--version", "-V", action="version", version=f"ab {_sanity.version_string()}")
     sp = p.add_subparsers(dest="cmd", required=True)
 
     def sub(name, fn, help_, aliases=()):
-        s = sp.add_parser(name, help=help_, aliases=list(aliases))
+        s = sp.add_parser(name, help=help_, aliases=list(aliases), conflict_handler="resolve")
         s.set_defaults(fn=fn)
         s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
         s.add_argument("--as", dest="actor", default=argparse.SUPPRESS)
+        s.add_argument("--why", default=argparse.SUPPRESS, help="reason for this change (required for settings, pauses, locks)")
         s.add_argument("--board", "-B", default=argparse.SUPPRESS)
         return s
 
@@ -2538,6 +2540,8 @@ def main(argv=None):
             setattr(a, k, None)
     if getattr(a, "who_flag", None):
         a.who = a.who_flag
+    if getattr(a, "why", None):
+        store.WHY.set(a.why)
     out = Out(getattr(a, "json", False))
     conn = (store.connect_ro() if getattr(a, "ro", False) else None) or store.connect()
     try:

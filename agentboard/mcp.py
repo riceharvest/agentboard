@@ -113,7 +113,12 @@ JS = {S: {"type": "string"}, I: {"type": "number"}, B: {"type": "boolean"},
       L: {"type": "array", "items": {"type": "string"}}, KV: {"type": "object", "additionalProperties": {"type": "string"}}}
 
 
-def schema(pos, flags, req):
+# Tools that change the board: `why` is a required argument for them (reads such as ls/status/get pass "read").
+MUTATING = {"ab_add", "ab_cancel", "ab_retry", "ab_kill", "ab_limits", "ab_caps", "ab_tiers", "ab_runner", "ab_sched",
+            "ab_config", "ab_boards", "ab_grants", "ab_endpoints"}
+
+
+def schema(pos, flags, req, tool=None):
     props = {}
     for name in pos:
         props[name] = {"type": "array", "items": {"type": "string"}} if name == "specs" else {"type": "string"}
@@ -121,7 +126,8 @@ def schema(pos, flags, req):
         props[name] = dict(JS[kind])
     props["as"] = {"type": "string", "description": "your actor name (default $AB_ACTOR)"}
     props["board"] = {"type": "string", "description": "board name (default $AB_BOARD or main)"}
-    return {"type": "object", "properties": props, "required": req}
+    props["why"] = {"type": "string", "description": "reason for this change; settings, pauses and locks are refused without it"}
+    return {"type": "object", "properties": props, "required": list(req) + (["why"] if tool in MUTATING else [])}
 
 
 def to_argv(tool, args):
@@ -131,6 +137,8 @@ def to_argv(tool, args):
         argv += ["--as", str(args["as"])]
     if args.get("board"):
         argv += ["--board", str(args["board"])]
+    if args.get("why"):
+        argv += ["--why", str(args["why"])]
     argv.append(sub)
     for name in pos:
         v = args.get(name)
@@ -158,6 +166,8 @@ def to_argv(tool, args):
 def call(tool, args):
     from . import cli
     buf, err = io.StringIO(), io.StringIO()
+    if tool in MUTATING and not str(args.get("why") or "").strip():
+        return "error: why is required for this tool (say why you are changing the board)", True
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
         try:
             rc = cli.main(to_argv(tool, args))
@@ -191,7 +201,7 @@ def serve():
         elif method == "ping":
             res = {}
         elif method == "tools/list":
-            res = {"tools": [{"name": n, "description": d, "inputSchema": schema(p, f, r)} for n, (d, _, p, f, r) in TOOLS.items()]}
+            res = {"tools": [{"name": n, "description": d, "inputSchema": schema(p, f, r, n)} for n, (d, _, p, f, r) in TOOLS.items()]}
         elif method == "tools/call":
             name = params.get("name")
             if name not in TOOLS:

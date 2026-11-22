@@ -61,6 +61,7 @@ machine.
     # a short `ab ls` can be a --limit cut (default 50; stderr says "showing N of M"), not an empty board
     ab ls --tier cheap --grep "docs" -l type=build --ids      # filter by tier / title text / label; --ids = bare ids for a loop
     ab config set only_tiers '["cheap"]'                      # runner launches only cards on these tiers (off: '[]'); nothing is killed
+    ab config set compute_lock true                           # LOCK: no card launches at all, any type or lock label (off: false); nothing running is killed
 
 The runner gives each agent a brief with the task, the results of its dependencies, the thread so far and
 the board commands. After you change agentboard itself, `ab runner reload` makes the runner re-exec with the new

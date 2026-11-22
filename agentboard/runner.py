@@ -1,5 +1,6 @@
 """The runner: the only thing that starts agents. Plain subprocesses, no admission layer.
 Every setting is read from the board each tick, so agents steer it with `ab runner ...` / `ab config set ...` / `ab sched ...`."""
+import hashlib
 import shlex
 import json
 import re
@@ -1042,9 +1043,17 @@ class Runner:
         note = None
         ready = store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True)
         only_tiers = cfg(c, "only_tiers") or []
+        if cfg(c, "compute_lock"):
+            # compute lock: while on, NO card of any type, tier or lock label launches (cmd or agent); nothing running is killed
+            for u in ready:
+                self.gates.setdefault(u["id"], "compute_lock: no card may run (ab config set compute_lock false)")
+            return "compute lock on: nothing launches"
         for i, t in enumerate(ready):
             if only_tiers and t["tier"] not in only_tiers:
                 continue  # config only_tiers: this card's tier is not on the allow list right now
+            if store.is_anon(t["created_by"]):
+                self.gates[t["id"]] = "audit: card has no named creator, refused (who/what/why unknown)"
+                continue
             if self.has_live_run(t["id"]):
                 continue  # a previous run of this card is still alive (e.g. parked while exiting): never race a second one
             if len(self.children) >= slots or (max_per_tick > 0 and launched >= max_per_tick):
@@ -1180,7 +1189,8 @@ class Runner:
             usage.pacer_on_spawn(c, bucket, now=t_start)
             event(c, task["id"], "runner", "started", {"run": run_id, "harness": cand.harness, "model": cand.model,
                                                        "effort": cand.effort, "bucket": bucket, "candidate": cand.label(),
-                                                       **({"provider": cand.provider} if cand.provider else {})})
+                                                       **({"provider": cand.provider} if cand.provider else {}),
+                                                       "audit": store.launch_audit(c, task["id"])})
         orig_workdir = workdir
         if wtinfo:
             workdir = wtinfo[0]
@@ -1295,7 +1305,7 @@ class Runner:
             owner = f"cmd#{run_id}"
             c.execute("UPDATE tasks SET status='claimed', owner=?, lease_until=?, run_id=?, updated_at=? WHERE id=?",
                       (owner, t_start + RUNNER_LEASE, run_id, t_start, task["id"]))
-            event(c, task["id"], "runner", "started", {"run": run_id, "harness": "cmd", "cmd": cur["cmd"]})
+            event(c, task["id"], "runner", "started", {"run": run_id, "harness": "cmd", "cmd": cur["cmd"], "audit": store.launch_audit(c, task["id"])})
         runs_dir = store.HOME / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
@@ -1405,8 +1415,41 @@ class Runner:
                 store._fail_attempt(c, t, "runner", (why + "\n" + tail)[-1500:], "failed")
             c.execute("UPDATE runs SET ended_at=?, exit_code=?, outcome=?, detail=? WHERE id=?",
                       (now(), rc, outcome, (detail or last)[:2000], ch.run_id))
-            event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc})
+            sha = hashlib.sha1(re.sub(r"\d+", "#", raw).encode()).hexdigest()[:16]  # digits ignored: counters/timestamps don't make output "new"
+            event(c, ch.task_id, "runner", "run_end", {"run": ch.run_id, "outcome": outcome, "rc": rc, "out_sha": sha})
+            self._series_audit(c, t, outcome, rc, last)
         self.log(f"run {ch.run_id} ({ch.task_id}, cmd) -> {outcome}" + (f": {detail[:160]}" if detail else ""))
+
+    def _series_audit(self, c, t, outcome, rc, last):
+        """A cmd card series (board+title+cmd): repeated identical output -> one 'pause this?' notice; a failing check -> a throttled
+        check_failed event (a failed check must never look like 'unchanged')."""
+        if t is None or not t["cmd"]:
+            return
+        rows = c.execute("SELECT e.payload, e.ts, e.kind FROM events e JOIN tasks k ON k.id=e.task_id WHERE e.kind IN ('run_end','check_failed') "
+                         "AND k.board=? AND k.title=? AND k.cmd=? ORDER BY e.id DESC LIMIT 80", (t["board"], t["title"], t["cmd"])).fetchall()
+        n = int(cfg(c, "repeat_notice_after") or 0)
+        if outcome == "done" and n > 0:
+            shas = []
+            for r in rows:
+                if r["kind"] == "run_end":
+                    pl = json.loads(r["payload"] or "{}")
+                    if pl.get("outcome") != "done" or not pl.get("out_sha"):
+                        break
+                    shas.append(pl["out_sha"])
+            count = 0
+            for x in shas:
+                if x != shas[0]:
+                    break
+                count += 1
+            if count >= n and count % n == 0:
+                event(c, t["id"], "runner", "repeat_output", {"count": count, "series": t["title"]})
+                store.post_message(c, "runner", f"Same output {count} runs in a row for '{t['title']}': pause or slow this check? (nothing was changed)",
+                                   thread=t["id"], check=False, _in_tx=True)
+        elif outcome in ("failed", "timeout", "idle"):
+            every = parse_dur(cfg(c, "check_fail_every")) or 0
+            recent = [r for r in rows if r["kind"] == "check_failed" and now() - r["ts"] < every]
+            if not recent:
+                event(c, t["id"], "runner", "check_failed", {"series": t["title"], "outcome": outcome, "rc": rc, "last": (last or "")[:200]})
 
     # -- watching
     def _stop_hermes_session(self, ch):

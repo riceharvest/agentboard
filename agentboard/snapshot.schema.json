@@ -73,6 +73,8 @@
         "title": {"type": "string"},
         "channel": {"type": "string"},
         "status": {"enum": ["open", "claimed", "done", "dead", "cancelled"]},
+        "in_flight": {"type": "boolean", "description": "open/claimed, not parked, not_before past or empty, every dep done"},
+        "in_flight_reason": {"enum": ["parked", "not_before", "dep_open", null], "description": "why an open card is not in flight; null when it is, or when closed"},
         "state": {"enum": ["ready", "waiting", "stuck", "claimed", "done", "dead", "cancelled"],
                   "description": "open tasks are ready (claimable now), waiting (deps, not_before or an active park) or stuck (a dep is dead/cancelled)"},
         "runnable": {"type": "boolean", "description": "false = manual card: the runner never starts it"},

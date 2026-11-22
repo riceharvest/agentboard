@@ -606,6 +606,22 @@ def park_cond(park):
     return "a wake condition"
 
 
+def in_flight_reason(status, park, not_before, deps_open, t=None):
+    """(in_flight, reason): a card is in flight when open/claimed, not parked, not_before past/empty and every dep done.
+    reason is parked|not_before|dep_open for an excluded open card, else None (also None for closed cards)."""
+    if status == "claimed":
+        return True, None
+    if status != "open":
+        return False, None
+    if park_active(park):
+        return False, "parked"
+    if not_before and not_before > (now() if t is None else t):
+        return False, "not_before"
+    if deps_open:
+        return False, "dep_open"
+    return True, None
+
+
 def derived_state(conn, d):
     """open tasks are 'ready', 'running' (parked on a live background job), 'waiting' (deps/not_before/park) or 'stuck' (a dep is dead/cancelled)."""
     if d["status"] != "open":

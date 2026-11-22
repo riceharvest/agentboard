@@ -395,6 +395,42 @@ def cmd_ls(c, a, out):
     bsel = None if a.all_boards else board_of(a)
     unlimited = a.limit <= 0  # --limit 0 means all rows, like other CLIs
     lim = 10**9 if unlimited else a.limit
+    if a.in_flight:
+        if bsel:
+            where.append("board=?")
+            args.append(bsel)
+        where.append("status IN ('open','claimed')")
+        if a.channel:
+            where.append("(channel=? OR channel LIKE ?)")
+            args += [a.channel, a.channel.rstrip("/") + "/%"]
+        for k, v in kv_list(a.label).items():
+            where.append("json_extract(labels, ?)=?")
+            args += [f"$.{json.dumps(k)}", v]
+        if a.tier:
+            tl = a.tier.split(",")
+            where.append("tier IN (%s)" % ",".join("?" * len(tl)))
+            args += tl
+        cand = [store.task_dict(c, r) for r in visible(c, a, c.execute("SELECT * FROM tasks WHERE " + " AND ".join(where) +
+                " ORDER BY CASE status WHEN 'claimed' THEN 0 ELSE 1 END, priority DESC, updated_at DESC", args).fetchall())]
+        t_now, fl, excl = now(), [], {"parked": 0, "not_before": 0, "dep_open": 0}
+        for d in cand:
+            dep_open = [x for x in d["deps"] if (c.execute("SELECT status FROM tasks WHERE id=?", (x,)).fetchone() or {"status": None})["status"] != "done"] \
+                if d["deps"] else []
+            ok, why = store.in_flight_reason(d["status"], d["park"], d["not_before"], dep_open, t_now)
+            if ok:
+                fl.append(d)
+            else:
+                excl[why] += 1
+        total = len(fl)
+        rows = None
+        items = fl[:lim]
+        summary = f"in-flight: {len(fl)} (parked {excl['parked']}, deferred {excl['not_before']}, dep-waiting {excl['dep_open']})"
+        def fl_text(xs):
+            return "\n".join([*(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs), summary])
+        out(items, fl_text)
+        if total > len(items):
+            print(f"ab ls: showing {len(items)} of {total}; use --limit to see more", file=sys.stderr)
+        return
     if a.stuck:
         rows = [r for r in store.ready_tasks(c, a.channel, kv_list(a.label), limit=100000, board=bsel)
                 if (not r["runnable"] and json.loads(r["labels"] or "{}").get("hold") not in ("manual", "needs_admin"))
@@ -1840,6 +1876,8 @@ def build_parser():
     s.add_argument("--status", "-s", help="open,claimed,done,dead,cancelled or all")
     s.add_argument("--ready", "-r", action="store_true", help="only claimable now")
     s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts, and names the holder (card id + pid, or runner) of a workdir lock")
+    s.add_argument("--in-flight", action="store_true", help="cards really in flight: open/claimed, not parked, not_before past, all deps done; ends with a counts line for the exclusions")
+    s.add_argument("--tier", help="with --in-flight: comma list of tiers to count")
     s.add_argument("--channel", "-c")
     s.add_argument("--label", "-l", action="append")
     s.add_argument("--limit", "-n", type=int, default=50, help="max rows (default 50; 0 = all)")

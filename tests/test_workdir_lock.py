@@ -242,7 +242,7 @@ def test_worker_env_hygiene_across_ab_home(tmp_path):
     }
 
     def run_ab(home_val, *args, keep_identity=True):
-        drop = {"AB_HOME"} | (set() if keep_identity else {"AB_ACTOR", "AB_TASK"})
+        drop = {"AB_HOME"} | (set() if keep_identity else {"AB_ACTOR", "AB_TASK", "AB_BOARD"})
         env = clean_env(home_val, **{k: v for k, v in worker_env.items() if k not in drop})
         return subprocess.run([sys.executable, "-m", "agentboard", *args], cwd=ROOT, capture_output=True, text=True, env=env)
 

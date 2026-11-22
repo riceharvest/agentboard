@@ -533,6 +533,13 @@ def cmd_ls(c, a, out):
         for k, v in kv_list(a.label).items():
             where.append("json_extract(labels, ?)=?")
             args += [f"$.{json.dumps(k)}", v]
+        if a.tier:
+            tl = a.tier.split(",")
+            where.append("tier IN (%s)" % ",".join("?" * len(tl)))
+            args += tl
+        if a.grep:
+            where.append("title LIKE ? ESCAPE '\\'")
+            args.append("%" + a.grep.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
         if where:
             sql += " WHERE " + " AND ".join(where)
         total = c.execute("SELECT COUNT(*) FROM tasks" + sql[len("SELECT * FROM tasks"):], args).fetchone()[0]
@@ -554,6 +561,8 @@ def cmd_ls(c, a, out):
         bflag = getattr(a, "board", None) or os.environ.get("AB_BOARD")
         ready_footer = f"ready: {bk['ready']} ({parts}" + (f"; board filter: {bflag}" if bflag else "") + ")"
     def ls_text(xs):
+        if a.ids:
+            return "\n".join(x["id"] for x in xs)
         text = "\n".join(tline(x) + (f"  <{x['board']}>" if a.all_boards else "") for x in xs) or "(nothing)"
         if ready_footer:
             text += "\n" + ready_footer
@@ -2028,7 +2037,9 @@ def build_parser():
     s.add_argument("--ready", "-r", action="store_true", help="only claimable now")
     s.add_argument("--stuck", action="store_true", help="ready (deps done) but runnable=0 with no deliberate hold (not manual/needs_admin), or with a recorded runner hold; groups by reason with counts, and names the holder (card id + pid, or runner) of a workdir lock")
     s.add_argument("--in-flight", action="store_true", help="cards really in flight: open/claimed, not parked, not_before past, all deps done; ends with a counts line for the exclusions")
-    s.add_argument("--tier", help="with --in-flight: comma list of tiers to count")
+    s.add_argument("--tier", help="comma list of tiers: with --in-flight the ones to count, otherwise a filter on the listing")
+    s.add_argument("--grep", help="plain listing: only cards whose title contains this text (case-insensitive); filter by card type with -l type=build")
+    s.add_argument("--ids", action="store_true", help="print only the card ids, one per line, so a loop can follow: ab ls --tier low --ids | xargs -I{} ab edit {} --tier medium")
     s.add_argument("--exclude-label", action="append", help="with --ready: k=v labels to leave out; the hidden count is printed as an 'excluded-label' bucket")
     s.add_argument("--exclude-type", help="with --in-flight or --ready: comma list of card types (labels['type'], e.g. watch) to leave out of the count and report in an 'excluded-type' bucket. A watch card is a stocker: it polls the board and creates work, so it is not work in flight; counting it inflates the number a watcher compares against its own stop rule")
     s.add_argument("--channel", "-c")

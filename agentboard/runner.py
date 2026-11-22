@@ -1041,7 +1041,10 @@ class Runner:
         launched = 0
         note = None
         ready = store.ready_tasks(c, channel=chans, runnable_only=True, skip_paused=True)
+        only_tiers = cfg(c, "only_tiers") or []
         for i, t in enumerate(ready):
+            if only_tiers and t["tier"] not in only_tiers:
+                continue  # config only_tiers: this card's tier is not on the allow list right now
             if self.has_live_run(t["id"]):
                 continue  # a previous run of this card is still alive (e.g. parked while exiting): never race a second one
             if len(self.children) >= slots or (max_per_tick > 0 and launched >= max_per_tick):

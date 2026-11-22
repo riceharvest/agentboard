@@ -76,6 +76,7 @@ DEFAULTS = {
     "pace_interval": "10m",     # interval for per-bucket launch budgets (pace / AIMD)
     "gating": "pace",           # "pace": pacer + pace guards; "quota": launch whenever every max_*_pct cap and provider limit allows (no pace lines, no per-interval budgets)
     "paused": False,
+    "only_tiers": [],           # [] = off; else the runner launches only cards whose tier is listed (e.g. a no-CPU/GPU hour: ["cheap"]); others wait, nothing is killed
     "draining": False,
     "stop": "",                 # "", "graceful", "now"
     "poll_s": 5,

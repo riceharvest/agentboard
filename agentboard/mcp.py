@@ -18,7 +18,7 @@ TOOLS = {
                            "plan": ("--plan", S)}, []),
     "ab_list": ("List tasks. Default open+claimed; ready=true for claimable now.", "ls", [],
                 {"status": ("--status", S), "ready": ("--ready", B), "channel": ("--channel", S), "labels": ("--label", KV),
-                 "limit": ("--limit", I), "all_boards": ("--all-boards", B)}, []),
+                 "limit": ("--limit", I), "all_boards": ("--all-boards", B), "tier": ("--tier", S), "grep": ("--grep", S)}, []),
     "ab_show": ("Full task: body, notes, runs, result.", "show", ["id"], {}, ["id"]),
     "ab_claim": ("Claim the next ready task (or id). Returns task:null when nothing is ready.", "claim", ["id"],
                  {"channel": ("--channel", S), "labels": ("--label", KV), "lease": ("--lease", S), "wait": ("--wait", S)}, []),

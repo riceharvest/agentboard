@@ -394,6 +394,9 @@ def cmd_add(c, a, out):
     if not a.title:
         raise ValueError("a title is required (or --plan FILE)")
     labels = kv_list(a.label)
+    for flag in ("cpu", "gpu"):
+        if getattr(a, flag, False):
+            labels[flag] = "1"
     if a.reply_to:
         store.resolve_thread(c, a.reply_to)
         labels["reply_to"] = a.reply_to
@@ -994,6 +997,9 @@ def cmd_edit(c, a, out):
         if "=" not in it:
             raise ValueError(f"expected key=value or key=, got {it!r}")
         labels.update(split_labels(it))
+    for flag in ("cpu", "gpu"):
+        if getattr(a, flag, False):
+            labels[flag] = "1"
     check_harness_pin(f.get("harness"))
 
     def tid_of(x):
@@ -2041,6 +2047,8 @@ def build_parser():
     s.add_argument("--body-file")
     s.add_argument("--channel", "-c", default="main")
     s.add_argument("--label", "-l", action="append", help="key=value (repeatable)")
+    s.add_argument("--cpu", action="store_true", help="declare this card needs CPU only (label cpu=1)")
+    s.add_argument("--gpu", action="store_true", help="declare this card needs the GPU (label gpu=1); waits while resources_down lists gpu")
     s.add_argument("--priority", "-p", type=int, default=0)
     s.add_argument("--dep", "-d", action="append", help="task id that must be done first (repeatable)")
     s.add_argument("--after", help="not before: +2h | 14:30 | 2026-11-20 03:00")
@@ -2189,6 +2197,8 @@ def build_parser():
     s.add_argument("--max-attempts", type=int)
     s.add_argument("--verify", help="done gate command (see `ab add --verify`); empty string removes it")
     s.add_argument("--label", "-l", action="append", help="key=value, or key= to remove")
+    s.add_argument("--cpu", action="store_true", help="declare this card needs CPU only (label cpu=1)")
+    s.add_argument("--gpu", action="store_true", help="declare this card needs the GPU (label gpu=1); waits while resources_down lists gpu")
     s.add_argument("--dep", action="append", help="add a dependency; refused when it would close a cycle (prints the path)")
     s.add_argument("--allow-dep-cycle", metavar="WHY", help="force a --dep that closes a cycle (near-unused; recorded as an event)")
     s.add_argument("--rm-dep", action="append")

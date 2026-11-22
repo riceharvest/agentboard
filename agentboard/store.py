@@ -83,6 +83,7 @@ DEFAULTS = {
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
     "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
+    "require_compute_class": False,  # true = a card whose labels declare neither cpu nor gpu does not launch (it waits with a compute: gate reason)
     "limit_probe_window": "6h", # after a bucket hit a limit with no success since, only ONE run at a time may start on it until one succeeds (0 = off)
     "card_max_runs": 20,        # a plain card (not recurring, not a watch/cmd) is held for review after this many runs since its last review (0 = off; label budget_runs=N overrides)
     "card_max_cost": 0,         # same, in USD of run cost (0 = off; label budget_cost=N overrides)
@@ -2063,7 +2064,21 @@ def card_needs(labels):
     names = [x.strip().lower() for x in str(labels.get("needs", "")).split(",") if x.strip()]
     if str(labels.get("gpu", "")).strip().lower() not in ("", "0", "off", "no", "false", "none") and "gpu" not in names:
         names.append("gpu")
+    if str(labels.get("cpu", "")).strip().lower() not in ("", "0", "off", "no", "false", "none") and "cpu" not in names:
+        names.append("cpu")
     return names
+
+
+def compute_class(labels):
+    """'gpu' | 'cpu' | None: which compute a card declares it needs (`gpu=1`, `cpu=1` or needs=gpu/cpu)."""
+    return next((n for n in card_needs(labels) if n in ("gpu", "cpu")), None)
+
+
+def compute_block(conn, labels):
+    """With cfg require_compute_class on, an undeclared card waits instead of launching on a guess."""
+    if not cfg(conn, "require_compute_class") or compute_class(labels):
+        return None
+    return "compute: card must declare its compute (label cpu=1 or gpu=1; needs=cpu/gpu also works)"
 
 
 def resource_holders(conn, exclude=None):
@@ -2087,6 +2102,8 @@ def resource_block(conn, labels, exclude=None):
     for n in names:
         if n in down:
             return f"resource:{n} is down (resources_down)"
+        if n == "cpu":
+            continue  # declared for accounting only: the machine is shared, cpu is never a single slot
         cap = int(caps.get(n, 1))
         used = len(held.get(n, []))
         if used >= cap:

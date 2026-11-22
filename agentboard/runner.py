@@ -1059,6 +1059,10 @@ class Runner:
         for i, t in enumerate(ready):
             if only_tiers and t["tier"] not in only_tiers:
                 continue  # config only_tiers: this card's tier is not on the allow list right now
+            cb = store.compute_block(c, t["labels"])
+            if cb:
+                self.gates[t["id"]] = cb  # require_compute_class: an undeclared card waits, never guesses
+                continue
             rb = store.resource_block(c, t["labels"])
             if rb:
                 self.gates[t["id"]] = rb  # the card waits for a named resource (needs=..., gpu=1), nothing is killed

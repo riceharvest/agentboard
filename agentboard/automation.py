@@ -149,7 +149,7 @@ def followup(conn, actor, thread, prompt, at=None, tier=None, harness=None, mode
     if kind == "task":
         workdir = store.get_task(conn, tid)["workdir"]
     title = "follow-up: " + (prompt.strip().splitlines()[0][:80] if prompt.strip() else tid)
-    return store.add_task(conn, actor, title, prompt, channel=channel, board=board, labels={"reply_to": tid, "followup": "1"},
+    return store.add_task(conn, actor, title, prompt, channel=channel, board=board, labels={"reply_to": tid, "followup": "1", "cpu": "1"},  # a follow-up reads state and reports: CPU work by construction
                           not_before=at, workdir=workdir, tier=tier, harness=harness, model=model, priority=priority)
 
 
@@ -219,6 +219,7 @@ def run_watchers(conn):
                 if labels.get("reply_to"):
                     body += ("\n\nYour final `ab done` result is posted back into thread " + labels["reply_to"]
                              + " automatically. Use `ab reply " + labels["reply_to"] + " \"...\"` for anything you need to say before that.")
+                labels.setdefault("cpu", "1")  # a watch wake reacts to board events: CPU work unless it says otherwise
                 tid = store.add_task(conn, me, f"[watch:{w['name']}] {hits[0]['kind']}" + (f" in {hits[0].get('channel')}" if hits[0].get("channel") else ""),
                                      body, channel=action.get("channel") or hits[0].get("channel") or "main", board=w["board"],
                                      labels=labels, tier=action.get("tier"), harness=action.get("harness"), model=action.get("model"),
@@ -267,6 +268,7 @@ def sync_github(conn, s):
                                      f"GitHub {kind}: {it['url']}\nopened by {((it.get('author') or {}).get('login'))}\n\n{(it.get('body') or '').strip()}",
                                      channel=channel, board=s["board"], tier=spec.get("tier"), workdir=spec.get("workdir"),
                                      labels={"gh": f"{repo}#{it['number']}", "gh_kind": kind, "gh_url": it["url"],
+                                             "gpu" if spec.get("gpu") else "cpu": "1",
                                              **({"untrusted": "1"} if spec.get("untrusted") else {})},
                                      runnable=not spec.get("manual", False))
                 m = items[key] = {"task": tid, "updated": None, "comments": 0, "pushed": [], "done_pushed": False}

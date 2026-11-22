@@ -64,6 +64,8 @@ machine.
     ab config set compute_lock true                           # LOCK: no card launches at all, any type or lock label (off: false); nothing running is killed
     ab add "..." --label needs=gpu3060,b70 --why TEXT         # named resources: the card waits while any is full or listed in resources_down; `ab resources` shows holders
     ab config set resources_down '["gpu3060"]' --why TEXT     # mark a resource broken: nothing needing it launches
+    ab add "..." --cpu | --gpu --why TEXT                     # declare the compute a card needs (labels cpu=1 / gpu=1)
+    ab config set require_compute_class true --why TEXT       # every card must declare; an undeclared one waits with a compute: gate
     ab add "..." --cmd CMD --label every=30m --label max_runs=48   # recurring card: reopens itself (same id) after each done; also ends=<ISO|epoch>
     ab park --resource NAME --note "..."                      # wake when a named resource is free (park notes need >= 4 words)
     ab config set card_max_runs 20                            # plain cards are held (hold=budget) after N runs/card_max_cost USD since the last review; release: ab edit ID --auto --why TEXT

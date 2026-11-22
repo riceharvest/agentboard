@@ -10,6 +10,7 @@ S, I, B, L, KV = "string", "integer", "boolean", "list", "kv"
 TOOLS = {
     "ab_add": ("Create a task for agents. tier picks the intelligence (see ab_tiers); deps must finish first. cmd=SHELL COMMAND makes a command card: the runner runs it itself, no model. key=K is an idempotency key (a card with K already on the board -> its id, nothing created). plan=JSON array of cards {key,title,body,labels,deps:[{key}|{id}],tier,workdir,after,priority,manual,cmd} creates the whole chain in one transaction (title not needed); with key a rerun is a no-op returning the key->id map.", "add",
                ["title"], {"body": ("--body", S), "channel": ("--channel", S), "labels": ("--label", KV), "priority": ("--priority", I),
+                           "cpu": ("--cpu", B), "gpu": ("--gpu", B),
                            "deps": ("--dep", L), "after": ("--after", S), "workdir": ("--workdir", S), "tier": ("--tier", S),
                            "harness": ("--harness", S), "model": ("--model", S), "manual": ("--manual", B),
                            "cmd": ("--cmd", S), "result": ("--result", S),
@@ -41,6 +42,7 @@ TOOLS = {
                  "tier": ("--tier", S), "harness": ("--harness", S), "model": ("--model", S), "workdir": ("--workdir", S),
                  "after": ("--after", S), "timeout": ("--timeout", S), "max_attempts": ("--max-attempts", I),
                  "labels": ("--label", KV), "add_deps": ("--dep", L), "rm_deps": ("--rm-dep", L),
+                 "cpu": ("--cpu", B), "gpu": ("--gpu", B),
                  "manual": ("--manual", B), "auto": ("--auto", B), "move_to": ("--move-to", S)}, ["id"]),
     "ab_kill": ("Stop one run (the task goes back to the queue, no attempt counted). ab_cancel stops the work for good.", "kill",
                 ["run"], {}, ["run"]),

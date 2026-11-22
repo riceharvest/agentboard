@@ -242,6 +242,29 @@ def loop_backoff(conn, t, run_id, started=None):
     return True
 
 
+def exit_signal(rc):
+    """Signal number behind an exit status: negative (Popen/waitpid: killed by n) or 128+n (a shell relaying it), else None."""
+    if rc is None:
+        return None
+    if rc < 0:
+        return -rc
+    if 128 < rc <= 128 + 64:
+        return rc - 128
+    return None
+
+
+def requeue_signalled(c, ch, t, sig, post=None):
+    """A run killed by a signal that nobody on this runner sent, before it wrote anything: not the card's fault. Open it
+    again without counting an attempt, after the usual backoff. Returns the run detail."""
+    detail = f"killed by signal {sig} before any output"
+    nb = now() + (parse_dur(cfg(c, "backoff")) or 0)
+    c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, not_before=?, updated_at=? WHERE id=?", (nb, now(), ch.task_id))
+    event(c, ch.task_id, "runner", "released", {"run": ch.run_id, "why": detail, "retry_at": nb})
+    msg = f"Run {ch.run_id} was {detail}; requeued without using an attempt, retry after {store.fmt_ts(nb)}."
+    store.post_message(c, "runner", msg, thread=ch.task_id, check=False, _in_tx=True)
+    return detail
+
+
 def dur_or_off(v):
     """A stall threshold: seconds, or None for 0 / off / false / empty (watchdog disabled)."""
     if v in (None, False, "", 0, "0") or str(v).strip().lower() in ("off", "no", "none"):
@@ -1352,6 +1375,9 @@ class Runner:
                     store._fail_attempt(c, t, "runner", detail[:1500], outcome)
             elif not mine:
                 outcome = f"agent_{t['status']}" if t else "task_gone"  # the command settled the card itself (ab done/release/...)
+            elif exit_signal(rc) and not raw.strip():
+                outcome = "interrupted"
+                detail = requeue_signalled(c, ch, t, exit_signal(rc))
             elif rc == 0:
                 outcome = "done"
                 result = (fixed or last or "finished, no output")[:8000]
@@ -1717,6 +1743,9 @@ class Runner:
                                            thread=ch.task_id, check=False, _in_tx=True)
                         c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, park=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
                         event(c, ch.task_id, "runner", "verify_failed", {"run": ch.run_id, "round": rounds, "of": limit})
+                elif mine and not res.ok and exit_signal(rc) and not (out or "").strip() and not (err or "").strip():
+                    outcome = "interrupted"
+                    res.error = requeue_signalled(c, ch, t, exit_signal(rc))
                 elif mine and not res.ok and ch.harness == "hermes" and GATEWAY_LOST_RE.search(err or ""):
                     # The gateway died mid-turn: the client cannot tell whether the turn finished, and says not to resend
                     # the work. That is infrastructure, not the card's fault: no attempt, requeue (the next run sees the

@@ -666,6 +666,30 @@ def _build_tag():
     return f"install {i['install_path']}, code version {i['code_version']}" + (f", checkout HEAD {i['checkout_head']}" if i["checkout_head"] else "")
 
 
+_CARD_ID_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
+_FENCE_RE = re.compile(r"(```|~~~).*?(\1|\Z)", re.S)
+_PLACEHOLDER_RE = re.compile(r"t_(?:(.)\1{7}|dead" + "beef)")  # one char repeated eight times, or the classic hex word
+
+
+def cited_card_ids(text):
+    """Card ids a result cites, minus fenced code blocks and lines mentioning AB_TASK (examples)."""
+    text = _FENCE_RE.sub(" ", text or "")
+    text = "\n".join(ln for ln in text.splitlines() if "AB_TASK" not in ln)
+    return sorted(set(_CARD_ID_RE.findall(text)))
+
+
+def unknown_card_refs(c, text):
+    """(unknown, exempt): cited ids found on no board (one task table covers every board), and placeholder ids skipped."""
+    ids = cited_card_ids(text)
+    exempt = [i for i in ids if _PLACEHOLDER_RE.fullmatch(i)]
+    ids = [i for i in ids if i not in exempt]
+    known = set()
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        known.update(r[0] for r in c.execute(f"SELECT id FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+    return [i for i in ids if i not in known], exempt
+
+
 def cmd_done(c, a, out):
     text = text_arg(a.result, a.summary_file)
     tid0 = a.id or os.environ.get("AB_TASK", "")
@@ -694,6 +718,15 @@ def cmd_done(c, a, out):
                              f"this install may predate it: see `ab version`)")
         if skipped:
             note = f" (ignored {len(skipped)} dirty path(s) this task did not change: {', '.join(ln[3:] for ln in skipped[:3])}{', ...' if len(skipped) > 3 else ''})"
+    unknown, exempt = unknown_card_refs(c, text)
+    if exempt:
+        print(f"ab done: placeholder card id(s) not checked: {', '.join(exempt)}", file=sys.stderr)
+    if unknown:
+        msg = f"the result cites card id(s) that exist on no board: {', '.join(unknown)}"
+        if a.strict_refs:
+            print(f"ab done: refused: {tid0}: {msg}. Fix the ids and retry (or drop --strict-refs). The card stays claimed.", file=sys.stderr)
+            sys.exit(2)
+        print(f"ab done: warning: {msg}", file=sys.stderr)
     tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
     out({"id": tid, "status": "done"}, f"{tid} done{note}")
 
@@ -1850,6 +1883,9 @@ def build_parser():
     s.add_argument("--force", action="store_true")
     s.add_argument("--allow-dirty", action="store_true", help="close even if the worktree has untracked or modified files")
     s.add_argument("--no-verdict-check", action="store_true", help="skip the board's verdict_tokens check (records a note)")
+    s.add_argument("--strict-refs", action="store_true", help="refuse (rc 2, card stays claimed) when the result cites t_xxxxxxxx ids found on no board; "
+                   "without it only a warning on stderr. Checked across all boards. Ignored: ids inside ``` or ~~~ fenced blocks, lines containing AB_TASK, "
+                   "and placeholder ids (one character repeated eight times, or the hex word dead+beef; printed as not checked)")
 
     s = sub("fail", cmd_fail, "give up this attempt (task retries until max attempts, then dead)")
     s.add_argument("id", nargs="?", default="", help="task id (default: inferred from your run home, or $AB_TASK)")

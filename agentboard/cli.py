@@ -956,11 +956,42 @@ def cmd_snapshot(c, a, out):
         gc.enable()
 
 
+def effective_identity(c, a):
+    """What a write command would adopt: flag > environment > run-home inference > default. Read-only (exports nothing).
+    Returns (ident, ctx, reason); ident has actor/board/task/run and actor_source/board_source."""
+    flag_board = getattr(a, "board", None)
+    env_board = os.environ.get("AB_BOARD")
+    ctx, reason = infer_run(c, board=flag_board or env_board or None)
+    if ctx is not None and os.environ.get("AB_TASK") and os.environ["AB_TASK"] != ctx["task"]:
+        ctx = None   # adopt_run_identity refuses a run that is not this shell's task
+    if os.environ.get("AB_RUN") and os.environ.get("AB_ACTOR"):
+        actor, asrc = os.environ["AB_ACTOR"], "env"
+    elif a.actor:
+        actor, asrc = a.actor, "flag"
+    elif os.environ.get("AB_ACTOR"):
+        actor, asrc = os.environ["AB_ACTOR"], "env"
+    elif ctx:
+        actor, asrc = ctx["actor"], "run home"
+    else:
+        actor, asrc = "agent", "default"
+    if flag_board:
+        board, bsrc = flag_board, "flag"
+    elif env_board:
+        board, bsrc = env_board, "env"
+    elif ctx:
+        board, bsrc = ctx["board"], "run home"
+    else:
+        board, bsrc = store.DEFAULT_BOARD, "default"
+    task = os.environ.get("AB_TASK") or (ctx["task"] if ctx else None)
+    run = os.environ.get("AB_RUN") or (ctx["run"] if ctx else None)
+    return {"actor": actor, "board": board, "task": task, "run": run, "actor_source": asrc, "board_source": bsrc}, ctx, reason
+
+
 def cmd_whoami(c, a, out):
-    me = actor_of(a)
-    d = {"actor": me, "board": board_of(a), "task": os.environ.get("AB_TASK"), "run": os.environ.get("AB_RUN"),
-         "db": str(store.DB_PATH), "admin": store.can(c, me, "admin", board_of(a))}
-    ctx, reason = infer_run(c)
+    ident, ctx, reason = effective_identity(c, a)
+    d = {"actor": ident["actor"], "board": ident["board"], "task": ident["task"], "run": ident["run"],
+         "actor_source": ident["actor_source"], "board_source": ident["board_source"],
+         "db": str(store.DB_PATH), "admin": store.can(c, ident["actor"], "admin", ident["board"])}
     d["inferred_run"] = ctx["run"] if ctx else None
     d["inferred_reason"] = reason
     out(d, lambda d: " ".join(f"{k}={v}" for k, v in d.items()))

@@ -272,7 +272,7 @@ def test_wake_conditions_pid_starttime_and_file_growth(abx, tmp_path):
     tid = json.loads(abx("--json", "add", "x")[1])["id"]
     abx("--json", "claim", tid)
     f = tmp_path / "out.log"
-    abx("--json", "park", tid, "--file", str(f), "--grace", "1s", "--note", "wait for out.log")
+    abx("--json", "park", tid, "--file", str(f), "--grace", "1s", "--note", "wait for the out.log file to stop growing")
     c = _conn(abx)
     try:
         assert runner.wake_parked(c) == []  # absent
@@ -288,13 +288,13 @@ def test_wake_conditions_pid_starttime_and_file_growth(abx, tmp_path):
         assert runner.wake_parked(c) == []  # already woken
         # the brief carries the note and the wake reason
         brief = runner.build_brief(c, store.must_task(c, tid), str(tmp_path), 1, "claude#9")
-        assert "RESUMING AFTER PARK" in brief and "wait for out.log" in brief and "stable" in brief
+        assert "RESUMING AFTER PARK" in brief and "wait for the out.log file" in brief and "stable" in brief
     finally:
         c.close()
     # pid park: alive pid with matching start time stays parked; a reused pid (start mismatch) wakes
     tid2 = json.loads(abx("--json", "add", "y")[1])["id"]
     abx("--json", "claim", tid2)
-    abx("--json", "park", tid2, "--pid", str(os.getpid()), "--note", "wait for me")
+    abx("--json", "park", tid2, "--pid", str(os.getpid()), "--note", "wait for this process to exit")
     c = _conn(abx)
     try:
         assert runner.wake_parked(c) == []
@@ -337,7 +337,7 @@ def test_parked_run_outcome_is_parked_not_an_attempt(abx, tmp_path):
         out.write_text("parked, exiting\n")
         c.execute("INSERT INTO runs(id,task_id,harness,bucket,pid,started_at,out_path,err_path) VALUES(1,?,?,?,999999,?,?,?)",
                   (tid, "claude", "claude-sub", store.now(), str(out), str(tmp_path / "1.err")))
-        store.park(c, tid, "claude#1", "job running", pid=os.getpid(), pid_start=runner.pid_start(os.getpid()))
+        store.park(c, tid, "claude#1", NOTE, pid=os.getpid(), pid_start=runner.pid_start(os.getpid()))
         ch = runner.Child(1, tid, "claude#1", "claude", None, "claude-sub", 999999, None, None, 3600,
                           str(tmp_path), str(out), str(tmp_path / "1.err"), store.now())
         ch.board, ch.endpoint, ch.provider = "main", None, None
@@ -381,7 +381,7 @@ def test_park_resumed_accepts_claimed_or_done_between_polls(tmp_path, monkeypatc
     tid = tid if isinstance(tid, str) else tid[0]
     store.claim(c, "me", tid=tid)
     p = subprocess.Popen(["sleep", "0.2"])
-    store.park(c, tid, "me", "x", pid=p.pid)
+    store.park(c, tid, "me", NOTE, pid=p.pid)
     assert not store.park_resumed(c, tid)
     p.wait()
     assert runner.wake_parked(c) and not store.park_resumed(c, tid)  # woken is not resumed yet

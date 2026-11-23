@@ -93,6 +93,7 @@ DEFAULTS = {
     "repeat_notice_after": 5,   # a cmd card series (same board+title+cmd) with this many identical outputs in a row posts a "pause this?" notice, then again every N (0 = off)
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
     "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
+    "resource_locks": {},       # resource name -> flock file: that resource is held by whoever really holds the lock (card found by pid ancestry), not by claimed cards with the label
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
     "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
     "require_compute_class": False,  # true = a card whose labels declare neither cpu nor gpu does not launch (it waits with a compute: gate reason)
@@ -2112,8 +2113,69 @@ def resource_holders(conn, exclude=None):
     for r in conn.execute("SELECT id, labels FROM tasks WHERE status='claimed'"):
         if r["id"] == exclude:
             continue
+def _flock_holder_pid(path):
+    """Pid of the process holding an exclusive flock on `path` (read from /proc/locks), or None when it is free."""
+    try:
+        ino = os.stat(path).st_ino
+        lines = open("/proc/locks").read().splitlines()
+    except OSError:
+        return None
+    for ln in lines:
+        f = ln.split()
+        if len(f) >= 6 and f[1] == "FLOCK" and f[3] == "WRITE" and f[5].rsplit(":", 1)[-1] == str(ino):
+            return int(f[4])
+    return None
+
+
+def _pid_chain(pid):
+    """pid plus its ancestors, with each one's command line (a parked job's own pid is usually an ancestor of the lock holder)."""
+    out = []
+    while pid and pid > 1 and len(out) < 40:
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+            ppid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        out.append((pid, cmd))
+        pid = ppid
+    return out
+
+
+def lock_holder_card(conn, path):
+    """(card id | 'pid N', pid) for whoever really holds the flock at `path`; None when it is free.
+    The card is matched by pid ancestry (park pid or run pid), else by a card id in a command line of the chain."""
+    hp = _flock_holder_pid(path)
+    if hp is None:
+        return None
+    chain = _pid_chain(hp)
+    anc = {p for p, _ in chain if p != hp}
+    exact = None
+    for r in conn.execute("SELECT t.id, t.park, run.pid AS rpid FROM tasks t LEFT JOIN runs run ON run.id=t.run_id "
+                          "WHERE t.status IN ('claimed','open','waiting') AND (t.park IS NOT NULL OR t.status='claimed')"):
+        try:
+            pk = json.loads(r["park"] or "null") or {}
+        except ValueError:
+            pk = {}
+        pp = {int(x) for x in (pk.get("pid"), r["rpid"]) if x}
+        if pp & anc:  # the job runs below this card's own pid: its owner
+            return r["id"], hp
+        if hp in pp and exact is None:  # parked ON the lock pid itself: owner or just a waiter, so last resort
+            exact = r["id"]
+    for _, cmd in chain:
+        for m in re.findall(r"t_[0-9a-f]{8}", cmd):
+            if conn.execute("SELECT 1 FROM tasks WHERE id=?", (m,)).fetchone():
+                return m, hp
+    return (exact or f"pid {hp}"), hp
+
+
         for n in card_needs(r["labels"]):
             out.setdefault(n, []).append(r["id"])
+    locks = cfg(conn, "resource_locks") or {}
+    for n, path in locks.items():
+        # a resource with a lock file is held by whoever really holds that lock, not by cards that merely claimed a gpu label
+        h = lock_holder_card(conn, os.path.expanduser(str(path)))
+        if h and h[0] != exclude:
+            out.setdefault(str(n).lower(), []).append(h[0])
     return out
 
 

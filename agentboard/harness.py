@@ -635,7 +635,8 @@ class Hermes(Adapter):
                 cost = row.get("estimated_cost_usd")
             if cost is not None:
                 r.cost_usd = float(cost)
-        r.ok = rc == 0 and bool(r.text)
+        gw_down = bool(not r.output and GATEWAY_UP_RE.search(combined[-8000:]))
+        r.ok = rc == 0 and bool(r.text) and not gw_down
         if not r.ok:
             # stderr without its session-id line, else the client's own stop banner, else the exit code: a cause of
             # "session_id: local-..." (the bookkeeping line alone) told nobody why the run ended.
@@ -966,7 +967,7 @@ _HERMES_STRIP_YAML_KEYS = frozenset({
     "weixin", "wechat", "imessage", "sms", "msteams", "teams", "bluebubbles",
     "dingtalk", "feishu", "lark", "line", "mattermost", "irc", "zulip",
     "gateway", "kanban", "dashboard", "cron", "desktop", "updates", "onboarding",
-    "platform_toolsets",
+    "platform_toolsets", "plugins",
 })
 
 

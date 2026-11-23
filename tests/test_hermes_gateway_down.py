@@ -71,3 +71,24 @@ def test_gateway_not_up_requeues_without_burning_attempt(abx, tmp_path):
             p.wait(timeout=20)
         except subprocess.TimeoutExpired:
             p.kill()
+
+
+def test_hermes_parse_rc0_gateway_timeout_not_ok():
+    from agentboard import harness as H
+    out = ("Hermes couldn't start the model connection: Gateway connection timed out; "
+           "no local fallback. Your message was not sent.")
+    res = H.Hermes().parse(0, out, "")
+    assert not res.ok
+    assert "Gateway connection timed out" in (res.error or "")
+
+
+def test_hermes_sanitize_config_strips_plugins():
+    from agentboard import harness as H
+    cfg = "model:\n  provider: openrouter\nplugins:\n  enabled:\n    - foo\n    - bar\ntoolsets:\n  - terminal\n"
+    cleaned = H._sanitize_hermes_config(cfg)
+    assert "plugins:" not in cleaned
+    assert "foo" not in cleaned
+    assert "provider: openrouter" in cleaned
+    assert "toolsets:" in cleaned
+
+

@@ -56,7 +56,7 @@ Board commands (the `ab` CLI is on PATH; ID is your task id, given under THIS RU
   ab followup ID "check CI for the PR" --in 5m  schedule a later check that reports back here
   ab defer ID --after ID2 [--why "..."]          park this task until ID2 is done, then stop
   ab defer ID --until T --why "..."              waiting on time or data: defer, NOT release (quick repeated releases get a relaunch backoff)
-  ab park ID --pid PID --note "..."              long job detached (nohup/setsid): exit now, a fresh agent resumes when it ends
+  ab park ID --pid PID --note "..."              long job (>5m, detached) or busy lock: exit now, a fresh agent resumes when it ends; batch short (<5m) steps inline instead of parking repeatedly
   ab park ID --file PATH [--grace 60s] --note "..."   same, waking when the file exists and stops growing
   ab park ID --reply THREAD --note "..."         after `ab ask CHANNEL "..." --wait 0s`: exit now, a fresh agent gets the reply in its brief
   ab edit ID --tier high && ab release ID "needs a stronger model"   escalate, then stop

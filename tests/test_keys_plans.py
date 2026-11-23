@@ -104,7 +104,7 @@ def test_plan_killed_midway_leaves_nothing(abx, tmp_path):
         "store.add_task = boom\n"
         "sys.exit(cli.main(['--json', 'add', '--plan', sys.argv[1], '--key', 'P']))\n")
     (tmp_path / "plan.json").write_text(json.dumps(PLAN))
-    p = subprocess.run([sys.executable, "-c", code, str(tmp_path / "plan.json")], cwd=ROOT, env=clean_env(abx.home),
+    p = subprocess.run([sys.executable, "-c", code, str(tmp_path / "plan.json")], cwd=ROOT, env=clean_env(abx.home, AB_ACTOR="tester"),
                        capture_output=True, text=True)
     assert p.returncode == -9, (p.returncode, p.stderr)
     assert cards(abx) in ([], None)

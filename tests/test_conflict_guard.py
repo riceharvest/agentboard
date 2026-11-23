@@ -26,7 +26,7 @@ def checkout(tmp_path):
 def run(c, *args, code=None):
     """(rc, stdout, stderr) for `python -m agentboard ARGS` (or `python -c CODE`) run from the copied checkout."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("AB_")}
-    env.update(PYTHONPATH=str(c), AB_HOME=str(c / "ab"))
+    env.update(PYTHONPATH=str(c), AB_HOME=str(c / "ab"), AB_ACTOR="tester", AB_WHY="tests")  # audited changes
     cmd = [sys.executable, "-c", code] if code else [sys.executable, "-m", "agentboard", *args]
     p = subprocess.run(cmd, cwd=str(c), capture_output=True, text=True, env=env)
     return p.returncode, p.stdout, p.stderr

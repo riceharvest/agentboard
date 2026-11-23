@@ -27,7 +27,20 @@ def _audit_why():
 def clean_env(home, **extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith("AB_") and k not in ("HERMES_HOME", "BASH_ENV")}  # never act as the worker running the tests
     env.update(AB_HOME=str(home), PYTHONPATH=ROOT, **extra)
+    # a reason for an audited change: naming one does not touch identity inference (which reads actor/task/board only)
+    env.setdefault("AB_WHY", "tests")
     return env
+
+
+def ab_with_identity(call, args=()):
+    """`call(*extra) -> CompletedProcess`, retried once with the test identity when the refusal names who/why.
+
+    Lets a test module keep its own `_ab` helper (different env, script path) and still not spell the identity out."""
+    r = call()
+    if r.returncode and "--as" not in args and "--why" not in args \
+            and any(m in (r.stderr + r.stdout) for m in _IDENTITY_REFUSAL):
+        r = call(*TEST_IDENTITY)
+    return r
 
 
 @pytest.fixture

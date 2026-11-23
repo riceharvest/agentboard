@@ -10,6 +10,7 @@ def ab(tmp_path):
     def run(*args, task=None, rc=0):
         env = {k: v for k, v in os.environ.items() if not k.startswith("AB_")}
         env["AB_HOME"] = str(tmp_path)
+        env["AB_WHY"] = "tests"  # audited changes: the test names the reason, not every call
         if task:
             env["AB_TASK"] = task
         r = subprocess.run([sys.executable, "-m", "agentboard", *args], capture_output=True, text=True, env=env)

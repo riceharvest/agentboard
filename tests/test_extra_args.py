@@ -2,6 +2,11 @@
 from agentboard import harness as H, store
 
 
+def cfg_set(conn, key, value, **kw):
+    """In-process config writes are audited: name the actor once here."""
+    return store.cfg_set(conn, key, value, "tests", **kw)
+
+
 def _conn(tmp_path):
     return store.connect(tmp_path / "t.sqlite")
 
@@ -32,7 +37,7 @@ def test_default_config_is_byte_identical(tmp_path):
 
 def test_harness_wide_args_only_hit_that_harness(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--a", "1"]})
+    cfg_set(conn, "extra_args", {"claude": ["--a", "1"]})
     p, _ = _cands(conn, "medium")
     for c in p:
         want = ["--a", "1"] if c.harness == "claude" else []
@@ -43,8 +48,8 @@ def test_harness_wide_args_only_hit_that_harness(tmp_path):
 
 def test_tier_args_follow_harness_args_and_only_that_tier(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--g"]})
-    store.cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}, "medium": {"claude": ["--m"], "codex": ["--cx"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--g"]})
+    cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}, "medium": {"claude": ["--m"], "codex": ["--cx"]}})
     by = {}
     for tier in ("low", "medium", "high", "max"):
         p, _ = _cands(conn, tier)
@@ -58,8 +63,8 @@ def test_tier_args_follow_harness_args_and_only_that_tier(tmp_path):
 def test_fallback_entry_uses_its_own_tier(tmp_path):
     """A low card that falls back up to the max tier must not get low's lean flags on max's claude entry."""
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "tier_fallback", "up")
-    store.cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}})
+    cfg_set(conn, "tier_fallback", "up")
+    cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}})
     p, e = _cands(conn, "low")
     assert [H.extra_args_for(conn, c) for c in p if c.harness == "claude"] == [["--lean"]]
     assert [c.tier for c in e if c.harness == "claude"] and all(H.extra_args_for(conn, c) == [] for c in e if c.harness == "claude")
@@ -67,8 +72,8 @@ def test_fallback_entry_uses_its_own_tier(tmp_path):
 
 def test_pinned_task_gets_harness_args_not_tier_args(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--g"]})
-    store.cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--g"]})
+    cfg_set(conn, "extra_args_tier", {"low": {"claude": ["--lean"]}})
     p, _ = H.candidates_for(conn, {"harness": "claude", "model": "haiku", "tier": "low"})
     assert H.extra_args_for(conn, p[0]) == ["--g"]
 
@@ -80,8 +85,8 @@ def test_claude_settings_merge_into_one(tmp_path):
     base = {"attribution": {"commit": ""}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "base-hook"}]}]}}
     tier = {"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "tier-hook"}]}],
                       "Stop": [{"hooks": [{"type": "command", "command": "stop-hook"}]}]}, "env": {"X": "1"}}
-    store.cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps(base), "--flag"]})
-    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps(tier), "--m"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps(base), "--flag"]})
+    cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps(tier), "--m"]}})
     c = next(c for c in _cands(conn, "medium")[0] if c.harness == "claude")
     cmd, _ = _cmd(conn, c)
     assert cmd.count("--settings") == 1
@@ -94,7 +99,7 @@ def test_claude_settings_merge_into_one(tmp_path):
 
 def test_single_settings_untouched(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--settings", "{ \"a\": 1 }"]})
+    cfg_set(conn, "extra_args", {"claude": ["--settings", "{ \"a\": 1 }"]})
     c = next(c for c in _cands(conn, "medium")[0] if c.harness == "claude")
     assert H.extra_args_for(conn, c) == ["--settings", "{ \"a\": 1 }"]
 
@@ -106,8 +111,8 @@ def _claude(conn, tier="medium"):
 def test_collision_settings_merge_one_flag(tmp_path):
     import json
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps({"base_only": 1, "both": "b"})]})
-    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps({"both": "t", "tier_only": 2})]}})
+    cfg_set(conn, "extra_args", {"claude": ["--settings", json.dumps({"base_only": 1, "both": "b"})]})
+    cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--settings", json.dumps({"both": "t", "tier_only": 2})]}})
     cmd, _ = _cmd(conn, _claude(conn))
     assert cmd.count("--settings") == 1
     d = json.loads(cmd[cmd.index("--settings") + 1])
@@ -117,21 +122,21 @@ def test_collision_settings_merge_one_flag(tmp_path):
 
 def test_collision_boolean_flag_keeps_base_and_warns(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--lean"]})
-    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--lean", "--m"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--lean"]})
+    cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--lean", "--m"]}})
     args, warns = H.extra_args_resolved(conn, _claude(conn))
     assert args == ["--lean", "--m"] and args.count("--lean") == 1
     assert len(warns) == 1 and all(x in warns[0] for x in ("claude", "medium", "--lean"))
-    store.cfg_set(conn, "extra_args", {"claude": ["--k", "base"]})
-    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--k", "tier"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--k", "base"]})
+    cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--k", "tier"]}})
     args, warns = H.extra_args_resolved(conn, _claude(conn))
     assert args == ["--k", "base"] and "'base'" in warns[0] and "'tier'" in warns[0]
 
 
 def test_no_collision_unchanged_no_warning(tmp_path):
     conn = _conn(tmp_path)
-    store.cfg_set(conn, "extra_args", {"claude": ["--g", "1"]})
-    store.cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--m"]}})
+    cfg_set(conn, "extra_args", {"claude": ["--g", "1"]})
+    cfg_set(conn, "extra_args_tier", {"medium": {"claude": ["--m"]}})
     args, warns = H.extra_args_resolved(conn, _claude(conn))
     assert args == ["--g", "1", "--m"] and warns == []
 

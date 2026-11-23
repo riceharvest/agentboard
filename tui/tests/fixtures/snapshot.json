@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "generated_at": 1795100002.1602116,
+ "generated_at": 1795422799.7612395,
  "board": null,
  "actor": "tui-test",
  "db": "/home/user/ab-home/db.sqlite",
@@ -21,9 +21,10 @@
    "states": {
     "claimed": 2,
     "ready": 6,
-    "waiting": 4
+    "waiting": 3,
+    "running": 1
    },
-   "running": 2
+   "running": 3
   },
   {
    "name": "web",
@@ -43,7 +44,7 @@
  ],
  "tasks": [
   {
-   "id": "t_6b25zz8d",
+   "id": "t_2df7zz65",
    "board": "main",
    "title": "Port the usage harvester to the new log format",
    "channel": "main",
@@ -61,20 +62,25 @@
    "max_attempts": 3,
    "timeout_s": 2700,
    "owner": "worker-1",
-   "lease_until": 1795101800.699668,
+   "lease_until": 1795424598.9011064,
    "not_before": null,
    "run_id": 1,
    "created_by": "tui-test",
-   "created_at": 1795099998.316224,
-   "updated_at": 1795100000.6996694,
+   "created_at": 1795422796.8893638,
+   "updated_at": 1795422798.9011066,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "build",
    "deps": [],
    "deps_open": [],
-   "state": "claimed"
+   "state": "claimed",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_7103zzf2",
+   "id": "t_c4bfzz23",
    "board": "main",
    "title": "Summarise last week's failed runs",
    "channel": "main",
@@ -92,20 +98,25 @@
    "max_attempts": 3,
    "timeout_s": 1200,
    "owner": "worker-2",
-   "lease_until": 1795101801.0317266,
+   "lease_until": 1795424598.9879086,
    "not_before": null,
    "run_id": 2,
    "created_by": "tui-test",
-   "created_at": 1795099998.442271,
-   "updated_at": 1795100001.0317276,
+   "created_at": 1795422797.062845,
+   "updated_at": 1795422798.9879088,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "dive",
    "deps": [],
    "deps_open": [],
-   "state": "claimed"
+   "state": "claimed",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_c7e5zz89",
+   "id": "t_a624zz7d",
    "board": "main",
    "title": "Decide: default slot count",
    "channel": "main",
@@ -113,7 +124,8 @@
    "priority": 5,
    "labels": {
     "type": "decision",
-    "owner": "lead"
+    "owner": "lead",
+    "hold": "manual"
    },
    "tier": "low",
    "harness": null,
@@ -128,16 +140,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099998.0302577,
-   "updated_at": 1795100000.506165,
+   "created_at": 1795422796.5302467,
+   "updated_at": 1795422798.8067079,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "decision",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_4852zz1d",
+   "id": "t_d9a6zz1d",
    "board": "main",
    "title": "Add a health endpoint to the runner",
    "channel": "main",
@@ -159,20 +176,25 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099997.2901292,
-   "updated_at": 1795099997.2901292,
+   "created_at": 1795422795.8282552,
+   "updated_at": 1795422795.8282552,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "build",
    "deps": [
-    "t_5cddzz47"
+    "t_515ezzbe"
    ],
    "deps_open": [
-    "t_5cddzz47"
+    "t_515ezzbe"
    ],
-   "state": "waiting"
+   "state": "waiting",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": "dep_open"
   },
   {
-   "id": "t_cb56zzd3",
+   "id": "t_d9d5zz65",
    "board": "main",
    "title": "Decide: drop python 3.9 support?",
    "channel": "main",
@@ -180,7 +202,8 @@
    "priority": 4,
    "labels": {
     "type": "decision",
-    "owner": "lead"
+    "owner": "lead",
+    "hold": "manual"
    },
    "tier": "low",
    "harness": null,
@@ -195,16 +218,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099998.2134924,
-   "updated_at": 1795099998.2134924,
+   "created_at": 1795422796.7047517,
+   "updated_at": 1795422796.7047517,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "decision",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_5cddzz47",
+   "id": "t_515ezzbe",
    "board": "main",
    "title": "Survey the retry strategies of other task boards",
    "channel": "main",
@@ -226,16 +254,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099996.967508,
-   "updated_at": 1795100000.3536494,
+   "created_at": 1795422795.4792113,
+   "updated_at": 1795422798.7048597,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "dive",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_f993zzdf",
+   "id": "t_9603zza5",
    "board": "main",
    "title": "Does a shorter lease cut stuck runs?",
    "channel": "main",
@@ -257,23 +290,29 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099997.1101012,
-   "updated_at": 1795099997.1101012,
+   "created_at": 1795422795.6493857,
+   "updated_at": 1795422795.6493857,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "experiment",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_9086zzac",
+   "id": "t_3807zz7e",
    "board": "main",
    "title": "Review the lease patch",
    "channel": "main",
    "status": "open",
    "priority": 2,
    "labels": {
-    "type": "review"
+    "type": "review",
+    "hold": "manual"
    },
    "tier": "medium",
    "harness": null,
@@ -288,16 +327,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099997.7011478,
-   "updated_at": 1795099997.7011478,
+   "created_at": 1795422796.353592,
+   "updated_at": 1795422796.353592,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "review",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_c2d4zz3b",
+   "id": "t_a2cczz97",
    "board": "main",
    "title": "Score the overnight eval",
    "channel": "main",
@@ -319,22 +363,27 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795100001.1768632,
-   "updated_at": 1795100001.4939587,
+   "created_at": 1795422799.080764,
+   "updated_at": 1795422799.342615,
    "park": {
     "note": "eval runs detached; results land in /work/eval/results.json - score it and report the number",
-    "at": 1795100001.493723,
+    "at": 1795422799.3424287,
     "file": "/work/eval/results.json",
     "grace_s": 60.0,
     "run": null
    },
    "result_head": null,
+   "kind": "agent",
+   "type": "experiment",
    "deps": [],
    "deps_open": [],
-   "state": "waiting"
+   "state": "running",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": "parked"
   },
   {
-   "id": "t_aebdzz9a",
+   "id": "t_5b52zzc9",
    "board": "main",
    "title": "Cut release 0.4",
    "channel": "main",
@@ -356,22 +405,27 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099997.4099717,
-   "updated_at": 1795099997.4099717,
+   "created_at": 1795422796.0038943,
+   "updated_at": 1795422796.0038943,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "release",
    "deps": [
-    "t_4852zz1d",
-    "t_f993zzdf"
+    "t_9603zza5",
+    "t_d9a6zz1d"
    ],
    "deps_open": [
-    "t_4852zz1d",
-    "t_f993zzdf"
+    "t_9603zza5",
+    "t_d9a6zz1d"
    ],
-   "state": "waiting"
+   "state": "waiting",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": "dep_open"
   },
   {
-   "id": "t_d0a6zzf9",
+   "id": "t_5d18zza0",
    "board": "main",
    "title": "Watch the nightly soak",
    "channel": "main",
@@ -393,16 +447,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099997.5860255,
-   "updated_at": 1795099997.5860255,
+   "created_at": 1795422796.1803584,
+   "updated_at": 1795422796.1803584,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "watch",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_a857zz50",
+   "id": "t_4594zzd9",
    "board": "web",
    "title": "Landing page copy",
    "channel": "main",
@@ -424,16 +483,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099999.0645185,
-   "updated_at": 1795099999.0645185,
+   "created_at": 1795422797.7832198,
+   "updated_at": 1795422797.7832198,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "build",
    "deps": [],
    "deps_open": [],
-   "state": "ready"
+   "state": "ready",
+   "hold": null,
+   "in_flight": true,
+   "in_flight_reason": null
   },
   {
-   "id": "t_3149zz16",
+   "id": "t_becczz45",
    "board": "main",
    "title": "Nightly report",
    "channel": "main",
@@ -452,19 +516,24 @@
    "timeout_s": null,
    "owner": null,
    "lease_until": null,
-   "not_before": 1795121599.235068,
+   "not_before": 1795444397.960526,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099999.2362003,
-   "updated_at": 1795099999.2362003,
+   "created_at": 1795422797.96082,
+   "updated_at": 1795422797.96082,
    "park": null,
    "result_head": null,
+   "kind": "agent",
+   "type": "watch",
    "deps": [],
    "deps_open": [],
-   "state": "waiting"
+   "state": "waiting",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": "not_before"
   },
   {
-   "id": "t_f3eczz08",
+   "id": "t_1aa9zz11",
    "board": "main",
    "title": "Flaky integration test on arm64",
    "channel": "main",
@@ -486,16 +555,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099998.883856,
-   "updated_at": 1795100000.2132144,
+   "created_at": 1795422797.6059954,
+   "updated_at": 1795422798.6108754,
    "park": null,
    "result_head": "segfault in the arm64 build, no repro",
+   "kind": "agent",
+   "type": "build",
    "deps": [],
    "deps_open": [],
-   "state": "dead"
+   "state": "dead",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": null
   },
   {
-   "id": "t_39cdzz22",
+   "id": "t_bbf3zzd7",
    "board": "main",
    "title": "Compare two lease lengths",
    "channel": "main",
@@ -517,16 +591,21 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099998.729787,
-   "updated_at": 1795099999.8910336,
+   "created_at": 1795422797.4262912,
+   "updated_at": 1795422798.427822,
    "park": null,
    "result_head": "finished: all checks passed, 12 tests",
+   "kind": "agent",
+   "type": "experiment",
    "deps": [],
    "deps_open": [],
-   "state": "done"
+   "state": "done",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": null
   },
   {
-   "id": "t_dd41zz2e",
+   "id": "t_60c7zzd9",
    "board": "main",
    "title": "Write the snapshot schema",
    "channel": "main",
@@ -548,22 +627,27 @@
    "not_before": null,
    "run_id": null,
    "created_by": "tui-test",
-   "created_at": 1795099998.5853555,
-   "updated_at": 1795099999.5886056,
+   "created_at": 1795422797.2463381,
+   "updated_at": 1795422798.2337465,
    "park": null,
    "result_head": "finished: all checks passed, 12 tests",
+   "kind": "agent",
+   "type": "build",
    "deps": [],
    "deps_open": [],
-   "state": "done"
+   "state": "done",
+   "hold": null,
+   "in_flight": false,
+   "in_flight_reason": null
   }
  ],
  "tasks_open": 13,
  "tasks_closed_shown": 3,
  "runner": {
   "running": true,
-  "pid": 1015846,
+  "pid": 2055306,
   "host": "devbox",
-  "started_at": 1795094602.0790653,
+  "started_at": 1795417399.7147765,
   "state": "running",
   "active": 2,
   "slots": 3,
@@ -572,10 +656,10 @@
   "paused": false,
   "draining": false,
   "stop": "",
-  "heartbeat": 1795100002.0790653,
-  "heartbeat_age_s": 0.081146240234375,
+  "heartbeat": 1795422799.7147765,
+  "heartbeat_age_s": 0.0464630126953125,
   "note": "tick",
-  "free_gib": 34.58,
+  "free_gib": 41.17,
   "min_free_gib": 10.0,
   "ready": 3,
   "launch_per_tick": 2,
@@ -586,37 +670,54 @@
   "children": [
    {
     "run": 1,
-    "task_id": "t_6b25zz8d",
+    "task_id": "t_2df7zz65",
     "harness": "claude",
+    "cmd": null,
     "endpoint": null,
     "model": "sonnet-5",
     "effort": "high",
     "bucket": "claude-sub",
-    "pid": 1015846,
-    "started_at": 1795098742.0790653,
+    "pid": 2055306,
+    "started_at": 1795421539.7147765,
     "out_path": "/home/user/ab-home/runs/1.out",
     "err_path": "/home/user/ab-home/runs/1.err",
     "title": "Port the usage harvester to the new log format",
     "board": "main",
     "timeout_s": 2700,
-    "elapsed_s": 1260.0811462402344
+    "stall": null,
+    "elapsed_s": 1260.0464630126953,
+    "kind": "agent"
    },
    {
     "run": 2,
-    "task_id": "t_7103zzf2",
+    "task_id": "t_c4bfzz23",
     "harness": "pi",
+    "cmd": null,
     "endpoint": null,
     "model": "local-27b",
     "effort": "high",
     "bucket": "local",
-    "pid": 1015846,
-    "started_at": 1795099662.0790653,
+    "pid": 2055306,
+    "started_at": 1795422459.7147765,
     "out_path": "/home/user/ab-home/runs/2.out",
     "err_path": "/home/user/ab-home/runs/2.err",
     "title": "Summarise last week's failed runs",
     "board": "main",
     "timeout_s": 1200,
-    "elapsed_s": 340.0811462402344
+    "stall": null,
+    "elapsed_s": 340.0464630126953,
+    "kind": "agent"
+   }
+  ],
+  "jobs": [
+   {
+    "task_id": "t_a2cczz97",
+    "board": "main",
+    "title": "Score the overnight eval",
+    "pid": null,
+    "file": "/work/eval/results.json",
+    "since": 1795422799.3424287,
+    "note": "eval runs detached; results land in /work/eval/results.json - score it and report the number"
    }
   ]
  },
@@ -624,10 +725,10 @@
   {
    "scope": "bucket:opencode-free",
    "kind": "manual",
-   "until": 1795101502.0165076,
+   "until": 1795424299.6938825,
    "reason": "rate limited",
-   "set_at": 1795100002.016719,
-   "remaining_s": 1499.8562960624695
+   "set_at": 1795422799.6939983,
+   "remaining_s": 1499.9326429367065
   }
  ],
  "caps": {
@@ -642,16 +743,16 @@
   "claude_plan_pct": {
    "five_hour": 38.0,
    "seven_day": 64.0,
-   "five_hour_resets": "2026-11-19T16:23:22+00:00",
-   "seven_day_resets": "2026-11-22T19:41:22+00:00",
-   "age_s": 40.082958936691284,
+   "five_hour_resets": "2026-11-23T10:03:19+00:00",
+   "seven_day_resets": "2026-11-26T13:21:19+00:00",
+   "age_s": 40.13533902168274,
    "stale": false
   },
   "weekly_pace_pct": 58.5,
   "guards": [
    {
     "bucket": "claude-sub",
-    "reason": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T19:41:22+00:00)"
+    "reason": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-26T13:21:19+00:00)"
    }
   ]
  },
@@ -686,7 +787,7 @@
     "max_5h_pct": 80,
     "pace_7d_lead_h": 12
    },
-   "cap_hit": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-22T19:41:22+00:00)",
+   "cap_hit": "plan guard: weekly usage 64% >= today's pace 58% (resets 2026-11-26T13:21:19+00:00)",
    "launch_budget": 0,
    "budget_why": "pace",
    "pacer": {
@@ -762,7 +863,7 @@
    },
    "limit": {
     "kind": "manual",
-    "until": 1795101502.0165076,
+    "until": 1795424299.6938825,
     "reason": "rate limited"
    },
    "cap": null,
@@ -1421,19 +1522,20 @@
  "events": [
   {
    "id": 1,
-   "ts": 1795099996.6789541,
+   "ts": 1795422795.306272,
    "board": "web",
    "channel": null,
    "task_id": null,
    "actor": "tui-test",
    "kind": "board_created",
    "payload": {
-    "name": "web"
+    "name": "web",
+    "routes": []
    }
   },
   {
    "id": 2,
-   "ts": 1795099996.809477,
+   "ts": 1795422795.3911302,
    "board": "web",
    "channel": null,
    "task_id": null,
@@ -1442,19 +1544,21 @@
    "payload": {
     "name": "web",
     "max_slots": 1,
-    "paused": 1
+    "paused": 1,
+    "why": "tui fixture"
    }
   },
   {
    "id": 3,
-   "ts": 1795099996.9676654,
+   "ts": 1795422795.4792817,
    "board": "main",
    "channel": "main",
-   "task_id": "t_5cddzz47",
+   "task_id": "t_515ezzbe",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Survey the retry strategies of other task boards",
+    "why": "tui fixture",
     "deps": [],
     "tier": "high",
     "labels": {
@@ -1464,14 +1568,15 @@
   },
   {
    "id": 4,
-   "ts": 1795099997.1102362,
+   "ts": 1795422795.6494727,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f993zzdf",
+   "task_id": "t_9603zza5",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Does a shorter lease cut stuck runs?",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
@@ -1481,16 +1586,17 @@
   },
   {
    "id": 5,
-   "ts": 1795099997.2902462,
+   "ts": 1795422795.8283463,
    "board": "main",
    "channel": "main",
-   "task_id": "t_4852zz1d",
+   "task_id": "t_d9a6zz1d",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Add a health endpoint to the runner",
+    "why": "tui fixture",
     "deps": [
-     "t_5cddzz47"
+     "t_515ezzbe"
     ],
     "tier": "high",
     "labels": {
@@ -1500,17 +1606,18 @@
   },
   {
    "id": 6,
-   "ts": 1795099997.410073,
+   "ts": 1795422796.0039794,
    "board": "main",
    "channel": "main",
-   "task_id": "t_aebdzz9a",
+   "task_id": "t_5b52zzc9",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Cut release 0.4",
+    "why": "tui fixture",
     "deps": [
-     "t_4852zz1d",
-     "t_f993zzdf"
+     "t_d9a6zz1d",
+     "t_9603zza5"
     ],
     "tier": "low",
     "labels": {
@@ -1520,14 +1627,15 @@
   },
   {
    "id": 7,
-   "ts": 1795099997.58616,
+   "ts": 1795422796.1804419,
    "board": "main",
    "channel": "main",
-   "task_id": "t_d0a6zzf9",
+   "task_id": "t_5d18zza0",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Watch the nightly soak",
+    "why": "tui fixture",
     "deps": [],
     "tier": "low",
     "labels": {
@@ -1537,67 +1645,77 @@
   },
   {
    "id": 8,
-   "ts": 1795099997.7013533,
+   "ts": 1795422796.3536668,
    "board": "main",
    "channel": "main",
-   "task_id": "t_9086zzac",
+   "task_id": "t_3807zz7e",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Review the lease patch",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
-     "type": "review"
-    }
+     "type": "review",
+     "hold": "manual"
+    },
+    "runnable": false
    }
   },
   {
    "id": 9,
-   "ts": 1795099998.030357,
+   "ts": 1795422796.5303252,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c7e5zz89",
+   "task_id": "t_a624zz7d",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Decide: default slot count",
+    "why": "tui fixture",
     "deps": [],
     "tier": "low",
     "labels": {
      "type": "decision",
-     "owner": "lead"
-    }
+     "owner": "lead",
+     "hold": "manual"
+    },
+    "runnable": false
    }
   },
   {
    "id": 10,
-   "ts": 1795099998.2136037,
+   "ts": 1795422796.7048368,
    "board": "main",
    "channel": "main",
-   "task_id": "t_cb56zzd3",
+   "task_id": "t_d9d5zz65",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Decide: drop python 3.9 support?",
+    "why": "tui fixture",
     "deps": [],
     "tier": "low",
     "labels": {
      "type": "decision",
-     "owner": "lead"
-    }
+     "owner": "lead",
+     "hold": "manual"
+    },
+    "runnable": false
    }
   },
   {
    "id": 11,
-   "ts": 1795099998.3163316,
+   "ts": 1795422796.889448,
    "board": "main",
    "channel": "main",
-   "task_id": "t_6b25zz8d",
+   "task_id": "t_2df7zz65",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Port the usage harvester to the new log format",
+    "why": "tui fixture",
     "deps": [],
     "tier": "high",
     "labels": {
@@ -1607,14 +1725,15 @@
   },
   {
    "id": 12,
-   "ts": 1795099998.4423478,
+   "ts": 1795422797.0629196,
    "board": "main",
    "channel": "main",
-   "task_id": "t_7103zzf2",
+   "task_id": "t_c4bfzz23",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Summarise last week's failed runs",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
@@ -1624,14 +1743,15 @@
   },
   {
    "id": 13,
-   "ts": 1795099998.5854418,
+   "ts": 1795422797.2464218,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dd41zz2e",
+   "task_id": "t_60c7zzd9",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Write the snapshot schema",
+    "why": "tui fixture",
     "deps": [],
     "tier": "high",
     "labels": {
@@ -1641,14 +1761,15 @@
   },
   {
    "id": 14,
-   "ts": 1795099998.7299316,
+   "ts": 1795422797.426363,
    "board": "main",
    "channel": "main",
-   "task_id": "t_39cdzz22",
+   "task_id": "t_bbf3zzd7",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Compare two lease lengths",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
@@ -1658,14 +1779,15 @@
   },
   {
    "id": 15,
-   "ts": 1795099998.883945,
+   "ts": 1795422797.606069,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f3eczz08",
+   "task_id": "t_1aa9zz11",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Flaky integration test on arm64",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
@@ -1675,14 +1797,15 @@
   },
   {
    "id": 16,
-   "ts": 1795099999.0646236,
+   "ts": 1795422797.783297,
    "board": "web",
    "channel": "main",
-   "task_id": "t_a857zz50",
+   "task_id": "t_4594zzd9",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Landing page copy",
+    "why": "tui fixture",
     "deps": [],
     "tier": "low",
     "labels": {
@@ -1692,14 +1815,15 @@
   },
   {
    "id": 17,
-   "ts": 1795099999.236493,
+   "ts": 1795422797.9608943,
    "board": "main",
    "channel": "main",
-   "task_id": "t_3149zz16",
+   "task_id": "t_becczz45",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Nightly report",
+    "why": "tui fixture",
     "deps": [],
     "tier": "low",
     "labels": {
@@ -1709,10 +1833,10 @@
   },
   {
    "id": 18,
-   "ts": 1795099999.4182374,
+   "ts": 1795422798.1382394,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dd41zz2e",
+   "task_id": "t_60c7zzd9",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1721,10 +1845,10 @@
   },
   {
    "id": 19,
-   "ts": 1795099999.5886924,
+   "ts": 1795422798.2338045,
    "board": "main",
    "channel": "main",
-   "task_id": "t_dd41zz2e",
+   "task_id": "t_60c7zzd9",
    "actor": "worker-1",
    "kind": "done",
    "payload": {
@@ -1733,10 +1857,10 @@
   },
   {
    "id": 20,
-   "ts": 1795099999.7328718,
+   "ts": 1795422798.329343,
    "board": "main",
    "channel": "main",
-   "task_id": "t_39cdzz22",
+   "task_id": "t_bbf3zzd7",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1745,10 +1869,10 @@
   },
   {
    "id": 21,
-   "ts": 1795099999.8911781,
+   "ts": 1795422798.4278805,
    "board": "main",
    "channel": "main",
-   "task_id": "t_39cdzz22",
+   "task_id": "t_bbf3zzd7",
    "actor": "worker-1",
    "kind": "done",
    "payload": {
@@ -1757,10 +1881,10 @@
   },
   {
    "id": 22,
-   "ts": 1795100000.0526133,
+   "ts": 1795422798.5212708,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f3eczz08",
+   "task_id": "t_1aa9zz11",
    "actor": "worker-2",
    "kind": "claimed",
    "payload": {
@@ -1769,15 +1893,15 @@
   },
   {
    "id": 23,
-   "ts": 1795100000.2131832,
+   "ts": 1795422798.6108432,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f3eczz08",
+   "task_id": "t_1aa9zz11",
    "actor": "worker-2",
    "kind": "message",
    "payload": {
     "msg": 1,
-    "thread": "t_f3eczz08",
+    "thread": "t_1aa9zz11",
     "mentions": [],
     "body": "FAILED: segfault in the arm64 build, no repro",
     "data": null
@@ -1785,10 +1909,10 @@
   },
   {
    "id": 24,
-   "ts": 1795100000.2132502,
+   "ts": 1795422798.610916,
    "board": "main",
    "channel": "main",
-   "task_id": "t_f3eczz08",
+   "task_id": "t_1aa9zz11",
    "actor": "worker-2",
    "kind": "dead",
    "payload": {
@@ -1799,15 +1923,15 @@
   },
   {
    "id": 25,
-   "ts": 1795100000.353687,
+   "ts": 1795422798.7048886,
    "board": "main",
    "channel": "main",
-   "task_id": "t_5cddzz47",
+   "task_id": "t_515ezzbe",
    "actor": "worker-1",
    "kind": "message",
    "payload": {
     "msg": 2,
-    "thread": "t_5cddzz47",
+    "thread": "t_515ezzbe",
     "mentions": [],
     "body": "Found two boards worth comparing; notes in the thread.",
     "data": null
@@ -1815,15 +1939,15 @@
   },
   {
    "id": 26,
-   "ts": 1795100000.506199,
+   "ts": 1795422798.8067398,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c7e5zz89",
+   "task_id": "t_a624zz7d",
    "actor": "worker-1",
    "kind": "message",
    "payload": {
     "msg": 3,
-    "thread": "t_c7e5zz89",
+    "thread": "t_a624zz7d",
     "mentions": [],
     "body": "Context: three agents are idle while two slots are busy.",
     "data": null
@@ -1831,10 +1955,10 @@
   },
   {
    "id": 27,
-   "ts": 1795100000.6997702,
+   "ts": 1795422798.9011538,
    "board": "main",
    "channel": "main",
-   "task_id": "t_6b25zz8d",
+   "task_id": "t_2df7zz65",
    "actor": "worker-1",
    "kind": "claimed",
    "payload": {
@@ -1843,10 +1967,10 @@
   },
   {
    "id": 28,
-   "ts": 1795100001.0318625,
+   "ts": 1795422798.9879584,
    "board": "main",
    "channel": "main",
-   "task_id": "t_7103zzf2",
+   "task_id": "t_c4bfzz23",
    "actor": "worker-2",
    "kind": "claimed",
    "payload": {
@@ -1855,14 +1979,15 @@
   },
   {
    "id": 29,
-   "ts": 1795100001.1770022,
+   "ts": 1795422799.0808525,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c2d4zz3b",
+   "task_id": "t_a2cczz97",
    "actor": "tui-test",
    "kind": "created",
    "payload": {
     "title": "Score the overnight eval",
+    "why": "tui fixture",
     "deps": [],
     "tier": "medium",
     "labels": {
@@ -1872,10 +1997,10 @@
   },
   {
    "id": 30,
-   "ts": 1795100001.327404,
+   "ts": 1795422799.2546563,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c2d4zz3b",
+   "task_id": "t_a2cczz97",
    "actor": "worker-3",
    "kind": "claimed",
    "payload": {
@@ -1884,15 +2009,15 @@
   },
   {
    "id": 31,
-   "ts": 1795100001.49398,
+   "ts": 1795422799.3426383,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c2d4zz3b",
+   "task_id": "t_a2cczz97",
    "actor": "worker-3",
    "kind": "message",
    "payload": {
     "msg": 4,
-    "thread": "t_c2d4zz3b",
+    "thread": "t_a2cczz97",
     "mentions": [],
     "body": "PARKED on file /work/eval/results.json (stable for 60s): eval runs detached; results land in /work/eval/results.json - score it and report the number",
     "data": null
@@ -1900,15 +2025,15 @@
   },
   {
    "id": 32,
-   "ts": 1795100001.4940276,
+   "ts": 1795422799.3426778,
    "board": "main",
    "channel": "main",
-   "task_id": "t_c2d4zz3b",
+   "task_id": "t_a2cczz97",
    "actor": "worker-3",
    "kind": "parked",
    "payload": {
     "note": "eval runs detached; results land in /work/eval/results.json - score it and report the number",
-    "at": 1795100001.493723,
+    "at": 1795422799.3424287,
     "file": "/work/eval/results.json",
     "grace_s": 60.0,
     "run": null
@@ -1916,7 +2041,7 @@
   },
   {
    "id": 33,
-   "ts": 1795100001.6265986,
+   "ts": 1795422799.431777,
    "board": "main",
    "channel": null,
    "task_id": null,
@@ -1940,7 +2065,7 @@
   },
   {
    "id": 34,
-   "ts": 1795100001.7596345,
+   "ts": 1795422799.5190454,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1961,7 +2086,7 @@
   },
   {
    "id": 35,
-   "ts": 1795100001.9037654,
+   "ts": 1795422799.6068678,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1976,12 +2101,13 @@
       "max_5h_pct": 80,
       "pace_7d_lead_h": 12
      }
-    }
+    },
+    "why": "tui fixture"
    }
   },
   {
    "id": 36,
-   "ts": 1795100002.016824,
+   "ts": 1795422799.694036,
    "board": null,
    "channel": null,
    "task_id": null,
@@ -1990,7 +2116,7 @@
    "payload": {
     "scope": "bucket:opencode-free",
     "kind": "manual",
-    "until": 1795101502.0165076,
+    "until": 1795424299.6938825,
     "reason": "rate limited"
    }
   }
@@ -1999,7 +2125,7 @@
  "events_truncated": false,
  "tail": {
   "run": 1,
-  "task_id": "t_6b25zz8d",
+  "task_id": "t_2df7zz65",
   "harness": "claude",
   "running": true,
   "bytes": 2000,
@@ -2011,5 +2137,5 @@
   "err_truncated": false,
   "error": null
  },
- "took_ms": 12.1
+ "took_ms": 92.0
 }

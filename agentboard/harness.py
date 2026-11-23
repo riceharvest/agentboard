@@ -37,7 +37,7 @@ UNAVAIL_RE = re.compile(
 # A gateway that is not up when the harness starts: `hermes chat` exits 1 with this line on stdout and no turn ran.
 GATEWAY_UP_RE = re.compile(
     r"couldn't start the model connection|could not start the model connection|gateway did not answer|"
-    r"gateway connection (?:failed|timed out)|gateway is not running|no local fallback", re.I)
+    r"gateway connection (?:failed|timed out)", re.I)
 # The harness' own stop banner on stdout: the only place the client records WHY it exited without a turn when a
 # provider/agent loop stopped it (e.g. "Response Stopped — Repetition Detected"). Never an agent-written line.
 STOP_BANNER_RE = re.compile(r"\b(?:response|turn|run|generation) stopped\b", re.I)

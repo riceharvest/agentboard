@@ -243,22 +243,22 @@ def test_park_validation_and_permissions(abx):
     abx("--json", "claim", tid)  # actor: agent
     # note required, exactly one condition, pid must be alive, claim must be held
     for args, msg in ((["park", tid, "--pid", str(os.getpid())], "--note"),
-                      (["park", tid, "--pid", str(os.getpid()), "--file", "/tmp/f", "--note", "n"], "exactly one"),
-                      (["park", tid, "--pid", "999999", "--note", "n"], "not running"),
-                      (["park", tid, "--note", "n"], "--pid"),
-                      (["park", tid, "--reply", "m99999", "--note", "n"], "no thread")):
+                      (["park", tid, "--pid", str(os.getpid()), "--file", "/tmp/f", "--note", NOTE], "exactly one"),
+                      (["park", tid, "--pid", "999999", "--note", NOTE], "not running"),
+                      (["park", tid, "--note", NOTE], "--pid"),
+                      (["park", tid, "--reply", "m99999", "--note", NOTE], "no thread")):
         code, out, err = abx("--json", *args)
         assert code == 1 and msg in out + err, (args, out, err)
-    code, out, err = abx("--json", "--as", "someone-else", "park", tid, "--file", "/tmp/f", "--note", "n")
+    code, out, err = abx("--json", "--as", "someone-else", "park", tid, "--file", "/tmp/f", "--note", NOTE)
     assert code == 1 and "held by" in out + err
     # force works for a manager
-    code, out, err = abx("--json", "--as", "boss", "park", tid, "--file", "/tmp/f", "--grace", "0", "--note", "forced", "--force")
+    code, out, err = abx("--json", "--as", "boss", "park", tid, "--file", "/tmp/f", "--grace", "0", "--note", NOTE, "--force")
     assert code == 0, err
     c = _conn(abx)
     try:
         t = store.task_dict(c, store.must_task(c, tid))
         assert t["state"] == "running" and t["attempts"] == 0 and t["owner"] is None
-        assert t["park"]["note"] == "forced"
+        assert t["park"]["note"] == NOTE
         assert store.ready_tasks(c) == []
         # cancel clears the park
         store.cancel(c, tid, "agent", "stop waiting")
@@ -314,7 +314,7 @@ def test_wake_waits_for_the_parking_run_to_exit(abx, tmp_path):
     abx("--json", "claim", tid)
     f = tmp_path / "out.log"
     f.write_text("x\n")
-    abx("--json", "park", tid, "--file", str(f), "--grace", "0", "--note", "n")
+    abx("--json", "park", tid, "--file", str(f), "--grace", "0", "--note", NOTE)
     c = _conn(abx)
     try:
         c.execute("INSERT INTO runs(task_id,harness,started_at) VALUES(?,?,?)", (tid, "claude", store.now()))

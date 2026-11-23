@@ -251,9 +251,9 @@ def test_worker_env_hygiene_across_ab_home(tmp_path):
     assert r.returncode == 0, r.stderr
     who = json.loads(r.stdout)
     assert who["actor"] == "claude#42" and who["board"] == "customboard" and who["run"] is None and who["task"] == "t_11223344", who
-    r = run_ab(other_home, "--json", "config", "set", "pacer", "false", keep_identity=False)
+    r = run_ab(other_home, "--json", "config", "set", "pacer", "false", "--as", "tester", "--why", "env hygiene", keep_identity=False)
     assert r.returncode == 0, r.stderr
-    r = run_ab(other_home, "--json", "add", "works on throwaway", keep_identity=False)
+    r = run_ab(other_home, "--json", "add", "works on throwaway", "--as", "tester", "--why", "env hygiene", keep_identity=False)
     assert r.returncode == 0, r.stderr
 
     # Same AB_HOME (trailing slash and symlink): worker identity stays locked, admin still denied

@@ -27,7 +27,8 @@ def use_home(home):
 
 def build(home, run_pids=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("AB_")}
-    env.update(AB_HOME=str(home), PYTHONPATH=str(ROOT), AB_ACTOR="tui-test", AB_NO_COLOR="1")
+    env.update(AB_HOME=str(home), PYTHONPATH=str(ROOT), AB_ACTOR="tui-test", AB_NO_COLOR="1",
+               AB_WHY="tui fixture")  # audited changes: the generator names the actor and the reason once
     use_home(home)
 
     def ab(*args, actor=None, ok=True):

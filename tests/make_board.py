@@ -10,6 +10,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agentboard import store  # noqa: E402
 
+store.WHY.set("generated board fixture")  # audited changes: a fixture is not an anonymous agent
+
 
 def main(n=2000):
     random.seed(7)

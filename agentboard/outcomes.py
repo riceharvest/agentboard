@@ -15,9 +15,11 @@ from datetime import datetime, timezone
 from . import store
 
 DONE = ("agent_done", "done", "done_auto")
-CLASSES = ("limit", "stall_killed", "expired", "failed", "parked", "no_op_done", "release_loop", "reopened", "review_fail", "running", "other")
+CLASSES = ("limit", "stall_killed", "expired", "failed", "parked", "no_op_done", "release_loop", "reopened", "review_fail", "infra", "running", "other")
 _OUT_CLASS = {"limit": "limit", "killed": "stall_killed", "expired": "expired", "failed": "failed", "agent_dead": "failed",
-              "auth": "failed", "release_loop": "release_loop", "parked": "parked", None: "running", "agent_open": "running", "agent_claimed": "running"}
+              "auth": "failed", "release_loop": "release_loop", "parked": "parked", None: "running", "agent_open": "running",
+              "agent_claimed": "running", "gateway_lost": "infra", "gateway_down": "infra", "interrupted": "infra"}
+
 DEFAULT_BY = "label:type,harness,tier"
 
 

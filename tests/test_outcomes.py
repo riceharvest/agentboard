@@ -1,13 +1,23 @@
 """Outcome ledger on a tiny synthetic board: accepted vs reopened / failed-review / no-op done, failure classes, $ per accepted."""
 import json
 
+import pytest
+
 from agentboard import outcomes, store
 
 T = 1_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _why():
+    """Cards carry a required who/why now: name the actor and give the reason in-process."""
+    tok = store.WHY.set("test")
+    yield
+    store.WHY.reset(tok)
+
+
 def _card(c, title, status, result, labels=None):
-    tid = store.add_task(c, "main", title, labels=labels or {}, board="main")
+    tid = store.add_task(c, "tester", title, labels=labels or {}, board="main")
     c.execute("UPDATE tasks SET status=?, result=? WHERE id=?", (status, result, tid))
     return tid
 

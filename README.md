@@ -28,7 +28,12 @@ agentboard handles each of them:
   After N failed attempts a task is `dead` and stays dead, with no retry storm.
 - **The runner is a plain process launcher.** If a harness fails with an auth, rate-limit or 5xx error, that
   harness or quota bucket cools down until its reported reset time. The task moves to the next candidate,
-  and no attempt is burned.
+  and no attempt is burned. A Hermes gateway that is down is the same class: a mid-turn loss
+  (`Gateway disconnected; turn outcome is unknown`) and a gateway that was not up at launch
+  (`Hermes couldn't start the model connection: Gateway did not answer session.create`) both requeue the
+  card as run outcome `gateway_lost` / `gateway_down` without an attempt — the second one after a short
+  `cooldown.gateway` (default `2m`) pause of that harness, so a dead gateway cannot burn the bounded retries
+  (3 per card) within seconds.
 - **Tiers instead of model names.** Tasks ask for `low | medium | high | max`. Each tier is an ordered list
   like `claude:sonnet@high` or `agy:Claude Sonnet 5.5 (High)`. When models change you edit the tier, and
   `ab tiers check` flags entries a harness no longer offers.
@@ -383,7 +388,8 @@ Other buckets keep launching while one is held back. See `ab guide` ("Launch pac
 Read-only, zero tokens: what the runs of each group cost per *accepted* outcome. `ab outcomes [--since 7d] [--by label:type,harness,tier] [--json]`.
 Group keys: `label:NAME`, `harness`, `tier` (the tier the run used), `model`, `board`, `bucket`. Per group: runs, accepted outcomes, agent-hours,
 tokens, `$` (only runs whose harness reports `cost_usd`; `usd_known_runs` says how many), `$` and tokens per accepted outcome, and failure classes
-`limit`, `stall_killed`, `expired`, `failed`, `parked`, `no_op_done`, `reopened`, `review_fail`, `running`, `other` (e.g. cancelled).
+`limit`, `stall_killed`, `expired`, `failed`, `parked`, `no_op_done`, `reopened`, `review_fail`, `infra`, `running`, `other` (e.g. cancelled).
+`infra` holds the runs nothing on the card caused: a lost or unreachable gateway, a run killed by a signal before it wrote anything.
 A run is accepted when it is the card's last done run, the card is still `done` with a non-empty result, it was not reopened (`ab retry`) afterwards
 and no review card (label `reviews=<id>`) finished with a result starting with `FAIL`. All runs of a group (failed attempts too) count against its
 accepted outcomes. `--json` prints `{since_s, by, totals, groups[]}`, a shape a UI can embed later.

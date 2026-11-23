@@ -34,6 +34,13 @@ UNAVAIL_RE = re.compile(
     r"\b50[234]\b|\b529\b|overloaded|service unavailable|ECONNREFUSED|connection refused|in use by another job|"
     r"server_error|bad gateway|gateway timeout|ETIMEDOUT|ENOTFOUND|network error|socket hang up|APIConnectionError|"
     r"connection error|TRANSPORT:|ECONNRESET|fetch failed", re.I)
+# A gateway that is not up when the harness starts: `hermes chat` exits 1 with this line on stdout and no turn ran.
+GATEWAY_UP_RE = re.compile(
+    r"couldn't start the model connection|could not start the model connection|gateway did not answer|"
+    r"gateway connection (?:failed|timed out)|gateway is not running|no local fallback", re.I)
+# The harness' own stop banner on stdout: the only place the client records WHY it exited without a turn when a
+# provider/agent loop stopped it (e.g. "Response Stopped — Repetition Detected"). Never an agent-written line.
+STOP_BANNER_RE = re.compile(r"\b(?:response|turn|run|generation) stopped\b", re.I)
 
 
 def classify(text):
@@ -145,6 +152,27 @@ def _matched_lines(blob, kind):
 
 _BOXED = re.compile(r"^\s*(?:[│┃┆║|╭╰┌└├]|[+\-<>]\s|\d+[:\t ]|@@|diff |index |---|\+\+\+)")
 _HARNESS_OUT_LINE = re.compile(r"^\W*(?:error|api call failed|retrying api call|non-retryable|http \d{3}|\w*(?:error|exception):)", re.I)
+
+
+def _without_session_id(text):
+    """Drop the client's `session_id: <id>` / `Session: <id>` line: it is bookkeeping, never a failure cause."""
+    return "\n".join(l for l in (text or "").splitlines()
+                     if not re.match(r"(?i)^\s*(?:session[ _]?id|session)\s*:\s*\S+\s*$", l))
+
+
+def stop_banner(out, rx=None, cap=400):
+    """The harness' own stop banner plus the line explaining it, from the tail of stdout.
+
+    A client that stops a turn itself (`Response Stopped — Repetition Detected`, a gateway that was not up,
+    context overflow, ...) exits non-zero with an empty stderr, so without this the run's only recorded cause
+    was the session id. `rx` overrides the banner pattern (default: the stop-banner one)."""
+    rx = rx or STOP_BANNER_RE
+    lines = [l.strip() for l in (out or "").splitlines()][-60:]  # the banner is the last thing the client prints
+    for i in range(len(lines) - 1, -1, -1):
+        if rx.search(lines[i]) and not _BOXED.match(lines[i]):
+            nxt = next((l.lstrip("-> ").strip() for l in lines[i + 1:i + 5] if l.strip()), "")
+            return f"{lines[i]} {nxt}"[:cap].strip()
+    return None
 
 
 def _provider_error_text(out, err):
@@ -609,7 +637,14 @@ class Hermes(Adapter):
                 r.cost_usd = float(cost)
         r.ok = rc == 0 and bool(r.text)
         if not r.ok:
-            r.error = _tail(err) or r.text or f"exit {rc}"
+            # stderr without its session-id line, else the client's own stop banner, else the exit code: a cause of
+            # "session_id: local-..." (the bookkeeping line alone) told nobody why the run ended.
+            cause = _tail(_without_session_id(err))
+            if not cause:
+                cause = stop_banner(out) or stop_banner(out, GATEWAY_UP_RE) or ""
+                if cause and r.session_id:
+                    cause = f"{cause} (session {r.session_id})"
+            r.error = cause or f"exit {rc}"
         return _finish(r, rc, out, err, scan=_provider_error_text(out, err))
 
     def bucket(self, model, provider=None):

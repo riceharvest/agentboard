@@ -1856,19 +1856,39 @@ class Runner:
                 elif mine and not res.ok and exit_signal(rc) and not (out or "").strip() and not (err or "").strip():
                     outcome = "interrupted"
                     res.error = requeue_signalled(c, ch, t, exit_signal(rc))
-                elif mine and not res.ok and ch.harness == "hermes" and GATEWAY_LOST_RE.search(err or ""):
+                elif mine and not res.ok and ch.harness == "hermes" and (
+                        GATEWAY_LOST_RE.search(err or "")
+                        or (H.GATEWAY_UP_RE.search((err or "") + "\n" + (out or "")[-8000:]) and not res.output)):
                     # The gateway died mid-turn: the client cannot tell whether the turn finished, and says not to resend
-                    # the work. That is infrastructure, not the card's fault: no attempt, requeue (the next run sees the
-                    # session id in the thread). Bounded so a gateway that keeps dying cannot loop forever.
-                    prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome='gateway_lost' AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
+                    # the work. Or it was not up at launch at all (`Hermes couldn't start the model connection: Gateway
+                    # did not answer session.create`: no turn ran, no tokens). Both are infrastructure, not the card's
+                    # fault: no attempt, requeue. Bounded so a gateway that keeps dying cannot loop forever.
+                    down = not GATEWAY_LOST_RE.search(err or "")
                     sid = H.hermes_session_id_from_log(err) or res.session_id
+                    prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome IN ('gateway_lost','gateway_down') "
+                                      "AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
                     if prior < GATEWAY_LOST_MAX:
-                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?", (now(), ch.task_id))
-                        event(c, ch.task_id, "runner", "gateway_lost", {"run": ch.run_id, "session": sid, "n": prior + 1})
-                        store.post_message(c, "runner", f"Run {ch.run_id} on hermes lost its gateway mid-turn (outcome unknown, session {sid or '?'}); "
-                                           f"requeued without burning an attempt. Check the work already in the worktree/branch before redoing it.",
-                                           thread=ch.task_id, check=False, _in_tx=True)
-                        outcome = "gateway_lost"
+                        if down:
+                            # a start failure returns in a second, so without a cool-down the bounded retries burn in
+                            # seconds; cool the harness (not one bucket) briefly and let other work use the slots
+                            cool = parse_dur(cfg(c, "cooldown.gateway") or "2m") or 0
+                            store.set_limit(c, harness_scope(ch.harness, getattr(ch, "endpoint", None)), "unavailable",
+                                            now() + cool, (res.error or "gateway not up")[:500])
+                        c.execute("UPDATE tasks SET status='open', owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
+                                  (now(), ch.task_id))
+                        event(c, ch.task_id, "runner", "gateway_down" if down else "gateway_lost",
+                              {"run": ch.run_id, "session": sid, "n": prior + 1})
+                        if down:
+                            store.post_message(c, "runner", f"Run {ch.run_id} on hermes could not reach its gateway "
+                                               f"({(res.error or 'gateway not up')[:300]}); nothing ran. Requeued "
+                                               f"without burning an attempt, harness paused {cfg(c, 'cooldown.gateway') or '2m'}.",
+                                               thread=ch.task_id, check=False, _in_tx=True)
+                            outcome = "gateway_down"
+                        else:
+                            store.post_message(c, "runner", f"Run {ch.run_id} on hermes lost its gateway mid-turn (outcome unknown, session {sid or '?'}); "
+                                               f"requeued without burning an attempt. Check the work already in the worktree/branch before redoing it.",
+                                               thread=ch.task_id, check=False, _in_tx=True)
+                            outcome = "gateway_lost"
                     else:
                         why = (res.error or "gateway disconnected")[:1500]
                         store.post_message(c, "runner", f"Run {ch.run_id} on hermes lost its gateway again ({prior + 1} times): {why}",

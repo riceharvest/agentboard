@@ -109,6 +109,7 @@ DEFAULTS = {
     "default_tier": "medium",
     "cooldown.limit": "30m",    # used when a limit error carries no reset time
     "cooldown.unavailable": "5m",
+    "cooldown.gateway": "2m",   # a hermes gateway that was not up at launch: harness cool-down between bounded retries
     "cooldown.auth": "6h",
     "stall_retry_after": "10m", # a run stuck in provider 429 retries this long -> LIMIT on its bucket, killed, no attempt counted (0/off = never)
     "stall_idle_after": "45m",  # a run showing no sign of life this long -> killed + retried once, then the overseer (0/off = never; card label stall=off|90m)

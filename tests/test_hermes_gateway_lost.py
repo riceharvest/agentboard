@@ -48,15 +48,15 @@ def test_gateway_death_requeues_without_burning_attempt(abx, tmp_path):
         assert code == rc, (args, code, out, err)
         return json.loads(out) if out.strip() else None
 
-    j("config", "set", "min_free_gib", "0")
-    j("config", "set", "poll_s", "1")
-    j("config", "set", "pacer", "false")
-    tid = j("add", "gw death", "--harness", "hermes/openrouter", "--model", "m", "--workdir", str(workdir))["id"]
-    j("runner", "pause")
+    j("config", "set", "min_free_gib", "0", "--as", "tester", "--why", "test")
+    j("config", "set", "poll_s", "1", "--as", "tester", "--why", "test")
+    j("config", "set", "pacer", "false", "--as", "tester", "--why", "test")
+    tid = j("add", "gw death", "--harness", "hermes/openrouter", "--model", "m", "--workdir", str(workdir), "--as", "tester", "--why", "test")["id"]
+    j("runner", "pause", "--as", "tester", "--why", "test")
     p = subprocess.Popen([sys.executable, "-m", "agentboard", "runner", "run"], cwd=ROOT, env=clean_env(abx.home, **env),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        j("runner", "resume")
+        j("runner", "resume", "--as", "tester", "--why", "test")
         for _ in range(80):
             shown = j("show", tid)
             if any(r["outcome"] == "gateway_lost" for r in shown["runs"]):
@@ -68,7 +68,7 @@ def test_gateway_death_requeues_without_burning_attempt(abx, tmp_path):
         assert not any(r["outcome"] == "failed" for r in shown["runs"]), shown["runs"]
         assert shown["status"] != "dead" and not shown.get("attempts"), shown
     finally:
-        j("runner", "stop", "--now")
+        j("runner", "stop", "--now", "--as", "tester", "--why", "test")
         try:
             p.wait(timeout=20)
         except subprocess.TimeoutExpired:

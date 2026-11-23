@@ -806,6 +806,22 @@ def dirty_snapshot(c, tid):
     store.event(c, tid, row["owner"] or "", "dirty_snapshot", {"files": files})
 
 
+def _self_made_worktree(shared):
+    """The top of the caller's cwd when it is a linked git worktree other than the shared checkout `shared` (a worker that
+    made its own worktree for a card without a worktree_dir label); "" otherwise. Its dirty files are the card's own."""
+    import subprocess
+    def git(*a):
+        p = subprocess.run(["git", *a], capture_output=True, text=True)
+        return p.stdout.strip() if p.returncode == 0 else ""
+    top = git("rev-parse", "--show-toplevel")
+    gitdir, common = git("rev-parse", "--git-dir"), git("rev-parse", "--git-common-dir")
+    if not top or not gitdir or not common or os.path.realpath(gitdir) == os.path.realpath(common):
+        return ""
+    if shared and os.path.realpath(top) == os.path.realpath(git("-C", shared, "rev-parse", "--show-toplevel") or shared):
+        return ""
+    return top
+
+
 def dirty_files(c, tid, skipped=None):
     """Untracked or modified (non-ignored) files this task is answerable for: in its own worktree (labels.worktree_dir) all of them;
     in a shared checkout ($AB_WORKDIR) only paths touched since the task was last claimed, the rest are appended to `skipped`. [] if none or not git."""
@@ -815,6 +831,9 @@ def dirty_files(c, tid, skipped=None):
     if row is not None:
         d = (json.loads(row["labels"] or "{}")).get("worktree_dir") or ""
     own = bool(d)
+    if not d:
+        d = _self_made_worktree(os.environ.get("AB_WORKDIR", ""))
+        own = bool(d)
     d = d or os.environ.get("AB_WORKDIR", "")
     if not d or not os.path.isdir(d):
         return []

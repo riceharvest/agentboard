@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `ab done` from a worker's own linked git worktree: a card without a `worktree_dir` label (a review card that made its own worktree) now checks the caller's worktree for dirty files instead of the shared checkout, so its uncommitted output blocks the close and other cards' dirty files in the shared checkout are ignored. No `--allow-dirty` needed for a clean worktree. `tests/test_done_dirty_self_worktree.py`. Runner change: none.
 - Vercel-Board-inspired workflow primitives:
   - Versioned JSON schemas (`ab schemas ls|add|show|rm`, `--schema NAME[@V]` on `done`/`post`/`reply`/`note`, `--result-schema NAME[@V]` on `add`) with stdlib validation and `_schema` stamping on structured payloads.
   - First-class artifact attachments (`--attach FILE` on `done`/`post`/`reply`/`note`, `ab artifacts TARGET`) recording sha256 + size and snapshotting files <= 4 MB into `$AB_HOME/artifacts/<target>/`; dependent tasks receive dependency artifact paths in their brief.

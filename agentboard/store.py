@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS runner(id INTEGER PRIMARY KEY CHECK(id=1), pid INTEGE
 CREATE TABLE IF NOT EXISTS op_requests(id INTEGER PRIMARY KEY, kind TEXT, arg TEXT, why TEXT, actor TEXT, task_id TEXT,
   created_at REAL, state TEXT DEFAULT 'pending', applied_at REAL, result TEXT);
 CREATE TABLE IF NOT EXISTS models(harness TEXT, model TEXT, label TEXT, seen_at REAL, PRIMARY KEY(harness, model));
+CREATE TABLE IF NOT EXISTS schemas(
+  name TEXT NOT NULL, version INTEGER NOT NULL, spec TEXT NOT NULL, description TEXT DEFAULT '',
+  created_by TEXT, created_at REAL, PRIMARY KEY(name, version));
+CREATE TABLE IF NOT EXISTS artifacts(
+  id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL, orig_path TEXT NOT NULL,
+  stored_path TEXT, sha256 TEXT NOT NULL, size INTEGER NOT NULL, author TEXT, ts REAL);
+CREATE INDEX IF NOT EXISTS artifacts_target ON artifacts(target, id);
+CREATE TABLE IF NOT EXISTS reactions(
+  target TEXT NOT NULL, tag TEXT NOT NULL, actor TEXT NOT NULL, ts REAL NOT NULL,
+  PRIMARY KEY(target, tag, actor));
+CREATE INDEX IF NOT EXISTS reactions_target ON reactions(target);
 """
 
 # Every runtime setting lives in `control`, so any agent with admin rights can change it with `ab config set`.
@@ -245,6 +256,17 @@ def migrate(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_board ON tasks(board, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_board ON events(board, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS tasks_status_upd ON tasks(status, updated_at)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS schemas(
+      name TEXT NOT NULL, version INTEGER NOT NULL, spec TEXT NOT NULL, description TEXT DEFAULT '',
+      created_by TEXT, created_at REAL, PRIMARY KEY(name, version))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS artifacts(
+      id INTEGER PRIMARY KEY, target TEXT NOT NULL, name TEXT NOT NULL, orig_path TEXT NOT NULL,
+      stored_path TEXT, sha256 TEXT NOT NULL, size INTEGER NOT NULL, author TEXT, ts REAL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS artifacts_target ON artifacts(target, id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS reactions(
+      target TEXT NOT NULL, tag TEXT NOT NULL, actor TEXT NOT NULL, ts REAL NOT NULL,
+      PRIMARY KEY(target, tag, actor))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS reactions_target ON reactions(target)")
     if conn.execute("SELECT value FROM control WHERE key='_schema'").fetchone() is not None:
         return
     conn.execute("BEGIN IMMEDIATE")
@@ -660,6 +682,8 @@ def task_dict(conn, row, full=False):
     d["runs"] = conn.execute("SELECT COUNT(*) FROM runs WHERE task_id=?", (d["id"],)).fetchone()[0]  # run count; `show` swaps in the list below
     if full:
         d["notes"] = thread_messages(conn, d["id"])
+        d["artifacts"] = list_artifacts(conn, d["id"])
+        d["reactions"] = reactions_for(conn, d["id"])
         d["children"] = [r["task_id"] for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=?", (d["id"],))]
         d["runs"] = [dict(r) for r in conn.execute(
             "SELECT id,harness,endpoint,provider,model,effort,bucket,started_at,ended_at,outcome,exit_code,input,output,cache_read,"
@@ -2142,3 +2166,288 @@ def recur(conn, row):
                  (nb, now(), row["id"]))
     event(conn, row["id"], "board", "recurred", {"run": n, "next_at": nb})
     return True
+
+
+# ---------------------------------------------------------------- schemas, artifacts, reactions, summaries
+SCHEMA_REF_RE = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9._-]{0,63})(?:@([1-9][0-9]*))?$")
+TAG_RE = re.compile(r"^\S{1,32}$")
+ARTIFACT_MAX_COPY = 4 * 1024 * 1024
+
+
+def parse_schema_ref(ref, require_version=False):
+    m = SCHEMA_REF_RE.match((ref or "").strip())
+    if not m:
+        raise ValueError(f"bad schema ref {ref!r} (expected NAME or NAME@VERSION, e.g. result@1)")
+    name, ver = m.group(1), (int(m.group(2)) if m.group(2) else None)
+    if require_version and ver is None:
+        raise ValueError(f"schema ref {ref!r} must include @VERSION (e.g. {name}@1)")
+    return name, ver
+
+
+def schema_add(conn, ref, spec, actor, description="", why=None):
+    require(conn, actor, "admin", DEFAULT_BOARD)
+    audit(actor, why)
+    name, ver = parse_schema_ref(ref, require_version=True)
+    if not isinstance(spec, dict):
+        raise ValueError("schema spec must be a JSON object")
+    with tx(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO schemas(name,version,spec,description,created_by,created_at) VALUES(?,?,?,?,?,?)",
+            (name, ver, json.dumps(spec, sort_keys=True), description or "", actor, now()),
+        )
+        event(conn, None, actor, "schema", {"action": "add", "schema": f"{name}@{ver}", "why": why})
+    return name, ver
+
+
+def schema_get(conn, ref):
+    name, ver = parse_schema_ref(ref)
+    if ver is None:
+        r = conn.execute("SELECT * FROM schemas WHERE name=? ORDER BY version DESC LIMIT 1", (name,)).fetchone()
+    else:
+        r = conn.execute("SELECT * FROM schemas WHERE name=? AND version=?", (name, ver)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["spec"] = json.loads(d["spec"])
+    d["ref"] = f"{d['name']}@{d['version']}"
+    return d
+
+
+def schema_list(conn):
+    out = []
+    for r in conn.execute("SELECT * FROM schemas ORDER BY name, version"):
+        d = dict(r)
+        d["spec"] = json.loads(d["spec"])
+        d["ref"] = f"{d['name']}@{d['version']}"
+        out.append(d)
+    return out
+
+
+def schema_rm(conn, ref, actor, why=None):
+    require(conn, actor, "admin", DEFAULT_BOARD)
+    audit(actor, why)
+    name, ver = parse_schema_ref(ref, require_version=True)
+    with tx(conn):
+        cur = conn.execute("DELETE FROM schemas WHERE name=? AND version=?", (name, ver))
+        if cur.rowcount == 0:
+            raise LookupError(f"schema {name}@{ver} not found")
+        event(conn, None, actor, "schema", {"action": "rm", "schema": f"{name}@{ver}", "why": why})
+    return name, ver
+
+
+def _type_ok(typ, val):
+    if typ == "object":
+        return isinstance(val, dict)
+    if typ == "array":
+        return isinstance(val, list)
+    if typ == "string":
+        return isinstance(val, str)
+    if typ == "boolean":
+        return isinstance(val, bool)
+    if typ == "integer":
+        return isinstance(val, int) and not isinstance(val, bool)
+    if typ == "number":
+        return isinstance(val, (int, float)) and not isinstance(val, bool)
+    if typ == "null":
+        return val is None
+    return True
+
+
+def validate_schema(spec, data, path="$"):
+    """Validate data against a JSON Schema subset; returns list of error strings."""
+    errs = []
+    if not isinstance(spec, dict):
+        return errs
+    t = spec.get("type")
+    if t is not None:
+        types = [t] if isinstance(t, str) else list(t)
+        if not any(_type_ok(x, data) for x in types):
+            errs.append(f"{path}: expected {'|'.join(types)}, got {type(data).__name__}")
+            return errs
+    if "enum" in spec and data not in spec["enum"]:
+        errs.append(f"{path}: {data!r} not in enum {spec['enum']!r}")
+    if isinstance(data, str) and "minLength" in spec and len(data) < int(spec["minLength"]):
+        errs.append(f"{path}: length {len(data)} < minLength {spec['minLength']}")
+    if isinstance(data, (int, float)) and not isinstance(data, bool):
+        if "minimum" in spec and data < spec["minimum"]:
+            errs.append(f"{path}: {data} < minimum {spec['minimum']}")
+        if "maximum" in spec and data > spec["maximum"]:
+            errs.append(f"{path}: {data} > maximum {spec['maximum']}")
+    if isinstance(data, dict):
+        for req in spec.get("required") or ():
+            if req not in data:
+                errs.append(f"{path}.{req}: missing required field")
+        props = spec.get("properties") or {}
+        if spec.get("additionalProperties") is False:
+            for k in data:
+                if k not in props:
+                    errs.append(f"{path}.{k}: unexpected field (additionalProperties=false)")
+        for k, sub in props.items():
+            if k in data:
+                errs.extend(validate_schema(sub, data[k], f"{path}.{k}"))
+    if isinstance(data, list) and isinstance(spec.get("items"), dict):
+        for i, item in enumerate(data):
+            errs.extend(validate_schema(spec["items"], item, f"{path}[{i}]"))
+    return errs
+
+
+def apply_schema(conn, ref, data):
+    """Validate data against registered schema REF; returns payload dict tagged with _schema."""
+    sc = schema_get(conn, ref)
+    if not sc:
+        raise LookupError(f"schema {ref!r} not found (register with `ab schemas add`)")
+    if data is None:
+        raise ValueError(f"schema {sc['ref']} requires --data JSON")
+    errs = validate_schema(sc["spec"], data)
+    if errs:
+        raise ValueError(f"schema {sc['ref']} validation failed: " + "; ".join(errs[:10]))
+    if isinstance(data, dict):
+        out = dict(data)
+        out["_schema"] = sc["ref"]
+        return out
+    return {"_schema": sc["ref"], "value": data}
+
+
+def _resolve_target(conn, target):
+    """Validate target is an existing task id (t_...) or message id (m<id>). Returns canonical target id."""
+    t = (target or "").strip()
+    if t.startswith("m") and t[1:].isdigit():
+        r = conn.execute("SELECT id, board, channel FROM messages WHERE id=?", (int(t[1:]),)).fetchone()
+        if not r:
+            raise LookupError(f"message {t} not found")
+        return f"m{r['id']}", r["board"], r["channel"]
+    row = get_task(conn, t)
+    if not row:
+        raise LookupError(f"target {target!r} not found (expected task id or m<id>)")
+    return row["id"], row["board"], row["channel"]
+
+
+def attach_files(conn, target, paths, actor, max_copy_bytes=ARTIFACT_MAX_COPY):
+    """Attach local files to a task or message: records sha256 + size, copies <= max_copy_bytes into $AB_HOME/artifacts."""
+    import hashlib
+    import shutil
+    if not paths:
+        return []
+    canon, _, _ = _resolve_target(conn, target)
+    staged = []
+    for raw in paths:
+        p = Path(raw).expanduser().resolve()
+        if not p.is_file():
+            raise ValueError(f"attachment not a regular file: {raw}")
+        h = hashlib.sha256()
+        size = 0
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+                size += len(chunk)
+        digest = h.hexdigest()
+        stored = None
+        if size <= max_copy_bytes:
+            dest_dir = HOME / "artifacts" / canon
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", p.name)[:120] or "file"
+            dest = dest_dir / f"{digest[:12]}-{safe}"
+            if not dest.exists():
+                shutil.copy2(p, dest)
+            stored = str(dest)
+        staged.append((canon, p.name, str(p), stored, digest, size, actor, now()))
+    out = []
+    with tx(conn):
+        for row in staged:
+            cur = conn.execute(
+                "INSERT INTO artifacts(target,name,orig_path,stored_path,sha256,size,author,ts) VALUES(?,?,?,?,?,?,?,?)",
+                row,
+            )
+            out.append({
+                "id": cur.lastrowid, "target": row[0], "name": row[1], "orig_path": row[2],
+                "stored_path": row[3], "sha256": row[4], "size": row[5], "author": row[6], "ts": row[7],
+            })
+    return out
+
+
+def list_artifacts(conn, target):
+    canon = target
+    if not (canon.startswith("m") and canon[1:].isdigit()):
+        r = get_task(conn, target)
+        if r:
+            canon = r["id"]
+    return [dict(r) for r in conn.execute("SELECT * FROM artifacts WHERE target=? ORDER BY id", (canon,))]
+
+
+def react(conn, target, tag, actor, remove=False):
+    """Non-mutating reaction on a task or message: does not touch tasks.updated_at or emit a message event."""
+    tag = (tag or "").strip()
+    if not TAG_RE.match(tag):
+        raise ValueError(f"bad reaction tag {tag!r} (1-32 non-whitespace chars)")
+    canon, board, channel = _resolve_target(conn, target)
+    require(conn, actor, "read", board, channel)
+    with tx(conn):
+        if remove:
+            conn.execute("DELETE FROM reactions WHERE target=? AND tag=? AND actor=?", (canon, tag, actor))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO reactions(target,tag,actor,ts) VALUES(?,?,?,?)",
+                (canon, tag, actor, now()),
+            )
+    return {"target": canon, "tag": tag, "removed": bool(remove), "reactions": reactions_for(conn, canon)}
+
+
+def reactions_for(conn, target):
+    out = {}
+    for r in conn.execute("SELECT tag, actor FROM reactions WHERE target=? ORDER BY tag, ts, actor", (target,)):
+        out.setdefault(r["tag"], []).append(r["actor"])
+    return out
+
+
+def thread_summaries(conn, actor, board=None, channel=None, after=0, limit=30):
+    """Compact per-thread digest for `ab read --summary`: root + latest reply preview, counts, schema, reactions, artifacts."""
+    sql, args = "SELECT * FROM messages WHERE id > ?", [after or 0]
+    if board:
+        sql += " AND board=?"
+        args.append(board)
+    if channel:
+        sql += " AND (channel=? OR channel LIKE ?)"
+        args += [channel, channel.rstrip("/") + "/%"]
+    rows = conn.execute(sql + " ORDER BY id ASC", args).fetchall()
+    by_thread = {}
+    for r in rows:
+        if not can(conn, actor, "read", r["board"], r["channel"]):
+            continue
+        th = r["thread"]
+        g = by_thread.get(th)
+        if g is None:
+            g = {"thread": th, "board": r["board"], "channel": r["channel"],
+                 "root": r, "latest": r, "count": 0, "schemas": []}
+            by_thread[th] = g
+        g["latest"] = r
+        g["count"] += 1
+        if r["data"]:
+            try:
+                d = json.loads(r["data"])
+                if isinstance(d, dict) and d.get("_schema"):
+                    g["schemas"].append(d["_schema"])
+            except ValueError:
+                pass
+    ordered = sorted(by_thread.values(), key=lambda g: g["latest"]["id"])[-limit:]
+    out = []
+    for g in ordered:
+        th = g["thread"]
+        root_b = (g["root"]["body"] or "").strip().splitlines()
+        last_b = (g["latest"]["body"] or "").strip().splitlines()
+        out.append({
+            "thread": th,
+            "board": g["board"],
+            "channel": g["channel"],
+            "messages": g["count"],
+            "replies": max(0, g["count"] - 1),
+            "root_author": g["root"]["author"],
+            "root_preview": (root_b[0] if root_b else "")[:120],
+            "last_id": g["latest"]["id"],
+            "last_ts": g["latest"]["ts"],
+            "last_author": g["latest"]["author"],
+            "last_preview": (last_b[0] if last_b else "")[:120],
+            "schemas": list(dict.fromkeys(g["schemas"])),
+            "reactions": reactions_for(conn, th),
+            "artifacts": len(list_artifacts(conn, th)),
+        })
+    return out

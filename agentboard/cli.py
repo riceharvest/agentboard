@@ -161,6 +161,11 @@ def show_text(d):
         lines += ["", "RESULT: " + d["result"].rstrip()]
     if d.get("data"):
         lines.append("DATA: " + json.dumps(d["data"]))
+    if d.get("artifacts"):
+        lines.append("ARTIFACTS: " + ", ".join(
+            f"{x['name']} ({x['size']}B sha256={x['sha256'][:12]} {x['stored_path'] or x['orig_path']})" for x in d["artifacts"]))
+    if d.get("reactions"):
+        lines.append("REACTIONS: " + ", ".join(f"{k}({len(v)})" for k, v in d["reactions"].items()))
     if d.get("notes"):
         lines.append("")
         lines += [f"[{fmt_ts(n['ts'])} m{n['id']} {n['author']}] {n['body']}" for n in d["notes"]]
@@ -400,6 +405,11 @@ def cmd_add(c, a, out):
     if a.reply_to:
         store.resolve_thread(c, a.reply_to)
         labels["reply_to"] = a.reply_to
+    if getattr(a, "result_schema", None):
+        sc = store.schema_get(c, a.result_schema)
+        if not sc:
+            raise LookupError(f"schema {a.result_schema!r} not found (register with `ab schemas add`)")
+        labels["result_schema"] = sc["ref"]
     data = jarg(a.data)
     kw = _card_kwargs(a.title, body_arg(a), labels, a.priority, a.after, a.workdir, a.tier, a.harness, a.model, a.manual,
                       a.max_attempts, a.timeout, data, a.cmd, a.result, a.channel, a.verify)
@@ -595,10 +605,38 @@ def cmd_ls(c, a, out):
         print(f"ab ls: showing {lim} of {total}{more} (add --limit N for more)", file=sys.stderr)
 
 
+def _brief_dict(d):
+    body = (d.get("body") or "").strip()
+    notes = d.get("notes") or []
+    runs = d.get("runs") or []
+    b = dict(d)
+    if len(body) > 400:
+        b["body"] = body[:400] + f"... ({len(body)} chars)"
+        b["body_truncated"] = True
+    b["notes_total"] = len(notes)
+    b["notes"] = notes[-3:]
+    b["runs_total"] = len(runs)
+    b["runs"] = runs[-2:]
+    return b
+
+
 def cmd_show(c, a, out):
     row = store.must_task(c, a.id)
     store.require(c, actor_of(a), "read", row["board"], row["channel"])
-    out(store.task_dict(c, row, full=True), show_text)
+    d = store.task_dict(c, row, full=True)
+    if getattr(a, "brief", False):
+        bd = _brief_dict(d)
+        def fmt(x):
+            txt = show_text(x)
+            extra = []
+            if x["notes_total"] > len(x["notes"]):
+                extra.append(f"(brief: showing last {len(x['notes'])} of {x['notes_total']} notes)")
+            if x["runs_total"] > len(x["runs"]):
+                extra.append(f"(brief: showing last {len(x['runs'])} of {x['runs_total']} runs)")
+            return txt + ("\n" + " ".join(extra) if extra else "")
+        out(bd, fmt)
+        return
+    out(d, show_text)
 
 
 def cmd_wake(c, a, out):
@@ -637,8 +675,12 @@ def cmd_renew(c, a, out):
 
 def cmd_note(c, a, out):
     text = text_arg(a.text, a.file)
-    tid = store.note(c, a.id, actor_of(a), text, jarg(a.data))
-    out({"id": tid, "noted": True}, f"{tid} noted")
+    data = jarg(a.data)
+    if getattr(a, "schema", None):
+        data = store.apply_schema(c, a.schema, data)
+    tid = store.note(c, a.id, actor_of(a), text, data)
+    arts = store.attach_files(c, tid, getattr(a, "attach", None) or [], actor_of(a))
+    out({"id": tid, "noted": True, **({"artifacts": arts} if arts else {})}, f"{tid} noted")
 
 
 def rm_root():
@@ -876,8 +918,17 @@ def cmd_done(c, a, out):
         print(f"ab done: warning: {msg}", file=sys.stderr)
     wt_branch = (json.loads(row["labels"] or "{}") or {}).get("worktree_branch") if row else None
     wt_repo = (row["workdir"] if row else None) or None
-    tid = store.complete(c, a.id, actor_of(a), text, jarg(a.data), a.force)
-    out({"id": tid, "status": "done"}, f"{tid} done{note}")
+    data = jarg(a.data)
+    req_schema = getattr(a, "schema", None) or ((json.loads(row["labels"] or "{}") or {}).get("result_schema") if row and not a.force else None)
+    if req_schema:
+        data = store.apply_schema(c, req_schema, data)
+    attach_paths = getattr(a, "attach", None) or []
+    for ap in attach_paths:
+        if not Path(ap).expanduser().is_file():
+            raise ValueError(f"attachment not a regular file: {ap}")
+    tid = store.complete(c, a.id, actor_of(a), text, data, a.force)
+    arts = store.attach_files(c, tid, attach_paths, actor_of(a))
+    out({"id": tid, "status": "done", **({"artifacts": arts} if arts else {})}, f"{tid} done{note}")
     if wt_branch and wt_repo:
         warn = unmerged_mod.warning(wt_repo, wt_branch)
         if warn:
@@ -1583,20 +1634,54 @@ def mline(m):
 
 
 def cmd_post(c, a, out):
-    mid, thread, eid = store.post_message(c, actor_of(a), text_arg(a.text), board=board_of(a), channel=a.channel, data=jarg(a.data))
-    out({"msg": mid, "thread": thread, "event": eid}, thread)
+    data = jarg(a.data)
+    if getattr(a, "schema", None):
+        data = store.apply_schema(c, a.schema, data)
+    attach_paths = getattr(a, "attach", None) or []
+    for ap in attach_paths:
+        if not Path(ap).expanduser().is_file():
+            raise ValueError(f"attachment not a regular file: {ap}")
+    mid, thread, eid = store.post_message(c, actor_of(a), text_arg(a.text), board=board_of(a), channel=a.channel, data=data)
+    arts = store.attach_files(c, f"m{mid}", attach_paths, actor_of(a))
+    out({"msg": mid, "thread": thread, "event": eid, **({"artifacts": arts} if arts else {})}, thread)
 
 
 def cmd_reply(c, a, out):
-    data = jarg(a.data) or {}
+    data = jarg(a.data)
+    if getattr(a, "schema", None):
+        data = store.apply_schema(c, a.schema, data)
     if a.sync:
+        data = dict(data or {})
         data["sync"] = True
+    attach_paths = getattr(a, "attach", None) or []
+    for ap in attach_paths:
+        if not Path(ap).expanduser().is_file():
+            raise ValueError(f"attachment not a regular file: {ap}")
     mid, thread, eid = store.post_message(c, actor_of(a), text_arg(a.text), thread=a.thread, data=data or None)
-    out({"msg": mid, "thread": thread, "event": eid}, f"m{mid} in {thread}")
+    arts = store.attach_files(c, f"m{mid}", attach_paths, actor_of(a))
+    out({"msg": mid, "thread": thread, "event": eid, **({"artifacts": arts} if arts else {})}, f"m{mid} in {thread}")
+
+
+def _summary_line(s):
+    bits = [f"{s['thread']} {fmt_ts(s['last_ts'])} {s['board']}/{s['channel']} ({s['messages']}msg"]
+    if s["schemas"]:
+        bits.append("schema=" + ",".join(s["schemas"]))
+    if s["artifacts"]:
+        bits.append(f"att={s['artifacts']}")
+    if s["reactions"]:
+        bits.append("react=" + ",".join(f"{k}:{len(v)}" for k, v in s["reactions"].items()))
+    head = " ".join(bits) + ")"
+    prev = s["root_preview"] if s["messages"] == 1 else f"{s['root_preview']}  >> [{s['last_author']}] {s['last_preview']}"
+    return f"{head} {prev}"
 
 
 def cmd_read(c, a, out):
     me = actor_of(a)
+    if getattr(a, "summary", False) and not a.thread:
+        sums = store.thread_summaries(c, me, board=None if a.all_boards else board_of(a),
+                                      channel=a.channel, after=a.after or 0, limit=a.limit)
+        out(sums, lambda xs: "\n".join(_summary_line(s) for s in xs) or "(no threads)")
+        return
     sql, args = "SELECT * FROM messages WHERE id > ?", [a.after or 0]
     if a.thread:
         _, _, _, th = store.resolve_thread(c, a.thread)
@@ -1614,6 +1699,51 @@ def cmd_read(c, a, out):
     rows = c.execute(sql + " ORDER BY id DESC LIMIT ?", args + [a.limit]).fetchall()[::-1]
     msgs = [store.msg_dict(r) for r in rows if store.can(c, me, "read", r["board"], r["channel"])]
     out(msgs, lambda xs: "\n".join(mline(m) for m in xs) or "(no messages)")
+
+
+def cmd_schemas(c, a, out):
+    act = a.action or "ls"
+    if act == "ls":
+        rows = store.schema_list(c)
+        out(rows, lambda xs: "\n".join(
+            f"{x['ref']:24s} {x['description'] or ''}".rstrip() for x in xs) or "(no schemas)")
+    elif act == "show":
+        if not a.ref:
+            raise ValueError("give a schema ref (NAME or NAME@V)")
+        sc = store.schema_get(c, a.ref)
+        if not sc:
+            raise LookupError(f"schema {a.ref!r} not found")
+        out(sc, lambda x: f"{x['ref']}  {x['description']}\n{json.dumps(x['spec'], indent=2, sort_keys=True)}")
+    elif act == "add":
+        if not a.ref:
+            raise ValueError("give NAME@V (e.g. result@1)")
+        spec = jarg(a.spec)
+        if not isinstance(spec, dict):
+            raise ValueError("--spec must be a JSON object (or @file)")
+        why = getattr(a, "why", None) or os.environ.get("AB_WHY")
+        name, ver = store.schema_add(c, a.ref, spec, actor_of(a), a.description or "", why)
+        out({"name": name, "version": ver, "ref": f"{name}@{ver}"}, f"{name}@{ver}")
+    elif act == "rm":
+        if not a.ref:
+            raise ValueError("give NAME@V")
+        why = getattr(a, "why", None) or os.environ.get("AB_WHY")
+        name, ver = store.schema_rm(c, a.ref, actor_of(a), why)
+        out({"removed": f"{name}@{ver}"}, f"removed {name}@{ver}")
+
+
+def cmd_react(c, a, out):
+    res = store.react(c, a.target, a.tag, actor_of(a), remove=a.rm)
+    verb = "removed" if res["removed"] else "reacted"
+    out(res, f"{verb} {res['tag']} on {res['target']}")
+
+
+def cmd_artifacts(c, a, out):
+    canon, board, channel = store._resolve_target(c, a.target)
+    store.require(c, actor_of(a), "read", board, channel)
+    rows = store.list_artifacts(c, canon)
+    out(rows, lambda xs: "\n".join(
+        f"{x['id']}\t{x['name']}\t{x['size']}B\tsha256={x['sha256'][:12]}\t{x['stored_path'] or x['orig_path']}"
+        for x in xs) or "(no artifacts)")
 
 
 def cmd_ask(c, a, out):
@@ -2063,6 +2193,7 @@ def build_parser():
     s.add_argument("--max-attempts", type=int, default=3)
     s.add_argument("--timeout", help="per-run wall clock, e.g. 45m")
     s.add_argument("--data", help="JSON (or @file)")
+    s.add_argument("--result-schema", help="registered schema NAME[@V] required for `ab done --data`")
     s.add_argument("--reply-to", help="thread (task id or m<id>) that gets this task's result posted into it")
 
     s = sub("ls", cmd_ls, "list tasks (default: open+claimed)", ["list"])
@@ -2082,6 +2213,7 @@ def build_parser():
 
     s = sub("show", cmd_show, "full task: body, notes, runs, result")
     s.add_argument("id")
+    s.add_argument("--brief", action="store_true", help="compact view: truncated body, last 3 notes, last 2 runs")
 
     s = sub("wake", cmd_wake, "print the newest run's wake snapshot (card + scheduler settings at launch) as JSON; exit 2 if the run predates it")
     s.add_argument("id")
@@ -2104,6 +2236,8 @@ def build_parser():
     s.add_argument("text", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--file", help="read the note from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data", help="JSON (or @file)")
+    s.add_argument("--schema", help="validate --data against registered schema NAME[@V]")
+    s.add_argument("--attach", action="append", metavar="FILE", help="attach a file (sha256 + snapshot <=4MB; repeatable)")
 
     s = sub("rm", cmd_rm, "delete files/dirs inside your own worktree (for harnesses whose shell refuses `rm -f`)")
     s.add_argument("paths", nargs="+")
@@ -2119,6 +2253,8 @@ def build_parser():
     s.add_argument("result", nargs="?", default="", help="'-' reads stdin")
     s.add_argument("--summary-file", help="read the result from this file (avoids shell quoting of $ and backticks)")
     s.add_argument("--data")
+    s.add_argument("--schema", help="validate --data against registered schema NAME[@V]")
+    s.add_argument("--attach", action="append", metavar="FILE", help="attach a deliverable file (sha256 + snapshot <=4MB; repeatable)")
     s.add_argument("--force", action="store_true")
     s.add_argument("--allow-dirty", action="store_true", help="close even if the worktree has untracked or modified files")
     s.add_argument("--no-verdict-check", action="store_true", help="skip the board's verdict_tokens check (records a note)")
@@ -2306,11 +2442,15 @@ def build_parser():
     s.add_argument("channel")
     s.add_argument("text", help="'-' reads stdin")
     s.add_argument("--data", help="JSON (or @file)")
+    s.add_argument("--schema", help="validate --data against registered schema NAME[@V]")
+    s.add_argument("--attach", action="append", metavar="FILE", help="attach a file (sha256 + snapshot <=4MB; repeatable)")
 
     s = sub("reply", cmd_reply, "reply in a thread (task id or m<id>)")
     s.add_argument("thread")
     s.add_argument("text", help="'-' reads stdin")
     s.add_argument("--data")
+    s.add_argument("--schema", help="validate --data against registered schema NAME[@V]")
+    s.add_argument("--attach", action="append", metavar="FILE", help="attach a file (sha256 + snapshot <=4MB; repeatable)")
     s.add_argument("--sync", action="store_true", help="also mirror to the synced GitHub issue/PR")
 
     s = sub("read", cmd_read, "read messages: a channel, a thread, or the whole board")
@@ -2318,8 +2458,23 @@ def build_parser():
     s.add_argument("--thread", "-t")
     s.add_argument("--after", type=int, help="only messages with id > this")
     s.add_argument("--roots", action="store_true", help="only thread starters")
+    s.add_argument("--summary", action="store_true", help="compact one-line digest per thread")
     s.add_argument("--limit", "-n", type=int, default=30)
     s.add_argument("--all-boards", action="store_true")
+
+    s = sub("schemas", cmd_schemas, "versioned JSON schemas: ls | add NAME@V --spec JSON | show NAME[@V] | rm NAME@V")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "show", "rm"])
+    s.add_argument("ref", nargs="?", help="NAME@V (or NAME for show)")
+    s.add_argument("--spec", help="JSON schema object (or @file)")
+    s.add_argument("--description", default="")
+
+    s = sub("react", cmd_react, "attach a lightweight non-mutating reaction tag to a task or message")
+    s.add_argument("target", help="task id (t_...) or message id (m<id>)")
+    s.add_argument("tag", help="short tag or emoji (1-32 non-whitespace chars)")
+    s.add_argument("--rm", action="store_true", help="remove your reaction")
+
+    s = sub("artifacts", cmd_artifacts, "list files attached to a task or message")
+    s.add_argument("target", help="task id (t_...) or message id (m<id>)")
 
     s = sub("ask", cmd_ask, "post a question and block until someone else replies (exit 3 on timeout; --wait 0s posts and exits 0)")
     s.add_argument("channel", nargs="?")

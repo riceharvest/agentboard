@@ -544,14 +544,23 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         (task["id"],)).fetchall()
     dtxt = ""
     if deps:
-        dtxt = "\nRESULTS OF THE TASKS THIS ONE DEPENDS ON:\n" + "\n".join(
-            f"- {d['id']} {d['title']}: {(d['result'] or '').strip()[:1500]}" for d in deps) + "\n"
+        dep_lines = []
+        for d in deps:
+            line = f"- {d['id']} {d['title']}: {(d['result'] or '').strip()[:1500]}"
+            arts = store.list_artifacts(conn, d["id"])
+            if arts:
+                aline = ", ".join(f"{x['name']} ({x['sha256'][:8]} {x['stored_path'] or x['orig_path']})" for x in arts[:8])
+                line += f"\n  artifacts: {aline}"
+            dep_lines.append(line)
+        dtxt = "\nRESULTS OF THE TASKS THIS ONE DEPENDS ON:\n" + "\n".join(dep_lines) + "\n"
     notes = list(reversed(store.thread_messages(conn, task["id"], limit=12)))  # newest first, like the old query
     ntxt = ""
     if notes:
         ntxt = "\nNOTES SO FAR (earlier attempts and other agents, oldest first):\n" + "\n".join(
             f"- [{store.fmt_ts(n['ts'])} {n['author']}] {(n['body'] or '')[:1200]}" for n in reversed(notes)) + "\n"
     labels = json.loads(task["labels"] or "{}")
+    rschema = labels.get("result_schema")
+    rschema_txt = f"\nRESULT SCHEMA: `ab done` must include `--schema {rschema} --data '{{...}}'` matching schema {rschema} (`ab schemas show {rschema}`).\n" if rschema else ""
     ctx = ""
     if labels.get("reply_to"):
         try:
@@ -563,7 +572,7 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                         actor=actor, board=task["board"], context=ctx, park=park_resume(conn, task),
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
-                        resume=limit_resume_text(conn, task, workdir) + verify_text(conn, task),
+                        resume=limit_resume_text(conn, task, workdir) + verify_text(conn, task) + rschema_txt,
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 

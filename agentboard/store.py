@@ -94,6 +94,8 @@ DEFAULTS = {
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
     "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
     "resource_locks": {},       # resource name -> flock file: that resource is held by whoever really holds the lock (card found by pid ancestry), not by claimed cards with the label
+    "orphan_lock_after": 0,     # e.g. "15m": a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (0 = off)
+    "orphan_lock_keep": [],     # command-line substrings of holders that are never reaped (e.g. a managed engine)
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
     "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
     "require_compute_class": False,  # true = a card whose labels declare neither cpu nor gpu does not launch (it waits with a compute: gate reason)
@@ -2168,8 +2170,112 @@ def lock_holder_card(conn, path):
     return (exact or f"pid {hp}"), hp
 
 
-        for n in card_needs(r["labels"]):
-            out.setdefault(n, []).append(r["id"])
+def _pid_tree(root):
+    """root plus every descendant pid (scan of /proc)."""
+    kids = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                pp = int(open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            kids.setdefault(pp, []).append(int(d))
+    out, todo = [], [root]
+    while todo:
+        x = todo.pop()
+        out.append(x)
+        todo += kids.get(x, [])
+    return out
+
+
+def _cpu_ticks(pids):
+    tot = 0
+    for p in pids:
+        try:
+            f = open(f"/proc/{p}/stat").read().rsplit(")", 1)[1].split()
+            tot += int(f[11]) + int(f[12])
+        except (OSError, ValueError, IndexError):
+            pass
+    return tot
+
+
+def lock_owner_card(conn, hp):
+    """Card that OWNS the job holding a lock: a claimed card whose run/park pid is a strict ancestor of the holder,
+    or a claimed card whose id is in the command line chain. A card merely parked ON the holder is a waiter, not an owner."""
+    chain = _pid_chain(hp)
+    anc = {p for p, _ in chain if p != hp}
+    for r in conn.execute("SELECT t.id, t.park, t.status, run.pid AS rpid FROM tasks t LEFT JOIN runs run ON run.id=t.run_id "
+                          "WHERE t.status='claimed' OR t.park IS NOT NULL"):
+        try:
+            pk = json.loads(r["park"] or "null") or {}
+        except ValueError:
+            pk = {}
+        pp = {int(x) for x in (pk.get("pid"), r["rpid"]) if x}
+        if pp & anc:
+            return r["id"]
+    for _, cmd in chain:
+        for m in re.findall(r"t_[0-9a-f]{8}", cmd):
+            row = conn.execute("SELECT status FROM tasks WHERE id=?", (m,)).fetchone()
+            if row and row["status"] == "claimed":
+                return m
+    return None
+
+
+def reap_orphan_locks(conn, log=print):
+    """Free a resource lock whose job has no owner card and does no work. Opt-in (cfg orphan_lock_after, e.g. '15m'; 0 = off):
+    a lock named in cfg resource_locks that is held by a process tree no claimed card owns, whose CPU stays idle for the whole
+    window, is terminated (SIGTERM, then SIGKILL). The usual cause is a launcher card whose agent died after starting a
+    server but before parking on it: the server then holds the GPU for hours while every waiter sits behind it.
+    Holders whose command line matches cfg orphan_lock_keep (default: the managed engine) are never touched."""
+    after = parse_dur(cfg(conn, "orphan_lock_after") or 0) or 0
+    locks = cfg(conn, "resource_locks") or {}
+    if not after or not locks:
+        return []
+    keep = cfg(conn, "orphan_lock_keep") or []
+    row = conn.execute("SELECT value FROM control WHERE key='_orphan_locks'").fetchone()
+    state = json.loads(row["value"]) if row else {}
+    t, reaped, new = now(), [], {}
+    for name, path in locks.items():
+        path = os.path.expanduser(str(path))
+        hp = _flock_holder_pid(path)
+        if hp is None or lock_owner_card(conn, hp):
+            continue
+        tree = _pid_tree(hp)
+        cmds = " | ".join(c for _, c in _pid_chain(hp)) + " | " + " | ".join(
+            open(f"/proc/{p}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace") for p in tree if os.path.exists(f"/proc/{p}/cmdline"))
+        if any(k and k in cmds for k in keep):
+            continue
+        ticks = _cpu_ticks(tree)
+        st = state.get(name) or {}
+        if st.get("pid") != hp or ticks - st.get("ticks", ticks) > 0.02 * 100 * max(t - st.get("at", t), 1):
+            st = {"pid": hp, "since": t, "ticks": ticks, "at": t}  # new holder, or it is working: restart the idle window
+        else:
+            st["ticks"], st["at"] = ticks, t
+        new[name] = st
+        if t - st["since"] < after:
+            continue
+        import signal as _sig
+        for sg in (_sig.SIGTERM, _sig.SIGKILL):
+            for p in reversed(tree):
+                try:
+                    os.kill(p, sg)
+                except OSError:
+                    pass
+            time.sleep(3)
+            if _flock_holder_pid(path) is None:
+                break
+        event(conn, None, "runner", "orphan_lock_reaped", {"resource": name, "pid": hp, "idle_s": int(t - st["since"]),
+                                                          "cmd": cmds[:300], "why": "no claimed card owns it and its CPU was idle"})
+        log(f"orphan {name} lock held by pid {hp} idle {int(t - st['since'])}s with no owner card: terminated")
+        reaped.append((name, hp))
+        new.pop(name, None)
+    conn.execute("INSERT INTO control(key,value) VALUES('_orphan_locks',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (json.dumps(new),))
+    return reaped
+
+
+def resource_holders(conn, exclude=None):
+    out = {}
     locks = cfg(conn, "resource_locks") or {}
     for n, path in locks.items():
         # a resource with a lock file is held by whoever really holds that lock, not by cards that merely claimed a gpu label

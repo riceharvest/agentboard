@@ -70,6 +70,8 @@ machine.
     ab add "..." --label needs=gpu3060,b70 --why TEXT         # named resources: the card waits while any is full or listed in resources_down; `ab resources` shows holders
     ab config set resources_down '["gpu3060"]' --why TEXT     # mark a resource broken: nothing needing it launches
     ab config set resource_locks '{"gpu":"/path/gpu.lock"}' --why TEXT  # a resource with a flock file is held by whoever really holds that lock (card matched by pid ancestry), not by claimed cards carrying the label
+    ab config set orphan_lock_after 15m --why TEXT            # a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (orphan_lock_keep: command-line substrings never reaped)
+    ab config set gateway_window 1h --why TEXT                # hermes gateway losses only count against a card's retry budget when they are consecutive and this recent
     ab add "..." --cpu | --gpu --why TEXT                     # declare the compute a card needs (labels cpu=1 / gpu=1)
     ab config set require_compute_class true --why TEXT       # every card must declare; an undeclared one waits with a compute: gate
     ab add "..." --cmd CMD --label every=30m --label max_runs=48   # recurring card: reopens itself (same id) after each done; also ends=<ISO|epoch>

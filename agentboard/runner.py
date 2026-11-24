@@ -892,6 +892,11 @@ class Runner:
             for name, tid, n in automation.run_watchers(c):
                 self.log(f"watcher {name} fired on {n} event(s) -> {tid}")
         except Exception as e:
+        try:
+            with tx(c):
+                store.reap_orphan_locks(c, self.log)
+        except Exception as e:
+            self.log(f"orphan lock sweep error: {e!r}")
             self.log(f"watchers error: {e!r}")
         for name, res in automation.run_syncs(c).items():
             if res.get("error") or any(res.values()):
@@ -1874,8 +1879,12 @@ class Runner:
                     # fault: no attempt, requeue. Bounded so a gateway that keeps dying cannot loop forever.
                     down = not GATEWAY_LOST_RE.search(err or "")
                     sid = H.hermes_session_id_from_log(err) or res.session_id
-                    prior = c.execute("SELECT COUNT(*) FROM runs WHERE task_id=? AND outcome IN ('gateway_lost','gateway_down') "
-                                      "AND id!=?", (ch.task_id, ch.run_id)).fetchone()[0]
+                    prior = 0  # consecutive gateway losses just before this run, within cfg gateway_window (an old outage must not spend today's budget)
+                    gw_since = now() - (parse_dur(cfg(c, "gateway_window") or "1h") or 3600)
+                    for pr in c.execute("SELECT outcome, started_at FROM runs WHERE task_id=? AND id!=? ORDER BY id DESC", (ch.task_id, ch.run_id)):
+                        if pr["outcome"] not in ("gateway_lost", "gateway_down") or (pr["started_at"] or 0) < gw_since:
+                            break
+                        prior += 1
                     if prior < GATEWAY_LOST_MAX:
                         if down:
                             # a start failure returns in a second, so without a cool-down the bounded retries burn in

@@ -2180,6 +2180,24 @@ def home_trash_add(conn, path, delay_s):
     conn.execute("INSERT INTO control(key,value) VALUES('_home_trash',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(q),))
 
 
+def home_in_use(path):
+    """True when a live process has `path` in its command line or as its working directory. A card that parks on a
+    background job started from its run home (scripts, logs) must not lose that home when the agent run ends."""
+    path = os.path.realpath(path).rstrip("/")
+    me = os.getpid()
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            if path in open(f"/proc/{d}/cmdline", "rb").read().decode("utf-8", "replace"):
+                return True
+            if os.path.realpath(os.readlink(f"/proc/{d}/cwd")).startswith(path + "/"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def home_trash_sweep(conn):
     """Delete queued run homes whose delay passed. Returns how many were removed."""
     import shutil
@@ -2187,7 +2205,7 @@ def home_trash_sweep(conn):
     q = json.loads(row["value"]) if row else []
     keep, n = [], 0
     for path, due in q:
-        if due <= now():
+        if due <= now() and not home_in_use(path):
             shutil.rmtree(path, ignore_errors=True)
             n += 1
         else:

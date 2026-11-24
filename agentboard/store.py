@@ -96,6 +96,7 @@ DEFAULTS = {
     "resource_locks": {},       # resource name -> flock file: that resource is held by whoever really holds the lock (card found by pid ancestry), not by claimed cards with the label
     "home_cleanup_delay": "0s", # a finished hermes run's private home (a profile the shared gateway may still be writing its last turn into) is deleted this long after the run ends (0 = at once)
     "orphan_lock_after": 0,     # e.g. "15m": a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (0 = off)
+    "idle_lock_after": 0,       # e.g. "45m": a resource_locks lock whose holder IS owned (a card parked on it) but whose CPU stays idle that long is terminated too (0 = off)
     "orphan_lock_keep": [],     # command-line substrings of holders that are never reaped (e.g. a managed engine)
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
     "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
@@ -2254,8 +2255,9 @@ def reap_orphan_locks(conn, log=print):
     server but before parking on it: the server then holds the GPU for hours while every waiter sits behind it.
     Holders whose command line matches cfg orphan_lock_keep (default: the managed engine) are never touched."""
     after = parse_dur(cfg(conn, "orphan_lock_after") or 0) or 0
+    idle_owned = parse_dur(cfg(conn, "idle_lock_after") or 0) or 0
     locks = cfg(conn, "resource_locks") or {}
-    if not after or not locks:
+    if not (after or idle_owned) or not locks:
         return []
     keep = cfg(conn, "orphan_lock_keep") or []
     row = conn.execute("SELECT value FROM control WHERE key='_orphan_locks'").fetchone()
@@ -2264,7 +2266,11 @@ def reap_orphan_locks(conn, log=print):
     for name, path in locks.items():
         path = os.path.expanduser(str(path))
         hp = _flock_holder_pid(path)
-        if hp is None or lock_owner_card(conn, hp):
+        if hp is None:
+            continue
+        # no owner card: `after`; owned (e.g. a card parked on its server) but doing nothing: the longer idle_lock_after
+        limit = idle_owned if lock_owner_card(conn, hp) else after
+        if not limit:
             continue
         tree = _pid_tree(hp)
         cmds = " | ".join(c for _, c in _pid_chain(hp)) + " | " + " | ".join(
@@ -2278,7 +2284,7 @@ def reap_orphan_locks(conn, log=print):
         else:
             st["ticks"], st["at"] = ticks, t
         new[name] = st
-        if t - st["since"] < after:
+        if t - st["since"] < limit:
             continue
         import signal as _sig
         for sg in (_sig.SIGTERM, _sig.SIGKILL):
@@ -2291,7 +2297,7 @@ def reap_orphan_locks(conn, log=print):
             if _flock_holder_pid(path) is None:
                 break
         event(conn, None, "runner", "orphan_lock_reaped", {"resource": name, "pid": hp, "idle_s": int(t - st["since"]),
-                                                          "cmd": cmds[:300], "why": "no claimed card owns it and its CPU was idle"})
+                                                          "cmd": cmds[:300], "why": "no claimed card owns it, or it is owned but its CPU stayed idle"})
         log(f"orphan {name} lock held by pid {hp} idle {int(t - st['since'])}s with no owner card: terminated")
         reaped.append((name, hp))
         new.pop(name, None)

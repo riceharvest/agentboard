@@ -71,6 +71,7 @@ machine.
     ab config set resources_down '["gpu3060"]' --why TEXT     # mark a resource broken: nothing needing it launches
     ab config set resource_locks '{"gpu":"/path/gpu.lock"}' --why TEXT  # a resource with a flock file is held by whoever really holds that lock (card matched by pid ancestry), not by claimed cards carrying the label
     ab config set orphan_lock_after 15m --why TEXT            # a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (orphan_lock_keep: command-line substrings never reaped)
+    ab config set idle_lock_after 45m --why TEXT              # same sweep for a lock whose holder IS owned (a card parked on its server) but whose CPU stays idle that long
     ab config set gateway_window 1h --why TEXT                # hermes gateway losses only count against a card's retry budget when they are consecutive and this recent
     ab config set home_cleanup_delay 10m --why TEXT           # a finished hermes run's private home is deleted this long after the run ends, so the shared gateway can settle its last turn (deleting it at once made the gateway fail every live run)
     ab add "..." --cpu | --gpu --why TEXT                     # declare the compute a card needs (labels cpu=1 / gpu=1)

@@ -97,6 +97,8 @@ DEFAULTS = {
     "home_cleanup_delay": "0s", # a finished hermes run's private home (a profile the shared gateway may still be writing its last turn into) is deleted this long after the run ends (0 = at once)
     "orphan_lock_after": 0,     # e.g. "15m": a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (0 = off)
     "idle_lock_after": 0,       # e.g. "45m": a resource_locks lock whose holder IS owned (a card parked on it) but whose CPU stays idle that long is terminated too (0 = off)
+    "novram_lock_after": 0,     # e.g. "20m": a resource_locks lock whose holder tree allocates no VRAM (>= novram_min_mib) that long is a CPU job squatting on the GPU and is terminated (0 = off)
+    "novram_min_mib": 256,      # VRAM below this counts as none (a CPU-only llama-server that merely initialised Vulkan holds ~22 MiB)
     "orphan_lock_keep": [],     # command-line substrings of holders that are never reaped (e.g. a managed engine)
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
     "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
@@ -2233,6 +2235,38 @@ def _pid_tree(root):
     return out
 
 
+def _vram_kib(pids):
+    """VRAM resident for these pids from DRM fdinfo (one count per drm-client-id)."""
+    seen, tot = set(), 0
+    for p in pids:
+        try:
+            fds = os.listdir(f"/proc/{p}/fdinfo")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                txt = open(f"/proc/{p}/fdinfo/{fd}").read()
+            except OSError:
+                continue
+            if "drm-driver" not in txt:
+                continue
+            cid, res = None, 0
+            for ln in txt.splitlines():
+                k, _, v = ln.partition(":")
+                if k == "drm-client-id":
+                    cid = v.strip()
+                elif k.startswith("drm-resident-vram") or k.startswith("drm-total-vram"):
+                    try:
+                        res = max(res, int(v.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+            if cid is not None and cid in seen:
+                continue
+            seen.add(cid)
+            tot += res
+    return tot
+
+
 def _cpu_ticks(pids):
     tot = 0
     for p in pids:
@@ -2274,8 +2308,10 @@ def reap_orphan_locks(conn, log=print):
     Holders whose command line matches cfg orphan_lock_keep (default: the managed engine) are never touched."""
     after = parse_dur(cfg(conn, "orphan_lock_after") or 0) or 0
     idle_owned = parse_dur(cfg(conn, "idle_lock_after") or 0) or 0
+    novram = parse_dur(cfg(conn, "novram_lock_after") or 0) or 0
+    min_kib = int(cfg(conn, "novram_min_mib") or 256) * 1024
     locks = cfg(conn, "resource_locks") or {}
-    if not (after or idle_owned) or not locks:
+    if not (after or idle_owned or novram) or not locks:
         return []
     keep = cfg(conn, "orphan_lock_keep") or []
     row = conn.execute("SELECT value FROM control WHERE key='_orphan_locks'").fetchone()
@@ -2299,10 +2335,18 @@ def reap_orphan_locks(conn, log=print):
         st = state.get(name) or {}
         if st.get("pid") != hp or ticks - st.get("ticks", ticks) > 0.02 * 100 * max(t - st.get("at", t), 1):
             st = {"pid": hp, "since": t, "ticks": ticks, "at": t}  # new holder, or it is working: restart the idle window
+        if st.get("pid") == hp and "gpu_at" not in st:
+            st["gpu_at"] = t
+        if _vram_kib(tree) >= min_kib:
+            st["gpu_at"] = t
         else:
             st["ticks"], st["at"] = ticks, t
         new[name] = st
-        if t - st["since"] < limit:
+        cpu_idle = bool(limit) and t - st["since"] >= limit
+        no_gpu = bool(novram) and t - st["gpu_at"] >= novram  # holds the lock but never allocates VRAM: a CPU job squatting on the GPU
+        if no_gpu and not cpu_idle:
+            st["since"] = t - novram
+        if not (cpu_idle or no_gpu):
             continue
         import signal as _sig
         for sg in (_sig.SIGTERM, _sig.SIGKILL):
@@ -2315,8 +2359,8 @@ def reap_orphan_locks(conn, log=print):
             if _flock_holder_pid(path) is None:
                 break
         event(conn, None, "runner", "orphan_lock_reaped", {"resource": name, "pid": hp, "idle_s": int(t - st["since"]),
-                                                          "cmd": cmds[:300], "why": "no claimed card owns it, or it is owned but its CPU stayed idle"})
-        log(f"orphan {name} lock held by pid {hp} idle {int(t - st['since'])}s with no owner card: terminated")
+                                                          "cmd": cmds[:300], "why": "no owner and idle, owned but idle, or holding the lock without allocating VRAM (a CPU job)"})
+        log(f"{name} lock held by pid {hp}: {'no VRAM' if no_gpu and not cpu_idle else 'idle'} for {int(t - st['since'])}s: terminated")
         reaped.append((name, hp))
         new.pop(name, None)
     conn.execute("INSERT INTO control(key,value) VALUES('_orphan_locks',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

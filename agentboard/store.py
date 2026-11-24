@@ -94,6 +94,7 @@ DEFAULTS = {
     "check_fail_every": "1h",   # a failing cmd check emits one check_failed event per series per this interval (never silent, never spammy)
     "resources": {},            # named resources cards declare with label needs=a,b (gpu=1 means needs=gpu): name -> capacity (default 1); a card waits while its resource is full
     "resource_locks": {},       # resource name -> flock file: that resource is held by whoever really holds the lock (card found by pid ancestry), not by claimed cards with the label
+    "home_cleanup_delay": "0s", # a finished hermes run's private home (a profile the shared gateway may still be writing its last turn into) is deleted this long after the run ends (0 = at once)
     "orphan_lock_after": 0,     # e.g. "15m": a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (0 = off)
     "orphan_lock_keep": [],     # command-line substrings of holders that are never reaped (e.g. a managed engine)
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
@@ -2168,6 +2169,31 @@ def lock_holder_card(conn, path):
             if conn.execute("SELECT 1 FROM tasks WHERE id=?", (m,)).fetchone():
                 return m, hp
     return (exact or f"pid {hp}"), hp
+
+
+def home_trash_add(conn, path, delay_s):
+    """Queue a finished run's private home for deletion `delay_s` from now (control key _home_trash)."""
+    row = conn.execute("SELECT value FROM control WHERE key='_home_trash'").fetchone()
+    q = json.loads(row["value"]) if row else []
+    q.append([str(path), now() + delay_s])
+    conn.execute("INSERT INTO control(key,value) VALUES('_home_trash',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(q),))
+
+
+def home_trash_sweep(conn):
+    """Delete queued run homes whose delay passed. Returns how many were removed."""
+    import shutil
+    row = conn.execute("SELECT value FROM control WHERE key='_home_trash'").fetchone()
+    q = json.loads(row["value"]) if row else []
+    keep, n = [], 0
+    for path, due in q:
+        if due <= now():
+            shutil.rmtree(path, ignore_errors=True)
+            n += 1
+        else:
+            keep.append([path, due])
+    if n:
+        conn.execute("UPDATE control SET value=? WHERE key='_home_trash'", (json.dumps(keep),))
+    return n
 
 
 def _pid_tree(root):

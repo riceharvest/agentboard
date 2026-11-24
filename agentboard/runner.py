@@ -894,6 +894,16 @@ class Runner:
         except Exception as e:
         try:
             with tx(c):
+                store.home_trash_sweep(c)
+        except Exception as e:
+            self.log(f"home cleanup error: {e!r}")
+        try:
+            with tx(c):
+                store.reap_orphan_locks(c, self.log)
+        except Exception as e:
+            self.log(f"orphan lock sweep error: {e!r}")
+        try:
+            with tx(c):
                 store.reap_orphan_locks(c, self.log)
         except Exception as e:
             self.log(f"orphan lock sweep error: {e!r}")
@@ -1947,7 +1957,12 @@ class Runner:
             if hermes_home:
                 H.export_hermes_session(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-session.jsonl")
                 H.keep_hermes_agent_log(hermes_home, store.HOME / "runs" / f"{ch.run_id}.hermes-agent.log")
-                shutil.rmtree(hermes_home, ignore_errors=True)
+                delay = parse_dur(cfg(c, "home_cleanup_delay") or 0) or 0
+                if delay:  # the shared gateway may still settle the last turn into this home: deleting it now makes the gateway fail every live run
+                    with tx(c):
+                        store.home_trash_add(c, hermes_home, delay)
+                else:
+                    shutil.rmtree(hermes_home, ignore_errors=True)
 
 
 GATEWAY_LOST_RE = re.compile(r"Gateway disconnected")

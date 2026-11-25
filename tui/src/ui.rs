@@ -374,6 +374,12 @@ fn second_line(app: &App, t: &Task) -> Option<String> {
             return Some(format!("  ▶ {}:{} {}{}", c.harness, c.model.clone().unwrap_or_default(), fmt_dur(c.elapsed_s + app.age()), stall));
         }
     }
+    if t.state == "running" {
+        if let Some(p) = t.park.as_ref().filter(|p| p.active()) {
+            let el = p.at.map(|at| format!(" {}", fmt_dur((app.now() - at).max(0.0)))).unwrap_or_default();
+            return Some(format!("  ⏸ {}{el}", p.what()));
+        }
+    }
     if t.is_negative() {
         return Some("  – negative outcome".into());
     }

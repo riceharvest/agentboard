@@ -166,7 +166,7 @@ def _build(conn, t0, actor, board, closed, events_after, events_limit, tail):
     held = store.busy_dirs(conn)
     for d in tasks:
         if d["state"] == "ready":
-            why = store.workdir_wait_reason(conn, d, held)
+            why = (store.compute_block(conn, d["labels"]) if d["runnable"] and d["kind"] != "cmd" else None) or store.workdir_wait_reason(conn, d, held)
             if why:
                 d["wait_reason"] = why
 

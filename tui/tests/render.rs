@@ -593,3 +593,21 @@ fn ops_screen_displays_pacer_and_auto_worktree_state() {
     let s2 = draw(&mut a, 150, 44);
     has(&s2, &["pacer off (10m, 2/tick)", "auto_worktree on"]);
 }
+
+#[test]
+fn board_running_lane_shows_parked_background_job() {
+    let mut a = app(false);
+    let now = a.snap.generated_at;
+    let id = id_of(&a, "Score the overnight eval");
+    {
+        let t = a.snap.tasks.iter_mut().find(|t| t.id == id).unwrap();
+        t.state = "running".into();
+        t.park = Some(ab_tui::model::Park {
+            pid: Some(424242),
+            at: Some(now - 125.0),
+            ..Default::default()
+        });
+    }
+    let s = draw(&mut a, 220, 44);
+    has(&s, &["running 3/3", "⏸ pid 424242 2m05s"]);
+}

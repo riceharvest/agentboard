@@ -72,6 +72,7 @@ TOOLS = {
                   "slots": ("--slots", I), "do": ("--do", S)}, []),
     "ab_config": ("Runtime settings: ls|get|set|unset.", "config", ["action", "key", "value"], {}, []),
     "ab_resources": ("Named resources cards declare with label needs=a,b (gpu=1 = needs gpu): capacity, who holds each, which are down, how many cards wait.", "resources", [], {}, []),
+    "ab_waves": ("Dependency waves, critical path and parallelism of the unfinished cards (est_s label, else historic run time); resource-pool wall lower bound.", "waves", [], {"all_boards": ("--all-boards", B)}, []),
     "ab_guide": ("How agents use this board.", "guide", [], {}, []),
     "ab_post": ("Start a thread in a channel. Mention agents with @name.", "post", ["channel", "text"], {"data": ("--data", S)}, ["channel", "text"]),
     "ab_reply": ("Reply in a thread (task id or m<id>). sync=true mirrors it to the synced GitHub issue/PR.", "reply",

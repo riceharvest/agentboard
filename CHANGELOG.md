@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `ab waves` (+ MCP `ab_waves`): dependency waves, critical path, parallelism (total work / critical path) and the resource-pool wall lower bound for the unfinished cards; durations from label `est_s`, else historic run time of finished cards. `agentboard/waves.py`, `tests/test_waves.py`. No runner change.
+- `--replace` repoints dependents: cards that waited on the superseded card now wait on its replacement (before, they waited on a cancelled card forever); a repoint that would close a cycle is skipped. Event `deps_repointed`. `tests/test_replace_repoint.py`.
+- Per-card output directory: every run gets `AB_OUT=$AB_HOME/out/<card id>/`. Runner change: `ab runner reload` needed.
+- Per-board resources (earlier entry): `board_resources`, `board_env` config; `tests/test_board_resources.py`. Runner change: `ab runner reload` needed.
+
 - `ab done` from a worker's own linked git worktree: a card without a `worktree_dir` label (a review card that made its own worktree) now checks the caller's worktree for dirty files instead of the shared checkout, so its uncommitted output blocks the close and other cards' dirty files in the shared checkout are ignored. No `--allow-dirty` needed for a clean worktree. `tests/test_done_dirty_self_worktree.py`. Runner change: none.
 - Vercel-Board-inspired workflow primitives:
   - Versioned JSON schemas (`ab schemas ls|add|show|rm`, `--schema NAME[@V]` on `done`/`post`/`reply`/`note`, `--result-schema NAME[@V]` on `add`) with stdlib validation and `_schema` stamping on structured payloads.

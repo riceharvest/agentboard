@@ -70,6 +70,11 @@ machine.
     ab add "..." --label needs=gpu3060,b70 --why TEXT         # named resources: the card waits while any is full or listed in resources_down; `ab resources` shows holders
     ab config set resources_down '["gpu3060"]' --why TEXT     # mark a resource broken: nothing needing it launches
     ab config set resource_locks '{"gpu":"/path/gpu.lock"}' --why TEXT  # a resource with a flock file is held by whoever really holds that lock (card matched by pid ancestry), not by claimed cards carrying the label
+    ab waves [-B board | --all-boards] [--json]                # dependency waves, critical path, parallelism and the resource-pool wall lower bound of the unfinished cards (label est_s=SECONDS, else the median run time of finished cards); wall time is the critical path or the busiest pool, not the card count
+    ab add "..." --key fix:step:3 --replace --why TEXT         # cancels the open/claimed card holding the key AND repoints the cards that waited on it to the new card (a cycle-closing repoint is skipped), so nothing waits on a cancelled card
+    # every run gets $AB_OUT = $AB_HOME/out/<card id>/ : write a card's artifacts there (never into a file other cards also write)
+    ab config set board_resources '{"proj":{"gpu":"gpu:proj"}}' --why TEXT  # a card on board `proj` that needs gpu (gpu=1) needs the pool `gpu:proj` instead: own capacity, own resource_locks file, own resources_down entry (one board gets its own GPU)
+    ab config set board_env '{"proj":{"NAME":"1"}}' --why TEXT  # environment added to every run launched for that board's cards (an opt-in that must hold for one board only)
     ab config set orphan_lock_after 15m --why TEXT            # a resource_locks lock whose holder no claimed card owns and whose CPU stays idle that long is terminated (orphan_lock_keep: command-line substrings never reaped)
     ab config set idle_lock_after 45m --why TEXT              # same sweep for a lock whose holder IS owned (a card parked on its server) but whose CPU stays idle that long
     ab config set novram_lock_after 20m --why TEXT            # a resource_locks lock whose holder tree allocates no VRAM (novram_min_mib, default 256) that long is a CPU job squatting on the GPU: terminated

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -100,6 +101,8 @@ DEFAULTS = {
     "novram_lock_after": 0,     # e.g. "20m": a resource_locks lock whose holder tree allocates no VRAM (>= novram_min_mib) that long is a CPU job squatting on the GPU and is terminated (0 = off)
     "novram_min_mib": 256,      # VRAM below this counts as none (a CPU-only llama-server that merely initialised Vulkan holds ~22 MiB)
     "orphan_lock_keep": [],     # command-line substrings of holders that are never reaped (e.g. a managed engine)
+    "board_resources": {},      # {board: {resource: alias}}: a card on that board that needs `resource` (gpu=1 means gpu) needs the pool `alias` instead: own capacity, own resource_locks file, own resources_down entry (e.g. {"proj": {"gpu": "gpu:proj"}} gives one board its own GPU)
+    "board_env": {},            # {board: {NAME: value}}: environment added to every run launched for a card of that board (opt-ins that must hold for one board only)
     "resources_down": [],       # resource names that are broken right now (e.g. a GPU off the bus): cards needing them wait
     "merge_push": False,        # true = `ab merge` pushes the merged branch to origin afterwards (the owner's "verified work is never local-only" policy)
     "require_compute_class": False,  # true = a card whose labels declare neither cpu nor gpu does not launch (it waits with a compute: gate reason)
@@ -136,6 +139,7 @@ DEFAULTS = {
     "stall_idle_cooldown": "off",  # opt-in: an idle kill also cools the run's bucket for this long, like a limit (off = no cooldown)
     "stall_idle_blind": "off",  # opt-in: also apply the idle rule to harnesses with no log to read, using output growth (they may print only at exit)
     "limit_resume": "off",      # opt-in: workers checkpoint (commits + progress file); a retry after a limit death gets that state in its brief
+    "inject_priors": False,     # opt-in: append compact auto-mined pitfalls & review priors (from `ab mine --write`) to worker briefs
     "limit_skip_after": "2",    # with limit_resume on: a card's route (bucket) with this many limit deaths is skipped for that card (0/off = never)
     "verify_rounds": "2",       # cards with --verify CMD: failed verifications that reopen the card before it is failed (0 = the first failure fails it)
     "release_loop_runs": "3",   # a card whose last N runs each ended released (no `ab done`) within release_loop_minutes gets a not_before backoff (0/off = never)
@@ -731,6 +735,8 @@ def park_cond(park):
         return f"file {park['file']} (stable for {fmt_dur(park.get('grace_s') or 0)})"
     if park.get("resource"):
         return f"resource {park['resource']} to be free"
+    if park.get("lock"):
+        return f"lock {park['lock']} to be free"
     return "a wake condition"
 
 
@@ -936,6 +942,15 @@ def add_task(conn, actor, title, body="", channel="main", labels=None, priority=
             conn.execute("UPDATE tasks SET status='cancelled', owner=NULL, lease_until=NULL, park=NULL, result=?, updated_at=? WHERE id=?",
                          (why, t, superseded))
             event(conn, superseded, actor, "cancelled", {"why": why})
+            # cards that waited on the superseded card now wait on its replacement (a cancelled dep is never "done": they would sit forever)
+            moved = []
+            for r in conn.execute("SELECT task_id FROM deps WHERE dep_id=? AND task_id!=?", (superseded, tid)).fetchall():
+                conn.execute("DELETE FROM deps WHERE task_id=? AND dep_id=?", (r["task_id"], superseded))
+                if not would_cycle(conn, r["task_id"], tid):
+                    conn.execute("INSERT OR IGNORE INTO deps(task_id,dep_id) VALUES(?,?)", (r["task_id"], tid))
+                    moved.append(r["task_id"])
+            if moved:
+                event(conn, tid, actor, "deps_repointed", {"from": superseded, "to": tid, "tasks": moved})
         event(conn, tid, actor, "created", {"title": title, "why": card_why, "deps": list(deps), "tier": tr, "labels": lab,
                                             **({"runnable": False} if not runnable else {}),
                                             **({"cmd": cmd} if cmd else {}), **({"key": key} if key else {}),
@@ -1224,6 +1239,13 @@ def is_git_dir(d):
         if (cur / ".git").exists():
             return True
     return False
+
+
+def out_dir(task_id):
+    """Per-card output directory ($AB_OUT in a run): a card writes its artifacts here, never into a file other cards also write."""
+    p = HOME / "out" / str(task_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def lockfree(conn, labels):
@@ -1711,15 +1733,15 @@ def defer(conn, tid, actor, until=None, after=(), why="", force=False):
     return row["id"]
 
 
-def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False, reply=None, resource=None):
+def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60.0, force=False, reply=None, resource=None, lock=None):
     """Park a claimed card on a long external job: release the claim WITHOUT counting an attempt and record
-    the wake condition (process gone, or file present and stable for grace_s). The runner wakes it later."""
+    the wake condition (process gone, file stable, reply, resource or OS flock). The runner wakes it later."""
     if not note or not note.strip():
         raise ValueError("ab park needs --note: what you wait for and what the next agent should do with the result")
     if len(note.split()) < 4 or len(note.strip()) < 20:
         raise ValueError("ab park --note must say what you wait for and what the next agent should do (at least 4 words)")
-    if bool(pid) + bool(file) + bool(reply) + bool(resource) != 1:
-        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD or --resource NAME")
+    if bool(pid) + bool(file) + bool(reply) + bool(resource) + bool(lock) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD, --resource NAME or --lock PATH")
     with tx(conn):
         row = _owned(conn, tid, actor, force)
         if row["status"] not in ("open", "claimed"):
@@ -1736,6 +1758,8 @@ def park(conn, tid, actor, note, pid=None, pid_start=None, file=None, grace_s=60
             spec.update(reply_thread=th, reply_after=mine or last, reply_by=actor)
         elif resource:
             spec.update(resource=str(resource).strip().lower())
+        elif lock:
+            spec.update(lock=os.path.abspath(os.path.expanduser(str(lock).strip())))
         elif pid:
             spec.update(pid=int(pid), pid_start=pid_start)
         else:
@@ -2102,6 +2126,18 @@ def card_needs(labels):
     return names
 
 
+def board_needs(conn, labels, board=None):
+    """card_needs with the board's resource aliases applied (cfg board_resources)."""
+    names = card_needs(labels)
+    alias = ((cfg(conn, "board_resources") or {}).get(board) or {}) if board else {}
+    return [str(alias.get(n, n)).lower() for n in names]
+
+
+def board_env(conn, board):
+    """Extra environment for runs of this board's cards (cfg board_env)."""
+    return {str(k): str(v) for k, v in ((cfg(conn, "board_env") or {}).get(board) or {}).items()}
+
+
 def compute_class(labels):
     """'gpu' | 'cpu' | None: which compute a card declares it needs (`gpu=1`, `cpu=1` or needs=gpu/cpu)."""
     return next((n for n in card_needs(labels) if n in ("gpu", "cpu")), None)
@@ -2114,11 +2150,6 @@ def compute_block(conn, labels):
     return "compute: card must declare its compute (label cpu=1 or gpu=1; needs=cpu/gpu also works)"
 
 
-def resource_holders(conn, exclude=None):
-    out = {}
-    for r in conn.execute("SELECT id, labels FROM tasks WHERE status='claimed'"):
-        if r["id"] == exclude:
-            continue
 def _flock_holder_pid(path):
     """Pid of the process holding an exclusive flock on `path` (read from /proc/locks), or None when it is free."""
     try:
@@ -2186,34 +2217,96 @@ def home_in_use(path):
     """True when a live process has `path` in its command line or as its working directory. A card that parks on a
     background job started from its run home (scripts, logs) must not lose that home when the agent run ends."""
     path = os.path.realpath(path).rstrip("/")
-    me = os.getpid()
+    lsp = path + "/lsp/"  # the shared gateway's language servers (pyright, ...) live and run INSIDE a served profile; they are
+    me = os.getpid()      # not a card's background job, and `hermes profile delete` stops them, so they never pin a home
     for d in os.listdir("/proc"):
         if not d.isdigit() or int(d) == me:
             continue
         try:
-            if path in open(f"/proc/{d}/cmdline", "rb").read().decode("utf-8", "replace"):
+            if path in open(f"/proc/{d}/cmdline", "rb").read().decode("utf-8", "replace").replace(lsp, ""):
                 return True
-            if os.path.realpath(os.readlink(f"/proc/{d}/cwd")).startswith(path + "/"):
+            cwd = os.path.realpath(os.readlink(f"/proc/{d}/cwd"))
+            if cwd.startswith(path + "/") and not (cwd + "/").startswith(lsp):
                 return True
         except OSError:
             continue
     return False
 
 
+def remove_run_home(path, timeout=90):
+    """Delete a finished hermes run home; True when it is gone.
+
+    A run home is a profile the shared gateway serves. A bare rmtree pulls its state.db out from under the gateway
+    ("state.db was replaced underneath the gateway"): the hosted-room worker dies, the gateway stops itself and every live
+    session drops with "Gateway disconnected". `hermes profile delete` unserves the profile first, then removes it."""
+    import shutil
+    path = Path(path)
+    if not path.exists():
+        return True
+    hermes = shutil.which("hermes")
+    root = path.parent.parent
+    # only a root with a live gateway control socket has a gateway that can be serving the profile; any other root
+    # (a test rig, a stopped install) gets a plain rmtree, and `hermes` would first install a runtime for it
+    if hermes and path.parent.name == "profiles" and (root / "gateway.sock").exists():
+        env = dict(os.environ, HERMES_HOME=str(root))
+        try:
+            r = subprocess.run([hermes, "profile", "delete", "-y", path.name], env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return not path.exists()
+        if path.exists() and "No profile named" in (r.stdout or "") + (r.stderr or ""):
+            shutil.rmtree(path, ignore_errors=True)  # Hermes does not know this directory as a profile, so no gateway serves it
+        return not path.exists()
+    shutil.rmtree(path, ignore_errors=True)  # no hermes to ask, or not a profile path: nothing serves it
+    return not path.exists()
+
+
+HOME_TRASH_RETRY_S = 300
+HOME_TRASH_MAX_TRIES = 3
+
+
 def home_trash_sweep(conn):
-    """Delete queued run homes whose delay passed. Returns how many were removed."""
+    """Delete queued run homes whose delay passed and that no live process still uses. Returns how many were removed.
+    A home Hermes refuses to delete is retried every HOME_TRASH_RETRY_S, and after HOME_TRASH_MAX_TRIES it is removed
+    with rmtree (a leaked profile costs the gateway more than a delete it did not expect)."""
     import shutil
     row = conn.execute("SELECT value FROM control WHERE key='_home_trash'").fetchone()
     q = json.loads(row["value"]) if row else []
-    keep, n = [], 0
-    for path, due in q:
-        if due <= now() and not home_in_use(path):
+    keep, n, changed = [], 0, False
+    for item in q:
+        path, due = item[0], item[1]
+        tries = item[2] if len(item) > 2 else 0
+        if due > now() or home_in_use(path):
+            keep.append(item)
+            continue
+        changed = True
+        if remove_run_home(path):
+            n += 1
+        elif tries + 1 >= HOME_TRASH_MAX_TRIES:
             shutil.rmtree(path, ignore_errors=True)
             n += 1
         else:
-            keep.append([path, due])
-    if n:
+            keep.append([path, now() + HOME_TRASH_RETRY_S, tries + 1])
+    if changed:
         conn.execute("UPDATE control SET value=? WHERE key='_home_trash'", (json.dumps(keep),))
+    return n
+
+
+def home_trash_enqueue_orphans(conn, profiles_dir, live_run_ids, prefix="ab-run-"):
+    """Queue every `<prefix>N` home under `profiles_dir` whose run N is not live and is not queued yet: homes leaked by a
+    runner that died before its finalize ran (a reload, a crash, a gateway restart). Returns how many were queued."""
+    profiles_dir = Path(profiles_dir)
+    if not profiles_dir.is_dir():
+        return 0
+    row = conn.execute("SELECT value FROM control WHERE key='_home_trash'").fetchone()
+    queued = {item[0] for item in (json.loads(row["value"]) if row else [])}
+    n = 0
+    for d in sorted(profiles_dir.glob(prefix + "[0-9]*")):
+        m = re.fullmatch(re.escape(prefix) + r"(\d+)", d.name)
+        if not m or int(m.group(1)) in live_run_ids or str(d) in queued or not d.is_dir():
+            continue
+        home_trash_add(conn, d, 0)
+        n += 1
     return n
 
 
@@ -2324,8 +2417,6 @@ def reap_orphan_locks(conn, log=print):
             continue
         # no owner card: `after`; owned (e.g. a card parked on its server) but doing nothing: the longer idle_lock_after
         limit = idle_owned if lock_owner_card(conn, hp) else after
-        if not limit:
-            continue
         tree = _pid_tree(hp)
         cmds = " | ".join(c for _, c in _pid_chain(hp)) + " | " + " | ".join(
             open(f"/proc/{p}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace") for p in tree if os.path.exists(f"/proc/{p}/cmdline"))
@@ -2334,20 +2425,20 @@ def reap_orphan_locks(conn, log=print):
         ticks = _cpu_ticks(tree)
         st = state.get(name) or {}
         if st.get("pid") != hp or ticks - st.get("ticks", ticks) > 0.02 * 100 * max(t - st.get("at", t), 1):
-            st = {"pid": hp, "since": t, "ticks": ticks, "at": t}  # new holder, or it is working: restart the idle window
+            st = {"pid": hp, "since": t, "ticks": ticks, "at": t, "gpu_at": st.get("gpu_at") if st.get("pid") == hp else t}  # new holder, or it is working: restart the idle window
+        else:
+            st["ticks"], st["at"] = ticks, t
         if st.get("pid") == hp and "gpu_at" not in st:
             st["gpu_at"] = t
         if _vram_kib(tree) >= min_kib:
             st["gpu_at"] = t
-        else:
-            st["ticks"], st["at"] = ticks, t
         new[name] = st
         cpu_idle = bool(limit) and t - st["since"] >= limit
         no_gpu = bool(novram) and t - st["gpu_at"] >= novram  # holds the lock but never allocates VRAM: a CPU job squatting on the GPU
-        if no_gpu and not cpu_idle:
-            st["since"] = t - novram
         if not (cpu_idle or no_gpu):
             continue
+        if no_gpu and not cpu_idle:
+            st["since"] = t - novram
         import signal as _sig
         for sg in (_sig.SIGTERM, _sig.SIGKILL):
             for p in reversed(tree):
@@ -2376,14 +2467,20 @@ def resource_holders(conn, exclude=None):
         h = lock_holder_card(conn, os.path.expanduser(str(path)))
         if h and h[0] != exclude:
             out.setdefault(str(n).lower(), []).append(h[0])
+    for r in conn.execute("SELECT id, labels, board FROM tasks WHERE status='claimed'"):
+        if r["id"] == exclude:
+            continue
+        for n in board_needs(conn, r["labels"], r["board"]):
+            if n not in {str(k).lower() for k in locks}:
+                out.setdefault(n, []).append(r["id"])
     return out
 
 
-def resource_block(conn, labels, exclude=None):
+def resource_block(conn, labels, exclude=None, board=None):
     """Why a card with these labels cannot start for the resources it needs (down or full), else None."""
     down = {str(x).lower() for x in (cfg(conn, "resources_down") or [])}
     caps = cfg(conn, "resources") or {}
-    names = card_needs(labels)
+    names = board_needs(conn, labels, board)
     if not names:
         return None
     held = resource_holders(conn, exclude)

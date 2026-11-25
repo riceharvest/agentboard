@@ -1,7 +1,10 @@
 """Report done worktree cards whose branch never reached the default branch."""
 import json
+import os
+import shutil
 import subprocess
 import time
+from pathlib import Path
 
 
 def _git(repo, *a):
@@ -77,3 +80,102 @@ def warning(repo, branch):
         return None
     return (f"note: {branch} has {r['ahead']} commit(s) not on {d} "
             f"(land it: git -C {repo} merge {branch})")
+
+
+def _dir_bytes(path):
+    total = 0
+    for root, _, files in os.walk(path, onerror=lambda _: None):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _worktree_repo(wt_path):
+    """Main git repo root for a linked worktree, or None."""
+    rc, common = _git(wt_path, "rev-parse", "--git-common-dir")
+    if rc != 0 or not common:
+        return None
+    p = Path(common)
+    if not p.is_absolute():
+        p = (Path(wt_path) / p).resolve()
+    return str(p.parent) if p.name == ".git" else str(p)
+
+
+def prune_worktrees(c, wt_root, dry_run=True, include_unmerged=False, board=None):
+    """Safely prune finished-task worktrees under `wt_root`.
+
+    Never touches `open` or `claimed` tasks. Skips dirty worktrees and (unless `include_unmerged`)
+    branches that have commits not merged into the default branch.
+    """
+    wt_root = Path(wt_root)
+    rep = {"dry_run": bool(dry_run), "removed": [], "skipped_active": 0, "skipped_dirty": [],
+           "skipped_unmerged": [], "errors": [], "bytes_reclaimed": 0}
+    if not wt_root.is_dir():
+        return rep
+    tasks = {}
+    for r in c.execute("SELECT id, board, status, workdir, labels FROM tasks"):
+        tasks[r["id"]] = dict(r)
+    repos_to_prune = set()
+    default_cache = {}
+    for entry in sorted(wt_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        tid = entry.name
+        t = tasks.get(tid)
+        if board and (not t or t["board"] != board):
+            continue
+        if t and t["status"] in ("open", "claimed"):
+            rep["skipped_active"] += 1
+            continue
+        lb = json.loads(t["labels"] or "{}") if t else {}
+        br = lb.get("worktree_branch") or f"ab/{tid}"
+        repo = _worktree_repo(entry) or (t["workdir"] if t else None)
+        # Check cleanliness if valid git worktree
+        rc_st, st_out = _git(entry, "status", "--porcelain")
+        if rc_st == 0 and st_out:
+            rep["skipped_dirty"].append({"id": tid, "path": str(entry), "status": t["status"] if t else "missing"})
+            continue
+        # Check merge status if we know the repo
+        if repo and os.path.isdir(repo) and not include_unmerged:
+            if repo not in default_cache:
+                default_cache[repo] = default_branch(repo)
+            chk = check_branch(repo, br, default_cache[repo])
+            if chk and not chk.get("missing") and chk.get("ahead", 0) > 0:
+                rep["skipped_unmerged"].append({"id": tid, "branch": br, "ahead": chk["ahead"], "repo": repo})
+                continue
+        sz = _dir_bytes(entry)
+        if not dry_run:
+            ok = False
+            if repo and os.path.isdir(repo):
+                rc, _ = _git(repo, "worktree", "remove", "--force", str(entry))
+                ok = (rc == 0)
+                repos_to_prune.add(repo)
+            if not ok and entry.exists():
+                try:
+                    shutil.rmtree(entry)
+                    ok = True
+                except OSError as e:
+                    rep["errors"].append({"id": tid, "error": str(e)})
+                    continue
+            if not ok and entry.exists():
+                rep["errors"].append({"id": tid, "error": "failed to remove"})
+                continue
+        rep["removed"].append({"id": tid, "status": t["status"] if t else "missing", "bytes": sz})
+        rep["bytes_reclaimed"] += sz
+    if not dry_run:
+        for repo in sorted(repos_to_prune):
+            _git(repo, "worktree", "prune")
+    return rep
+
+
+def render_prune(rep):
+    gb = rep["bytes_reclaimed"] / (1024 ** 3)
+    verb = "would remove" if rep["dry_run"] else "removed"
+    lines_out = [
+        f"worktrees prune ({'dry-run' if rep['dry_run'] else 'applied'}): {verb} {len(rep['removed'])} worktree(s) ({gb:.2f} GiB)",
+        f"  skipped: active={rep['skipped_active']} dirty={len(rep['skipped_dirty'])} unmerged={len(rep['skipped_unmerged'])} errors={len(rep['errors'])}",
+    ]
+    return "\n".join(lines_out)

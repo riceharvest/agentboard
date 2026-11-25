@@ -123,12 +123,32 @@ def alive(pid, start):
     return start is None or st == start
 
 
+def _lock_free(path):
+    """True when `path` does not exist or an exclusive non-blocking flock succeeds on it."""
+    if not os.path.exists(path):
+        return True
+    try:
+        import fcntl
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+    except OSError:
+        return True
+
+
 def wake_parked(conn):
-    """Check every parked card's wake condition each tick: pid liveness + start time (like alive()), or the
-    file present and unchanged (size+mtime) for grace_s. Returns [(task_id, why)]. A woken park stays on the
-    card so the next agent's brief carries the note; a new run clears it."""
+    """Check every parked card's wake condition each tick: pid liveness + start time (like alive()),
+    file stability, reply, resource or OS flock. Returns [(task_id, why)]. At most ONE card per
+    shared resource or lock path wakes in a single tick to avoid a thundering herd."""
     woken = []
-    for r in conn.execute("SELECT id, park FROM tasks WHERE status='open' AND park IS NOT NULL").fetchall():
+    woken_resources, woken_locks = set(), set()
+    for r in conn.execute("SELECT id, park FROM tasks WHERE status='open' AND park IS NOT NULL ORDER BY priority DESC, created_at ASC").fetchall():
         spec = json.loads(r["park"])
         if spec.get("woken_at"):
             continue
@@ -140,8 +160,15 @@ def wake_parked(conn):
             if rs:
                 why = f"reply in thread {spec['reply_thread']} from {rs[0]['author']}"
         elif spec.get("resource"):
-            if store.resource_block(conn, {"needs": spec["resource"]}, exclude=r["id"]) is None:
-                why = f"resource {spec['resource']} is free"
+            res_name = spec["resource"]
+            if res_name not in woken_resources and store.resource_block(conn, {"needs": res_name}, exclude=r["id"]) is None:
+                why = f"resource {res_name} is free"
+                woken_resources.add(res_name)
+        elif spec.get("lock"):
+            lpath = spec["lock"]
+            if lpath not in woken_locks and _lock_free(lpath):
+                why = f"lock {lpath} is free"
+                woken_locks.add(lpath)
         elif spec.get("pid"):
             if not alive(spec["pid"], spec.get("pid_start")):
                 why = f"pid {spec['pid']} exited"
@@ -568,11 +595,13 @@ def build_brief(conn, task, workdir, attempt, actor="?"):
                    + automation.thread_context(conn, labels["reply_to"]) + "\n")
         except LookupError:
             pass
+    from . import knowledge
+    priors_txt = knowledge.brief_priors(conn, task)
     return BRIEF.format(id=task["id"], title=task["title"], channel=task["channel"], tier=task["tier"],
                         actor=actor, board=task["board"], context=ctx, park=park_resume(conn, task),
                         attempt=attempt, max_attempts=task["max_attempts"],
                         labels=(" labels=" + ",".join(f"{k}={v}" for k, v in labels.items())) if labels else "",
-                        resume=limit_resume_text(conn, task, workdir) + verify_text(conn, task) + rschema_txt,
+                        resume=limit_resume_text(conn, task, workdir) + verify_text(conn, task) + rschema_txt + priors_txt,
                         workdir=workdir, body=(task["body"] or "(no further description)").strip(), deps=dtxt, notes=ntxt)
 
 
@@ -863,6 +892,22 @@ class Runner:
             self.log(f"endpoint lifecycle error: {e!r}")
         for tid, why in wake_parked(c):
             self.log(f"{tid} park woke: {why}")
+        try:
+            with tx(c):
+                store.home_trash_sweep(c)
+                if time.time() - getattr(self, "_orphan_sweep_at", 0) > 600:  # leaked homes: a runner that died before finalize
+                    self._orphan_sweep_at = time.time()
+                    live = set(self.children) | {r["id"] for r in c.execute("SELECT id FROM runs WHERE ended_at IS NULL")}
+                    k = store.home_trash_enqueue_orphans(c, H.HERMES_HOME / "profiles", live)
+                    if k:
+                        self.log(f"queued {k} leaked run home(s) for deletion")
+        except Exception as e:
+            self.log(f"home cleanup error: {e!r}")
+        try:
+            with tx(c):
+                store.reap_orphan_locks(c, self.log)
+        except Exception as e:
+            self.log(f"orphan lock sweep error: {e!r}")
         self.check_reload_requests()
         try:
             self.drain_op_requests()
@@ -892,21 +937,6 @@ class Runner:
             for name, tid, n in automation.run_watchers(c):
                 self.log(f"watcher {name} fired on {n} event(s) -> {tid}")
         except Exception as e:
-        try:
-            with tx(c):
-                store.home_trash_sweep(c)
-        except Exception as e:
-            self.log(f"home cleanup error: {e!r}")
-        try:
-            with tx(c):
-                store.reap_orphan_locks(c, self.log)
-        except Exception as e:
-            self.log(f"orphan lock sweep error: {e!r}")
-        try:
-            with tx(c):
-                store.reap_orphan_locks(c, self.log)
-        except Exception as e:
-            self.log(f"orphan lock sweep error: {e!r}")
             self.log(f"watchers error: {e!r}")
         for name, res in automation.run_syncs(c).items():
             if res.get("error") or any(res.values()):
@@ -1087,7 +1117,7 @@ class Runner:
             if cb:
                 self.gates[t["id"]] = cb  # require_compute_class: an undeclared card waits, never guesses
                 continue
-            rb = store.resource_block(c, t["labels"])
+            rb = store.resource_block(c, t["labels"], board=t["board"])
             if rb:
                 self.gates[t["id"]] = rb  # the card waits for a named resource (needs=..., gpu=1), nothing is killed
                 continue
@@ -1267,7 +1297,8 @@ class Runner:
             # A shared Hermes gateway runs the agent's tools with ITS environment, not this run's: spell the AB_* values out.
             brief = (f"ENVIRONMENT NOTE: your shell tools do NOT inherit the run's AB_* variables here. Set them in every shell "
                      f"command that calls `ab`: export AB_HOME={shlex.quote(str(store.HOME))} AB_TASK={task['id']} "
-                     f"AB_ACTOR={shlex.quote(owner)} AB_RUN={run_id} AB_BOARD={shlex.quote(cur['board'])}\n\n") + brief
+                     f"AB_ACTOR={shlex.quote(owner)} AB_RUN={run_id} AB_BOARD={shlex.quote(cur['board'])}"
+                     + "".join(f" {k}={shlex.quote(v)}" for k, v in store.board_env(c, cur["board"]).items()) + "\n\n") + brief
         extra_base, arg_warns = H.extra_args_resolved(c, cand)
         if arg_warns:
             with tx(c):
@@ -1286,6 +1317,7 @@ class Runner:
             return False
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         env.update(xenv)
+        env.update(store.board_env(c, cur["board"]))  # cfg board_env: opt-ins that hold for this board only
         hermes_home = None
         if cand.harness == "hermes" and cfg(c, "hermes_isolate"):
             hermes_home = str(H.prepare_hermes_home(H.hermes_run_home(run_id)))
@@ -1297,7 +1329,7 @@ class Runner:
         home = str(store.HOME)
         progress_path(task["id"]).parent.mkdir(parents=True, exist_ok=True)
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id),
-                    "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"], "AB_WORKDIR": str(workdir),
+                    "AB_HOME": home, "AB_RUN_HOME": home, "AB_BOARD": cur["board"], "AB_WORKDIR": str(workdir), "AB_OUT": str(store.out_dir(task["id"])),
                     "AB_PROGRESS": str(progress_path(task["id"])),
                     "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
         abenv = {k: env[k] for k in ("AB_TASK", "AB_ACTOR", "AB_BOARD", "AB_RUN", "AB_HOME")}
@@ -1359,8 +1391,9 @@ class Runner:
         out_path, err_path = str(runs_dir / f"{run_id}.out"), str(runs_dir / f"{run_id}.err")
         env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
         home = str(store.HOME)
+        env.update(store.board_env(c, cur["board"]))  # cfg board_env
         env.update({"AB_TASK": task["id"], "AB_ACTOR": owner, "AB_RUN": str(run_id), "AB_HOME": home, "AB_RUN_HOME": home,
-                    "AB_BOARD": cur["board"], "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
+                    "AB_BOARD": cur["board"], "AB_OUT": str(store.out_dir(task["id"])), "PATH": ":".join(ab_path_dirs() + [env.get("PATH", "")])})
         try:
             if not cur["workdir"]:
                 Path(workdir).mkdir(parents=True, exist_ok=True)
@@ -1961,8 +1994,9 @@ class Runner:
                 if delay:  # the shared gateway may still settle the last turn into this home: deleting it now makes the gateway fail every live run
                     with tx(c):
                         store.home_trash_add(c, hermes_home, delay)
-                else:
-                    shutil.rmtree(hermes_home, ignore_errors=True)
+                elif not store.remove_run_home(hermes_home):  # via `hermes profile delete`: never rmtree a profile the gateway serves
+                    with tx(c):
+                        store.home_trash_add(c, hermes_home, store.HOME_TRASH_RETRY_S)
 
 
 GATEWAY_LOST_RE = re.compile(r"Gateway disconnected")

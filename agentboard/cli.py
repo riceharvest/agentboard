@@ -988,8 +988,8 @@ def cmd_park(c, a, out):
     tid = a.id or os.environ.get("AB_TASK")
     if not tid:
         raise ValueError("give a task ID (or run inside a runner-started agent where AB_TASK is set)")
-    if (a.pid is not None) + bool(a.file) + bool(a.reply) + bool(a.resource) != 1:
-        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD or --resource NAME")
+    if (a.pid is not None) + bool(a.file) + bool(a.reply) + bool(a.resource) + bool(a.lock) != 1:
+        raise ValueError("give exactly one of --pid PID, --file PATH, --reply THREAD, --resource NAME or --lock PATH")
     pid = pid_start = None
     if a.pid is not None:
         pid = int(a.pid)
@@ -1001,8 +1001,8 @@ def cmd_park(c, a, out):
     grace = parse_dur(a.grace or "60s")
     grace = 60.0 if grace is None else grace
     tid, spec = store.park(c, tid, actor_of(a), text_arg(a.note, a.note_file), pid=pid, pid_start=pid_start,
-                           file=a.file, grace_s=grace, force=a.force, reply=a.reply, resource=a.resource)
-    out({"id": tid, "status": "open", "parked": True, "wake": {k: v for k, v in spec.items() if k in ("pid", "file", "grace_s")}},
+                           file=a.file, grace_s=grace, force=a.force, reply=a.reply, resource=a.resource, lock=a.lock)
+    out({"id": tid, "status": "open", "parked": True, "wake": {k: v for k, v in spec.items() if k in ("pid", "file", "grace_s", "resource", "lock")}},
         f"{tid} parked on {store.park_cond(spec)}; exit now - the runner wakes this card and a fresh agent continues with your note")
 
 
@@ -1010,13 +1010,19 @@ def cmd_resources(c, a, out):
     caps, down = store.cfg(c, "resources") or {}, {str(x).lower() for x in (store.cfg(c, "resources_down") or [])}
     held = store.resource_holders(c)
     want = {}
-    for r in c.execute("SELECT id, labels FROM tasks WHERE status='open'"):
-        for n in store.card_needs(r["labels"]):
+    for r in c.execute("SELECT id, labels, board FROM tasks WHERE status='open'"):
+        for n in store.board_needs(c, r["labels"], r["board"]):
             want.setdefault(n, []).append(r["id"])
     rows = []
     for n in sorted(set(caps) | down | set(held) | set(want)):
         rows.append({"resource": n, "capacity": int(caps.get(n, 1)), "down": n in down, "held_by": held.get(n, []), "waiting": len(want.get(n, []))})
     out(rows, lambda d: "\n".join(f"{r['resource']}: {len(r['held_by'])}/{r['capacity']} held{' (DOWN)' if r['down'] else ''} by {', '.join(r['held_by']) or '-'}; {r['waiting']} cards want it" for r in d) or "no resources in use")
+
+
+def cmd_waves(c, a, out):
+    from . import waves as waves_mod
+    d = waves_mod.compute(c, None if a.all_boards else read_board_of(c, a))
+    out(d, waves_mod.render)
 
 
 def cmd_cancel(c, a, out):
@@ -1276,6 +1282,27 @@ def cmd_outcomes(c, a, out):
     from . import outcomes
     rep = outcomes.ledger(c, parse_dur(a.since) if a.since else None, a.by)
     out(rep, outcomes.render)
+
+
+def cmd_mine(c, a, out):
+    from . import knowledge
+    bd = None if a.all_boards else (a.board or None)
+    rep = knowledge.mine(c, parse_dur(a.since) if a.since else None, board=bd, scan_logs=not a.no_logs)
+    if a.write:
+        rep["saved_priors"] = knowledge.save_priors(c, rep)
+    out(rep, knowledge.render_mine)
+
+
+def cmd_priors(c, a, out):
+    from . import knowledge
+    data = knowledge.load_priors(c)
+    out(data, lambda d: knowledge.render_priors(d, board=a.board, task_type=a.type))
+
+
+def cmd_worktrees(c, a, out):
+    wt_root = os.path.join(store.HOME, "worktrees")
+    rep = unmerged_mod.prune_worktrees(c, wt_root, dry_run=not a.apply, include_unmerged=a.include_unmerged, board=a.board)
+    out(rep, unmerged_mod.render_prune)
 
 
 def cmd_harvest(c, a, out):
@@ -2307,6 +2334,9 @@ def build_parser():
     s.add_argument("--why")
     s.add_argument("--force", action="store_true")
 
+    s = sub("waves", cmd_waves, "dependency waves, critical path and parallelism of the unfinished cards (est_s label, else historic run time)")
+    s.add_argument("--all-boards", "-A", action="store_true", dest="all_boards", help="all boards instead of the current one")
+
     s = sub("resources", cmd_resources, "named resources (label needs=a,b; gpu=1 means needs=gpu): capacity, holders, down, who waits")
 
     s = sub("park", cmd_park, "park a claimed card on a long external job and exit; the runner resumes it with a fresh agent")
@@ -2315,6 +2345,7 @@ def build_parser():
     s.add_argument("--file", help="wake when this file exists and stops growing for --grace")
     s.add_argument("--reply", metavar="THREAD", help="wake when someone else posts in THREAD (e.g. the m<id> printed by `ab ask`); the reply goes in the next brief")
     s.add_argument("--resource", help="wake when this named resource (label needs=NAME) is free and not down")
+    s.add_argument("--lock", metavar="PATH", help="wake when this lockfile is absent or its OS flock is free")
     s.add_argument("--grace", default="60s", help="file stability window (default 60s)")
     s.add_argument("--note", help="what you wait for and what the next agent should do ('-' reads stdin)")
     s.add_argument("--note-file", help="read the note from this file")
@@ -2379,6 +2410,23 @@ def build_parser():
     s = sub("outcomes", cmd_outcomes, "outcome ledger: runs, tokens, $ per accepted outcome and failure classes (read-only)")
     s.add_argument("--since", help="e.g. 24h, 7d (runs started in that window; first_run is the earliest run inside that window, so --since can move it)")
     s.add_argument("--by", default="label:type,harness,tier", help="comma list of label:NAME, harness, tier, model, board, bucket")
+
+    s = sub("mine", cmd_mine, "mine runs, outcomes, reviews and logs into failure hotspots, template A/B and compact priors")
+    s.add_argument("--since", help="e.g. 7d, 14d (default: all runs)")
+    s.add_argument("--board", help="restrict mining to one board")
+    s.add_argument("--all-boards", action="store_true", help="mine across all boards (default)")
+    s.add_argument("--no-logs", action="store_true", help="skip tail-scanning run .out/.err logs")
+    s.add_argument("--write", action="store_true", help="persist distilled priors into control._knowledge_priors for brief injection")
+
+    s = sub("priors", cmd_priors, "show auto-mined pitfalls & review priors stored by `ab mine --write`")
+    s.add_argument("--board", help="filter by board")
+    s.add_argument("--type", help="filter by task type")
+
+    s = sub("worktrees", cmd_worktrees, "safely prune clean, merged worktrees of finished (done/cancelled/dead) tasks")
+    s.add_argument("action", nargs="?", default="prune", choices=["prune"])
+    s.add_argument("--apply", action="store_true", help="actually remove eligible worktrees (default: dry-run)")
+    s.add_argument("--include-unmerged", action="store_true", help="also remove clean finished worktrees whose branch is unmerged")
+    s.add_argument("--board", help="restrict to one board")
 
     s = sub("harvest", cmd_harvest, "read new usage from harness logs now")
     s.add_argument("--only", help="claude,opencode,hermes,pi")
